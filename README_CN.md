@@ -7,7 +7,7 @@ DJI Mobile SDK V5拥有更加简洁易用的无人机硬件控制接口和软件
 
 
 当前版本支持机型：
-* [H30 Series](https://enterprise.dji.com/cn/zenmuse-h30-series)
+* [禅思 H30系列](https://enterprise.dji.com/cn/zenmuse-h30-series)
 * [DJI Mini3 Pro](https://www.dji.com/cn/mini-3-pro?site=brandsite&from=landing_page)
 * [DJI Mini3](https://www.dji.com/cn/mini-3?site=brandsite&from=landing_page)
 * [Mavic 3 行业系列](https://www.dji.com/cn/mavic-3-enterprise)
