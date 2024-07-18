@@ -150,9 +150,7 @@ class FlySafeFragment : DJIFragment() {
             map.setMapType(DJIMap.MapType.NORMAL)
         }
 
-
-            map_widget.initAMap(onMapReadyListener)
-
+        map_widget.initMapLibreMap(requireContext() , onMapReadyListener)
         map_widget.onCreate(savedInstanceState) //需要再init后调用否则Amap无法显示
     }
 

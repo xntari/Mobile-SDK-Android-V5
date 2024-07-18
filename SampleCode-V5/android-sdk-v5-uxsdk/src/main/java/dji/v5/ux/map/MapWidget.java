@@ -59,7 +59,6 @@ import dji.v5.ux.core.util.MathUtil;
 import dji.v5.ux.core.util.RxUtil;
 import dji.v5.ux.core.util.SettingDefinitions;
 import dji.v5.ux.core.util.ViewUtil;
-import dji.v5.ux.mapkit.amap.provider.AMapProvider;
 import dji.v5.ux.mapkit.core.Mapkit;
 import dji.v5.ux.mapkit.core.camera.DJICameraUpdate;
 import dji.v5.ux.mapkit.core.camera.DJICameraUpdateFactory;
@@ -374,11 +373,8 @@ public class MapWidget extends ConstraintLayoutWidget<Object> implements View.On
             case HERE:
                 // removed
                 break;
-            case AMAP:
-                initAMap(null);
-                break;
             case MAPLIBRE:
-                initMapLibreMap(accessToken, null);
+                initMapLibreMap(getContext(), null);
                 break;
             case GOOGLE:
                 initGoogleMap(null);
@@ -861,31 +857,17 @@ public class MapWidget extends ConstraintLayoutWidget<Object> implements View.On
         });
     }
 
-    /**
-     * Initializes the MapWidget with AMaps.
-     *
-     * @param listener The OnMapReadyListener which will invoke the onMapReady method when the map has finished
-     *                 initializing.
-     */
-    public void initAMap(@Nullable final OnMapReadyListener listener) {
-        mapView = new AMapProvider().dispatchMapViewRequest(getContext(), null);
-        addView((ViewGroup) mapView, 0);
-        mapView.getDJIMapAsync(map -> {
-            MapWidget.this.map = map;
-            postInit(listener);
-            flyZoneHelper.initializeMap(map);
-        });
-    }
+
 
     /**
      * Initializes the MapWidget with Mapbox.
      *
      * @param listener          The OnMapReadyListener which will invoke the onMapReady method when the map has finished
      *                          initializing.
-     * @param mapboxAccessToken The API access token from Mapbox.
+     * @param context The API access context from Mapbox.
      */
-    public void initMapLibreMap(@NonNull String mapboxAccessToken, @Nullable final OnMapReadyListener listener) {
-        Mapkit.mapboxAccessToken(mapboxAccessToken);
+    public void initMapLibreMap(@NonNull Context context, @Nullable final OnMapReadyListener listener) {
+        Mapkit.init(context);
         mapView = new MaplibreProvider().dispatchMapViewRequest(getContext(), null);
         addView((ViewGroup) mapView, 0);
         mapView.getDJIMapAsync(map -> {

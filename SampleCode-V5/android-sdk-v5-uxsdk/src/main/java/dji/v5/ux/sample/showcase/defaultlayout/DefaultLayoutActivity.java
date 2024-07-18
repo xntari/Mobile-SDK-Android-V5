@@ -40,6 +40,7 @@ import androidx.drawerlayout.widget.DrawerLayout;
 
 import dji.sdk.keyvalue.value.common.CameraLensType;
 import dji.sdk.keyvalue.value.common.ComponentIndexType;
+import dji.v5.aircraft.BuildConfig;
 import dji.v5.common.video.channel.VideoChannelState;
 import dji.v5.common.video.channel.VideoChannelType;
 import dji.v5.common.video.interfaces.IVideoChannel;
@@ -174,8 +175,8 @@ public class DefaultLayoutActivity extends AppCompatActivity {
         secondaryFPVWidget.setSurfaceViewZOrderOnTop(true);
         secondaryFPVWidget.setSurfaceViewZOrderMediaOverlay(true);
 
-        mapWidget.initAMap(map -> {
-            // map.setOnMapClickListener(latLng -> onViewClick(mapWidget));
+
+        mapWidget.initMapLibreMap(getApplicationContext(), map -> {
             DJIUiSettings uiSetting = map.getUiSettings();
             if (uiSetting != null) {
                 uiSetting.setZoomControlsEnabled(false);//hide zoom widget
