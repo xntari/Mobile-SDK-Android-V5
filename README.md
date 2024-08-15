@@ -1,4 +1,4 @@
-# DJI Mobile SDK for Android V5 Latest Version 5.9.2
+# DJI Mobile SDK for Android V5 Latest Version 5.10.0
 
 [中文版](README_CN.md)
 
@@ -29,10 +29,9 @@ Supported Product:
 │   │   ├── 5.5.0_5.6.0_android_diff.html
 │   │   ├── 5.6.0_5.7.0_android_diff.html
 │   │   ├── 5.7.0_5.8.0_android_diff.html
-│   │   └── 5.8.0_5.9.0_android_diff.html
+│   │   ├── 5.8.0_5.9.0_android_diff.html
+│   │   └── 5.9.0_5.10.0_android_diff.html
 │   └── Android_API
-│       ├── cn
-│       └── en
 ├── LICENSE.txt
 ├── README.md
 ├── README_CN.md
@@ -43,6 +42,7 @@ Supported Product:
 ```
 
 ### API Difference
+- [5.9.0_5.10.0_android_diff.html](https://dji-sdk.github.io/Mobile-SDK-Android-V5/Docs/API-Diff/5.9.0_5.10.0_android_diff.html)
 - [5.8.0_5.9.0_android_diff.html](https://dji-sdk.github.io/Mobile-SDK-Android-V5/Docs/API-Diff/5.8.0_5.9.0_android_diff.html)
 - [5.7.0_5.8.0_android_diff.html](https://dji-sdk.github.io/Mobile-SDK-Android-V5/Docs/API-Diff/5.7.0_5.8.0_android_diff.html)
 - [5.6.0_5.7.0_android_diff.html](https://dji-sdk.github.io/Mobile-SDK-Android-V5/Docs/API-Diff/5.6.0_5.7.0_android_diff.html)
@@ -83,7 +83,7 @@ For further detail on how to integrate the DJI Android SDK into your Android Stu
 
 ## AAR Explanation
 
-> **Notice:** sdkVersion = 5.9.2
+> **Notice:** sdkVersion = 5.10.0
 
 | SDK package | Explanation | How to use|
 | :---------------: | :-----------------:  | :---------------: |

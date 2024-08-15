@@ -1,4 +1,4 @@
-# DJI Mobile SDK for Android V5 最新版本 V5.9.2
+# DJI Mobile SDK for Android V5 最新版本 V5.10.0
 [English Version](README.md)
 
 ## DJI Mobile SDK V5 是什么?
@@ -29,10 +29,9 @@ DJI Mobile SDK V5拥有更加简洁易用的无人机硬件控制接口和软件
 │   │   ├── 5.5.0_5.6.0_android_diff.html
 │   │   ├── 5.6.0_5.7.0_android_diff.html
 │   │   ├── 5.7.0_5.8.0_android_diff.html
-│   │   └── 5.8.0_5.9.0_android_diff.html
+│   │   ├── 5.8.0_5.9.0_android_diff.html
+│   │   └── 5.9.0_5.10.0_android_diff.html
 │   └── Android_API
-│       ├── cn
-│       └── en
 ├── LICENSE.txt
 ├── README.md
 ├── README_CN.md
@@ -43,6 +42,7 @@ DJI Mobile SDK V5拥有更加简洁易用的无人机硬件控制接口和软件
 ```
 
 ### API 差异
+- [5.9.0_5.10.0_android_diff.html](https://dji-sdk.github.io/Mobile-SDK-Android-V5/Docs/API-Diff/5.9.0_5.10.0_android_diff.html)
 - [5.8.0_5.9.0_android_diff.html](https://dji-sdk.github.io/Mobile-SDK-Android-V5/Docs/API-Diff/5.8.0_5.9.0_android_diff.html)
 - [5.7.0_5.8.0_android_diff.html](https://dji-sdk.github.io/Mobile-SDK-Android-V5/Docs/API-Diff/5.7.0_5.8.0_android_diff.html)
 - [5.6.0_5.7.0_android_diff.html](https://dji-sdk.github.io/Mobile-SDK-Android-V5/Docs/API-Diff/5.6.0_5.7.0_android_diff.html)
@@ -84,7 +84,7 @@ Sample模块：
 
 ## AAR说明
 
-> **注意：** sdkVersion = 5.9.2
+> **注意：** sdkVersion = 5.10.0
 
 | SDK包| 说明| 使用方式|
 | :---------------: | :-----------------:  | :---------------: |

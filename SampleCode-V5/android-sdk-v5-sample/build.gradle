@@ -123,5 +123,5 @@ dependencies {
     implementation deps.rx3Kt
     implementation deps.dom
     kapt deps.glidecompiler
-
+    implementation deps.lynx
 }
