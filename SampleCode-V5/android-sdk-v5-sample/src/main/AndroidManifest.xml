@@ -17,6 +17,9 @@
 
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    
+    <!-- Screen wake-up for SDK registration -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- 自安装使用 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />

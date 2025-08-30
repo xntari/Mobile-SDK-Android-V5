@@ -206,9 +206,10 @@ start_hardware_probe() {
     
     info "📊 MONITORING STAGES:"
     info "   1. 🔄 App startup (HardwareProbe logs)"
-    info "   2. ⏳ SDK registration (watch for 🎉 SDK REGISTRATION SUCCESSFUL!)"
-    info "   3. 🎯 Joystick setup (watch for 🎮 STARTING GLOBAL RC STICK MONITORING)"
-    info "   4. 🎮 Live input monitoring (move your controller sticks!)"
+    info "   2. 🔋 Screen timeout prevention (keeps device active for SDK registration)"
+    info "   3. ⏳ SDK registration (watch for 🎉 SDK REGISTRATION SUCCESSFUL!)"
+    info "   4. 🎯 Joystick setup (watch for 🎮 STARTING GLOBAL RC STICK MONITORING)"
+    info "   5. 🎮 Live input monitoring (move your controller sticks!)"
     echo ""
     
     # Comprehensive logging that covers the entire workflow
@@ -233,9 +234,10 @@ start_hardware_probe() {
     echo ""
     info "⚡ WORKFLOW STATUS:"
     info "   ✅ 1. App deployed and comprehensive logging started"
-    info "   🕐 2. Waiting for SDK registration (watch for 🎉 message)..." 
-    info "   🕐 3. After SDK registers, joystick monitoring starts automatically"
-    info "   🕐 4. Then move controller sticks to see real-time input!"
+    info "   ✅ 2. Screen timeout prevention active (avoids power-saving interference)"
+    info "   🕐 3. Waiting for SDK registration (watch for 🎉 message)..." 
+    info "   🕐 4. After SDK registers, joystick monitoring starts automatically"
+    info "   🕐 5. Then move controller sticks to see real-time input!"
     echo ""
     info "🎮 READY FOR JOYSTICK INPUT:"
     info "    Once you see '🎯 ALL JOYSTICK LISTENERS READY', move your DJI controller sticks!"
