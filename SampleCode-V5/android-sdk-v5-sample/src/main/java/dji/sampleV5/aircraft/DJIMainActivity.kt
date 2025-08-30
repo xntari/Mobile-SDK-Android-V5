@@ -269,8 +269,14 @@ abstract class DJIMainActivity : AppCompatActivity() {
         var rightV = 0  // Pitch
         
         try {
+            LogUtils.i("JOYSTICK_INIT", "🎮 Setting up Left Horizontal (Yaw) listener...")
+            android.util.Log.i("JOYSTICK_INIT", "🎮 Setting up Left Horizontal (Yaw) listener...")
+            
             // Monitor Left Horizontal (Yaw)
             RemoteControllerKey.KeyStickLeftHorizontal.create().listen(this) { value ->
+                LogUtils.d("JOYSTICK_DEBUG", "Left Horizontal callback triggered - value: $value")
+                android.util.Log.d("JOYSTICK_DEBUG", "Left Horizontal callback triggered - value: $value")
+                
                 value?.let {
                     leftH = it
                     logStickInput("Left Horizontal (Yaw)", it)
@@ -278,8 +284,14 @@ abstract class DJIMainActivity : AppCompatActivity() {
                 }
             }
             
+            LogUtils.i("JOYSTICK_INIT", "🎮 Setting up Left Vertical (Throttle) listener...")
+            android.util.Log.i("JOYSTICK_INIT", "🎮 Setting up Left Vertical (Throttle) listener...")
+            
             // Monitor Left Vertical (Throttle)
             RemoteControllerKey.KeyStickLeftVertical.create().listen(this) { value ->
+                LogUtils.d("JOYSTICK_DEBUG", "Left Vertical callback triggered - value: $value")
+                android.util.Log.d("JOYSTICK_DEBUG", "Left Vertical callback triggered - value: $value")
+                
                 value?.let {
                     leftV = it
                     logStickInput("Left Vertical (Throttle)", it)
@@ -287,8 +299,14 @@ abstract class DJIMainActivity : AppCompatActivity() {
                 }
             }
             
+            LogUtils.i("JOYSTICK_INIT", "🎮 Setting up Right Horizontal (Roll) listener...")
+            android.util.Log.i("JOYSTICK_INIT", "🎮 Setting up Right Horizontal (Roll) listener...")
+            
             // Monitor Right Horizontal (Roll)
             RemoteControllerKey.KeyStickRightHorizontal.create().listen(this) { value ->
+                LogUtils.d("JOYSTICK_DEBUG", "Right Horizontal callback triggered - value: $value")
+                android.util.Log.d("JOYSTICK_DEBUG", "Right Horizontal callback triggered - value: $value")
+                
                 value?.let {
                     rightH = it
                     logStickInput("Right Horizontal (Roll)", it)
@@ -296,8 +314,14 @@ abstract class DJIMainActivity : AppCompatActivity() {
                 }
             }
             
+            LogUtils.i("JOYSTICK_INIT", "🎮 Setting up Right Vertical (Pitch) listener...")
+            android.util.Log.i("JOYSTICK_INIT", "🎮 Setting up Right Vertical (Pitch) listener...")
+            
             // Monitor Right Vertical (Pitch)  
             RemoteControllerKey.KeyStickRightVertical.create().listen(this) { value ->
+                LogUtils.d("JOYSTICK_DEBUG", "Right Vertical callback triggered - value: $value")
+                android.util.Log.d("JOYSTICK_DEBUG", "Right Vertical callback triggered - value: $value")
+                
                 value?.let {
                     rightV = it
                     logStickInput("Right Vertical (Pitch)", it)

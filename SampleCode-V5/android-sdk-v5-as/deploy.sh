@@ -191,17 +191,56 @@ launch_app() {
 start_hardware_probe() {
     local DEVICE_ID="${1:-}"
     
-    log "Starting hardware probe logging..."
+    log "🚀 Starting integrated SDK registration and joystick monitoring..."
+    info "This will monitor the complete workflow:"
+    info "  • 📱 Hardware probe (app startup)"
+    info "  • 🔐 SDK registration progress" 
+    info "  • 🎮 Joystick initialization"
+    info "  • 🕹️  Real-time joystick input (move controller sticks!)"
+    echo ""
     
-    if [[ -z "$DEVICE_ID" ]]; then
-        adb logcat -s "HardwareProbe" &
-        LOGCAT_PID=$!
-    else
-        adb -s "$DEVICE_ID" logcat -s "HardwareProbe" &
-        LOGCAT_PID=$!
+    local LOGCAT_CMD="adb"
+    if [[ -n "$DEVICE_ID" ]]; then
+        LOGCAT_CMD="adb -s $DEVICE_ID"
     fi
     
-    info "Hardware probe logging started (PID: $LOGCAT_PID)"
+    info "📊 MONITORING STAGES:"
+    info "   1. 🔄 App startup (HardwareProbe logs)"
+    info "   2. ⏳ SDK registration (watch for 🎉 SDK REGISTRATION SUCCESSFUL!)"
+    info "   3. 🎯 Joystick setup (watch for 🎮 STARTING GLOBAL RC STICK MONITORING)"
+    info "   4. 🎮 Live input monitoring (move your controller sticks!)"
+    echo ""
+    
+    # Comprehensive logging that covers the entire workflow
+    $LOGCAT_CMD logcat \
+        "HardwareProbe:D" \
+        "SDK_REGISTRATION:I" \
+        "JOYSTICK_INIT:I" \
+        "JOYSTICK_DEBUG:D" \
+        "VirtualStick:D" \
+        "RC_STICK_MONITOR:D" \
+        "RC_STICK_DIRECTION:D" \
+        "VIRTUAL_STICK_CMD:D" \
+        "FLIGHT_MAPPING:D" \
+        "FLIGHT_COMMAND:I" \
+        "FLIGHT_SAFETY:W" \
+        "GlobalJoystickMonitor:I" \
+        "DEBUG_TEST:I" \
+        "*:S" &
+    
+    LOGCAT_PID=$!
+    info "🎯 Integrated monitoring started (PID: $LOGCAT_PID)"
+    echo ""
+    info "⚡ WORKFLOW STATUS:"
+    info "   ✅ 1. App deployed and comprehensive logging started"
+    info "   🕐 2. Waiting for SDK registration (watch for 🎉 message)..." 
+    info "   🕐 3. After SDK registers, joystick monitoring starts automatically"
+    info "   🕐 4. Then move controller sticks to see real-time input!"
+    echo ""
+    info "🎮 READY FOR JOYSTICK INPUT:"
+    info "    Once you see '🎯 ALL JOYSTICK LISTENERS READY', move your DJI controller sticks!"
+    info "    No need to navigate to VirtualStick page - monitoring is global."
+    info ""
     info "Press Ctrl+C to stop logging and exit."
     
     # Wait for user interrupt
@@ -225,6 +264,7 @@ start_joystick_logging() {
     $LOGCAT_CMD logcat \
         "SDK_REGISTRATION:I" \
         "JOYSTICK_INIT:I" \
+        "JOYSTICK_DEBUG:D" \
         "VirtualStick:D" \
         "JOYSTICK_INPUT:D" \
         "JOYSTICK_DIRECTION:D" \
@@ -312,7 +352,7 @@ ARGUMENTS:
 
 OPTIONS:
     -h, --help          Show this help message
-    -l, --logs          Enable hardware probe logging after deployment
+    -l, --logs          Enable integrated SDK registration and joystick monitoring
     --no-launch         Don't launch app after installation
     --list-devices      List connected devices and exit
     -f, --find          Find and display APK location before deploy
@@ -329,7 +369,7 @@ EXAMPLES:
     $0                          # Deploy debug APK to selected device
     $0 release                  # Deploy release APK to selected device
     $0 debug 4LFCL5Q005GDF5     # Deploy debug APK to specific device
-    $0 --logs release           # Deploy release and start logging
+    $0 --logs debug             # Deploy and monitor SDK registration + joystick input
     $0 --no-launch debug        # Deploy without launching app
     $0 devices                  # List connected devices
     $0 logs                     # Monitor hardware probe logs
@@ -337,7 +377,13 @@ EXAMPLES:
     $0 vstick                   # Monitor virtual stick logs (app must be running)
     $0 status                   # Show device and app status
 
-JOYSTICK MONITORING WORKFLOW:
+INTEGRATED WORKFLOW (RECOMMENDED):
+    1. Single command: $0 --logs debug
+    2. Automatically monitors: deployment → SDK registration → joystick setup
+    3. Move DJI controller sticks once you see "🎯 ALL JOYSTICK LISTENERS READY"
+    4. Everything in one terminal - no separate commands needed!
+
+ALTERNATIVE JOYSTICK-ONLY MONITORING:
     1. Deploy app: $0 debug
     2. Monitor logs: $0 joystick  
     3. Move DJI controller sticks to see real-time logging
