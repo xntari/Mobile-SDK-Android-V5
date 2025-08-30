@@ -489,6 +489,9 @@ More refer to the release notes." </string>
     <string name="item_intelligent_flight_title">Intelligent Flight</string>
     <string name="item_intelligent_flight__description">Demonstrate how to use intelligent flight</string>
 
+    <string name="item_hardware_probe_title">Hardware Probe</string>
+    <string name="item_hardware_probe_description">Analyze controller hardware capabilities for AI inference</string>
+
     <!-- app silently upgrade preview -->
     <string name="item_app_silently_upgrade_title">APP Silently Upgrade</string>
     <string name="item_app_silently_upgrade_description">Demonstrate APP Silently Upgrade functions</string>
