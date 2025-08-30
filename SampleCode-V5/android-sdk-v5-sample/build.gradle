@@ -1,12 +1,11 @@
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
-apply plugin: 'kotlin-kapt'
 
 android {
     compileSdkVersion Integer.parseInt(project.ANDROID_COMPILE_SDK_VERSION)
 
     defaultConfig {
-        applicationId "com.dji.sampleV5.aircraft"
+        applicationId "com.example.msdksample"
         minSdkVersion Integer.parseInt(project.ANDROID_MIN_SDK_VERSION)
         targetSdkVersion Integer.parseInt(project.ANDROID_TARGET_SDK_VERSION)
         versionCode 1
@@ -127,6 +126,5 @@ dependencies {
     implementation deps.expandedit
     implementation deps.rx3Kt
     implementation deps.dom
-    kapt deps.glidecompiler
     implementation deps.lynx
 }
