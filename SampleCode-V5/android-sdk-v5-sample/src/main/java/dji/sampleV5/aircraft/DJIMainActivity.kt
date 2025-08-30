@@ -73,13 +73,21 @@ abstract class DJIMainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        // Wake up the screen and keep it on during SDK registration
+        window.addFlags(
+            android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+            android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+            android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
+            android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+        )
+        LogUtils.i("SDK_REGISTRATION", "💡 Screen woken up and will stay on during SDK registration")
+        android.util.Log.i("SDK_REGISTRATION", "💡 Screen woken up and will stay on during SDK registration")
+
         // 有一些手机从系统桌面进入的时候可能会重启main类型的activity
         // 需要校验这种情况，业界标准做法，基本所有app都需要这个
         if (!isTaskRoot && intent.hasCategory(Intent.CATEGORY_LAUNCHER) && Intent.ACTION_MAIN == intent.action) {
-
                 finish()
                 return
-
         }
 
         window.decorView.apply {
@@ -95,6 +103,10 @@ abstract class DJIMainActivity : AppCompatActivity() {
         LogUtils.i("DEBUG_TEST", "MainActivity onCreate called!")
         android.util.Log.i("DEBUG_TEST", "MainActivity onCreate with Android Log!")
         android.util.Log.i("DEBUG_TEST", "RC stick monitoring will start after SDK registration")
+        
+        // Wake up screen programmatically and ensure UI stays active
+        wakeUpScreen()
+        ensureUIActivityForSDKRegistration()
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -157,6 +169,16 @@ abstract class DJIMainActivity : AppCompatActivity() {
                 // Enhanced success logging
                 LogUtils.i("SDK_REGISTRATION", "🎉 SDK REGISTRATION SUCCESSFUL! Starting initialization...")
                 android.util.Log.i("SDK_REGISTRATION", "🎉 SDK REGISTRATION SUCCESSFUL! Starting initialization...")
+                
+                // Remove wake/keep screen flags now that SDK is registered
+                window.clearFlags(
+                    android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                    android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
+                    android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                )
+                LogUtils.i("SDK_REGISTRATION", "🔋 Screen flags cleared - SDK registration complete")
+                android.util.Log.i("SDK_REGISTRATION", "🔋 Screen flags cleared - SDK registration complete")
                 
                 msdkInfoVm.initListener()
                 
@@ -252,6 +274,72 @@ abstract class DJIMainActivity : AppCompatActivity() {
 
     private fun requestPermission() {
         requestPermissionLauncher.launch(permissionArray.toArray(arrayOf()))
+    }
+
+    /**
+     * Programmatically wake up the screen using PowerManager
+     */
+    private fun wakeUpScreen() {
+        try {
+            val powerManager = getSystemService(POWER_SERVICE) as android.os.PowerManager
+            val wakeLock = powerManager.newWakeLock(
+                android.os.PowerManager.SCREEN_BRIGHT_WAKE_LOCK or 
+                android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                "DJIApp:ScreenWakeUp"
+            )
+            
+            wakeLock.acquire(5000) // Wake for 5 seconds, then release
+            
+            LogUtils.i("SDK_REGISTRATION", "⚡ Screen wakeup triggered via PowerManager")
+            android.util.Log.i("SDK_REGISTRATION", "⚡ Screen wakeup triggered via PowerManager")
+            
+            // Release immediately as window flags will handle the rest
+            wakeLock.release()
+            
+        } catch (e: Exception) {
+            LogUtils.w("SDK_REGISTRATION", "PowerManager wake failed: ${e.message}")
+            android.util.Log.w("SDK_REGISTRATION", "PowerManager wake failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Ensure UI stays active to help SDK registration
+     * SDK registration can be delayed by power saving / screen timeout
+     */
+    private fun ensureUIActivityForSDKRegistration() {
+        LogUtils.i("SDK_REGISTRATION", "🎯 Ensuring UI activity for SDK registration...")
+        android.util.Log.i("SDK_REGISTRATION", "🎯 Ensuring UI activity for SDK registration...")
+        
+        // Periodic UI touch to keep system active during registration period
+        val uiHandler = Handler(Looper.getMainLooper())
+        
+        // Simulate light UI activity every 2 seconds for first 30 seconds
+        // This helps ensure SDK registration attempts aren't blocked by power saving
+        var touchCount = 0
+        val maxTouches = 15 // 30 seconds total
+        
+        val uiActivityRunnable = object : Runnable {
+            override fun run() {
+                if (touchCount < maxTouches) {
+                    // Light touch on the main view to keep UI active
+                    binding.root.performClick()
+                    touchCount++
+                    
+                    if (touchCount % 5 == 0) {
+                        LogUtils.d("SDK_REGISTRATION", "🔄 UI activity pulse ${touchCount}/${maxTouches}")
+                        android.util.Log.d("SDK_REGISTRATION", "🔄 UI activity pulse ${touchCount}/${maxTouches}")
+                    }
+                    
+                    uiHandler.postDelayed(this, 2000) // Every 2 seconds
+                } else {
+                    LogUtils.i("SDK_REGISTRATION", "✅ UI activity assistance completed")
+                    android.util.Log.i("SDK_REGISTRATION", "✅ UI activity assistance completed")
+                }
+            }
+        }
+        
+        // Start UI activity assistance after a short delay
+        uiHandler.postDelayed(uiActivityRunnable, 1000)
     }
 
     private fun startRCStickMonitoring() {
