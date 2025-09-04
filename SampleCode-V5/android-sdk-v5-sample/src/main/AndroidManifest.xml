@@ -106,5 +106,19 @@
             android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:exported="false"/>
+
+        <!-- DJI Android Bridge Activity for Phase 1 -->
+        <activity android:name="dji.sampleV5.aircraft.DJIBridgeActivity"
+            android:theme="@style/full_screen_theme"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="true">
+            
+            <!-- Intent filter for external launch of bridge -->
+            <intent-filter>
+                <action android:name="dji.sampleV5.aircraft.action.START_BRIDGE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
     </application>
 </manifest>

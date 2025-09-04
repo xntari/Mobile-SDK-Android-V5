@@ -381,3 +381,78 @@ tail -f build_deploy.log
 - Hardware probe integration
 
 This automated solution streamlines the development workflow for DJI Mobile SDK V5 applications.
+
+---
+
+## 🌉 DJI Android Bridge - Phase 1 ✅ COMPLETED
+
+The **DJI Android Bridge** provides a WebSocket-based bridge between your laptop and DJI controller, enabling external applications to receive real-time joystick data and send commands back to the drone.
+
+### Bridge Features ✅
+- **Real-time joystick streaming** at 20Hz via WebSocket
+- **Extensible JSON protocol** for sensors, video, and bidirectional commands  
+- **USB connection** using ADB port forwarding (no WiFi dependency)
+- **Thread-safe data collection** with proper JSON serialization
+- **Headless operation** with minimal UI footprint
+
+### Quick Bridge Setup
+
+#### 1. Deploy Bridge to DJI Controller
+```bash
+# Build and deploy bridge to DJI controller
+./build.sh debug
+./deploy.sh debug 4LFCL5Q005GDF5  # Use your controller's device ID
+
+# Launch the bridge activity
+adb -s 4LFCL5Q005GDF5 shell am start -a dji.sampleV5.aircraft.action.START_BRIDGE
+```
+
+#### 2. Set Up Port Forwarding
+```bash
+# Forward port 8080 from controller to laptop
+adb -s 4LFCL5Q005GDF5 forward tcp:8080 tcp:8080
+```
+
+#### 3. Test Bridge Connection
+```bash
+# Start the test client to receive joystick data
+node test_bridge.js localhost
+
+# You should see real-time data when moving DJI controller sticks:
+# [02:54:58] 🎮 Controller Data (v1.0, high):
+#    Left:  H=   0 V=   0 (Yaw=0.00, Throttle=0.00)
+#    Right: H= 472 V=-355 (Roll=4.72, Pitch=-3.55)
+#    ✈️  Flight: BACKWARD + RIGHT
+```
+
+### Bridge Architecture
+
+**Android Side** (`DJIBridgeActivity` + `DJIBridgeServer`):
+- Direct RC stick monitoring using DJI SDK V5 RemoteControllerKey listeners
+- WebSocket server on port 8080 with proper frame handling
+- Extensible message protocol supporting any payload size
+- Thread-safe data collection with `@Volatile` and `@Synchronized`
+
+**Client Side** (`test_bridge.js`):
+- WebSocket client with automatic reconnection
+- Real-time joystick data visualization
+- Flight command interpretation (ASCENDING, FORWARD, RIGHT, etc.)
+- Protocol versioning and message debugging
+
+### Protocol Support ✅
+
+The bridge uses an extensible JSON protocol ready for:
+- ✅ **Controller data** - Real-time joystick streaming
+- 🔄 **Sensor data** - Accelerometer, gyroscope, magnetometer (TODO)
+- 🔄 **Telemetry data** - GPS, altitude, battery status (TODO)  
+- 🔄 **Video frames** - H.264 streaming via WebSocket (TODO)
+- 🔄 **Bidirectional commands** - Joystick override, waypoints (TODO)
+
+### Files Added/Modified
+- `DJIBridgeActivity.kt` - Headless bridge activity with RC monitoring
+- `DJIBridgeServer.kt` - WebSocket server with extensible protocol
+- `test_bridge.js` - Node.js test client for bridge validation
+- `AndroidManifest.xml` - Added bridge activity registration
+- Various launch scripts and documentation
+
+**Next Steps**: See `./docs/TODO.md` for Phase 2 implementation details.

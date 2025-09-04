@@ -1,0 +1,3 @@
+[submodule "daemonBravo"]
+	path = daemonBravo
+	url = git@github.com:goodquestsonly/daemonBravo.git

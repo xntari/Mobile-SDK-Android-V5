@@ -497,4 +497,12 @@ More refer to the release notes." </string>
     <string name="item_app_silently_upgrade_description">Demonstrate APP Silently Upgrade functions</string>
     <string name="btn_silently_upgrade_package">Set Silently Upgrade Package</string>
     <string name="btn_install_test_app">Install Test App</string>
+
+    <!-- DJI Android Bridge -->
+    <string name="item_android_bridge_title">Android Bridge</string>
+    <string name="item_android_bridge_description">Phase 1: WebSocket server streaming controller data to laptop</string>
+    <string name="btn_start_bridge">Start Bridge Server</string>
+    <string name="btn_stop_bridge">Stop Bridge Server</string>
+    <string name="bridge_status_running">Bridge running on port 8080</string>
+    <string name="bridge_status_stopped">Bridge stopped</string>
 </resources>
