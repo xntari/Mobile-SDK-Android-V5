@@ -228,4 +228,10 @@
         android:label="intelligent_flight_page"
         tools:layout="@layout/frag_intelligent_flight_page"/>
 
+    <fragment
+        android:id="@+id/android_bridge_page"
+        android:name="dji.sampleV5.aircraft.pages.AndroidBridgeFragment"
+        android:label="android_bridge_page"
+        tools:layout="@layout/frag_android_bridge_page"/>
+
 </navigation>
