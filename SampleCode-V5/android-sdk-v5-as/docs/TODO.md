@@ -1,17 +1,55 @@
-# DJI Android Bridge + Controller Interface - Complete Project Handoff
+# DJI Android Bridge + Controller Interface
 
-> **🎯 You are here**: Phase 3B ✅ COMPLETE - Live H.264 video streaming system fully working
-> **⚡ Immediate next steps**: Investigate DJI map data access, real compass/IMU integration, auto-rotating minimap  
-> **🔧 Current State**: Full end-to-end system with live video, telemetry, and responsive UI
+## 🚀 TLDR - Quick Start (Project Scout Bot/Drone)
+
+**What This Project Achieves:**
+- **End Result**: External flight control system using natural language undestanding, dynamic waypoints, with real-time HUD, live videof for computer vision and active inference
+- **DJI Android Bridge** streams live H.264 video + sensor data from DJI controller to laptop via WebSocket
+- **DJI Controller Interface** is a complete desktop app replicating DJI controller UI with live video feed
+
+> ** Just finished**: Phase 3B  COMPLETE - Live H.264 video streaming system fully working
+> ** Immediate next steps**: Investigate DJI map data access, real compass/IMU integration, auto-rotating minimap  
+> ** Current State**: Full end-to-end system with live video, telemetry, and responsive UI
 
 ---
 
-## 🚀 TLDR - Quick Start 
+## **PROJECT ARCHITECTURE OVERVIEW**
 
-**What This Project Achieves:**
-- **DJI Android Bridge** streams live H.264 video + sensor data from DJI controller to laptop via WebSocket
-- **DJI Controller Interface** is a complete desktop app replicating DJI controller UI with live video feed
-- **End Result**: External flight control system with real-time HUD, live video, and potential for computer vision
+### **Current System Flow**
+```
+┌─────────────────┐    WebSocket      ┌──────────────────┐    Electron IPC     ┌─────────────────┐
+│  DJI Controller │◄─────────────────►│ Electron Main    │◄───────────────────►│ React Interface │
+│   (Android)     │  JSON + H.264     │   Process        │   Video + Data      │   (Desktop UI)  │
+│                 │                   │                  │                     │                 │
+│ ┌─────────────┐ │                   │ ┌──────────────┐ │                     │ ┌─────────────┐ │
+│ │DJI SDK V5   │ │                   │ │ WebSocket    │ │                     │ │ Live Video  │ │
+│ │Bridge Server│ │                   │ │ Client       │ │                     │ │ 1920x1080   │ │
+│ │:8080        │ │                   │ │              │ │                     │ │ WebCodecs   │ │
+│ │             │ │                   │ └──────────────┘ │                     │ └─────────────┘ │
+│ │ ┌─────────┐ │ │                   │                  │                     │                 │
+│ │ │Camera   │ │ │                   │ ┌──────────────┐ │                     │ ┌─────────────┐ │
+│ │ │H.264    │ │ │                   │ │ Video Frame  │ │                     │ │ Telemetry   │ │
+│ │ │Streamer │ │ │                   │ │ Handler      │ │                     │ │ HSI Compass │ │
+│ │ └─────────┘ │ │                   │ └──────────────┘ │                     │ │ Mini Map    │ │
+│ └─────────────┘ │                   │                  │                     │ └─────────────┘ │
+└─────────────────┘                   └──────────────────┘                     └─────────────────┘
+```
+
+### **Data Flow Rates**
+- **Controller input**: 20Hz (50ms intervals)
+- **Telemetry data**: 5Hz (200ms intervals) 
+- **Battery data**: 1Hz (1000ms intervals)
+- **H.264 video**: ~30fps variable rate (~26KB per frame)
+- **Total bandwidth**: ~800KB/s sustained
+
+### **Key Technical Achievements**
+1. **WebCodecs Integration** - Hardware-accelerated H.264 decoding in browser/Electron
+2. **Binary WebSocket Protocol** - Efficient video frame transmission (metadata + raw H.264)
+3. **Thread-safe Android Bridge** - Multiple data sources coordinated safely
+4. **Responsive React UI** - Professional DJI-style interface with live data binding
+5. **Cross-platform Support** - Works on macOS, Windows, Linux
+---
+
 
 **To Get the Full System Running Right Now:**
 ```bash
@@ -27,13 +65,10 @@ npm run dev:browser  # Opens http://localhost:3000 - shows LIVE VIDEO from drone
 npm run build && npm run dev  # Desktop Electron app with live video
 ```
 
-**You will see:**
-- ✅ **Live H.264 video** from drone camera at 1920x1080, ~26KB/frame
-- ✅ **Real-time telemetry** - GPS, altitude, attitude, speed
-- ✅ **Live joystick data** - All 4 axes at 20Hz
-- ✅ **Professional UI** - Complete DJI-style interface
-- ✅ **Small HSI compass** - Bottom-right overlay with live attitude
-- ✅ **Responsive design** - Resizable window maintaining aspect ratios
+**Current state:**
+- **Live H.264 video** from drone camera at 1920x1080, ~26KB/frame
+- **Real-time telemetry** - GPS, altitude, attitude, speed
+- **Live joystick data** - All 4 axes at 20Hz
 
 ---
 
@@ -169,43 +204,6 @@ const MapDisplay = ({ aircraftLocation, heading, homeLocation }) => {
 - `dji-controller-interface/src/hooks/useBridgeCommands.ts` - Command sending
 - UI components for manual flight control
 
----
-
-## 🔧 **PROJECT ARCHITECTURE OVERVIEW**
-
-### **Current System Flow**
-```
-┌─────────────────┐    WebSocket     ┌──────────────────┐    Electron IPC    ┌─────────────────┐
-│  DJI Controller │◄─────────────────►│ Electron Main    │◄───────────────────►│ React Interface │
-│   (Android)     │  JSON + H.264    │   Process        │   Video + Data     │   (Desktop UI)  │
-│                 │                  │                  │                    │                 │
-│ ┌─────────────┐ │                  │ ┌──────────────┐ │                    │ ┌─────────────┐ │
-│ │DJI SDK V5   │ │                  │ │ WebSocket    │ │                    │ │ Live Video  │ │
-│ │Bridge Server│ │                  │ │ Client       │ │                    │ │ 1920x1080   │ │
-│ │:8080        │ │                  │ │              │ │                    │ │ WebCodecs   │ │
-│ │             │ │                  │ └──────────────┘ │                    │ └─────────────┘ │
-│ │ ┌─────────┐ │ │                  │                  │                    │                 │
-│ │ │Camera   │ │ │                  │ ┌──────────────┐ │                    │ ┌─────────────┐ │
-│ │ │H.264    │ │ │                  │ │ Video Frame  │ │                    │ │ Telemetry   │ │
-│ │ │Streamer │ │ │                  │ │ Handler      │ │                    │ │ HSI Compass │ │
-│ │ └─────────┘ │ │                  │ └──────────────┘ │                    │ │ Mini Map    │ │
-│ └─────────────┘ │                  │                  │                    │ └─────────────┘ │
-└─────────────────┘                  └──────────────────┘                    └─────────────────┘
-```
-
-### **Data Flow Rates**
-- **Controller input**: 20Hz (50ms intervals)
-- **Telemetry data**: 5Hz (200ms intervals) 
-- **Battery data**: 1Hz (1000ms intervals)
-- **H.264 video**: ~30fps variable rate (~26KB per frame)
-- **Total bandwidth**: ~800KB/s sustained
-
-### **Key Technical Achievements**
-1. **WebCodecs Integration** - Hardware-accelerated H.264 decoding in browser/Electron
-2. **Binary WebSocket Protocol** - Efficient video frame transmission (metadata + raw H.264)
-3. **Thread-safe Android Bridge** - Multiple data sources coordinated safely
-4. **Responsive React UI** - Professional DJI-style interface with live data binding
-5. **Cross-platform Support** - Works on macOS, Windows, Linux
 
 ---
 
