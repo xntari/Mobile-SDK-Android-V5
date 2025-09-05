@@ -84,14 +84,21 @@ class DJIBridgeClient {
             const message = JSON.parse(data.toString());
             
             if (message.type === 'controller_data') {
-                console.log('🔍 DEBUG: Received controller_data message');
+                console.log('🎮 DEBUG: Received controller_data message');
                 this.displayControllerData(message);
+            } else if (message.type === 'telemetry_data') {
+                console.log('📡 DEBUG: Received telemetry_data message');
+                this.displayTelemetryData(message);
+            } else if (message.type === 'battery_status') {
+                console.log('🔋 DEBUG: Received battery_status message');
+                this.displayBatteryData(message);
             } else if (message.type === 'test') {
                 console.log('✅ Test message from bridge:', message.message);
                 console.log(`   Timestamp: ${new Date(message.timestamp).toISOString()}`);
                 console.log('');
             } else {
                 console.log('📨 Unknown message type:', message.type);
+                console.log('   Full message:', JSON.stringify(message, null, 2));
             }
             
         } catch (error) {
@@ -149,6 +156,94 @@ class DJIBridgeClient {
         else if (flight.yaw < -threshold) commands.push('ROTATE_LEFT');
         
         return commands.length > 0 ? commands : ['HOVERING'];
+    }
+    
+    displayTelemetryData(data) {
+        const timestamp = new Date(data.timestamp).toISOString().split('T')[1].split('.')[0];
+        const version = data.version || 'unknown';
+        const priority = data.priority || 'normal';
+        
+        console.log(`[${timestamp}] 📡 Telemetry Data (v${version}, ${priority}):`);
+        
+        if (data.error) {
+            console.log(`   ❌ Error: ${data.error}`);
+        } else {
+            // Basic telemetry info
+            console.log(`   🛸 Altitude: ${data.altitude?.toFixed(2) || 'N/A'}m`);
+            console.log(`   🏃 Ground Speed: ${data.ground_speed?.toFixed(2) || 'N/A'}m/s`);
+            console.log(`   📈 Vertical Speed: ${data.vertical_speed?.toFixed(2) || 'N/A'}m/s`);
+            console.log(`   🧭 Flight Mode: ${data.flight_mode || 'UNKNOWN'}`);
+            console.log(`   🏠 Distance to Home: ${data.distance_to_home?.toFixed(2) || 'N/A'}m`);
+            
+            // GPS info
+            console.log(`   🛰️  GPS Satellites: ${data.gps_satellite_count || 0} (${data.gps_signal_quality || 'NONE'})`);
+            
+            // Location info
+            if (data.location && data.location.latitude !== 0) {
+                console.log(`   📍 Aircraft: ${data.location.latitude.toFixed(6)}, ${data.location.longitude.toFixed(6)}`);
+            }
+            if (data.home_location && data.home_location.latitude !== 0) {
+                console.log(`   🏠 Home: ${data.home_location.latitude.toFixed(6)}, ${data.home_location.longitude.toFixed(6)}`);
+            }
+            
+            // Status indicators
+            const statusIndicators = [];
+            if (data.are_motors_on) statusIndicators.push('🚁 MOTORS_ON');
+            if (data.is_flying) statusIndicators.push('✈️ FLYING');
+            if (statusIndicators.length > 0) {
+                console.log(`   Status: ${statusIndicators.join(' | ')}`);
+            }
+        }
+        console.log('');
+    }
+    
+    displayBatteryData(data) {
+        const timestamp = new Date(data.timestamp).toISOString().split('T')[1].split('.')[0];
+        const version = data.version || 'unknown';
+        const priority = data.priority || 'normal';
+        
+        console.log(`[${timestamp}] 🔋 Battery Status (v${version}, ${priority}):`);
+        
+        if (data.error) {
+            console.log(`   ❌ Error: ${data.error}`);
+        } else {
+            // Battery charge info
+            const percentage = data.percentage || 0;
+            const voltageInfo = data.voltage ? `${data.voltage.toFixed(2)}V` : 'N/A';
+            const tempInfo = data.temperature ? `${data.temperature.toFixed(1)}°C` : 'N/A';
+            
+            // Color code battery percentage
+            let batteryIcon = '🔋';
+            if (percentage < 20) batteryIcon = '🪫';
+            else if (percentage < 50) batteryIcon = '🔋';
+            else batteryIcon = '🔋';
+            
+            console.log(`   ${batteryIcon} Charge: ${percentage}% (${data.remaining_mah || 0}mAh)`);
+            console.log(`   ⚡ Voltage: ${voltageInfo} | Current: ${data.current?.toFixed(2) || 'N/A'}A`);
+            console.log(`   🌡️  Temperature: ${tempInfo}`);
+            console.log(`   📊 Capacity: ${data.full_charge_capacity || 0}mAh`);
+            
+            // Battery status indicators
+            const statusIndicators = [];
+            if (data.is_being_charged) statusIndicators.push('🔌 CHARGING');
+            if (data.warning_level && data.warning_level !== 'NONE') {
+                statusIndicators.push(`⚠️ ${data.warning_level}`);
+            }
+            if (data.connection_state && data.connection_state !== 'UNKNOWN') {
+                statusIndicators.push(`🔗 ${data.connection_state}`);
+            }
+            
+            if (statusIndicators.length > 0) {
+                console.log(`   Status: ${statusIndicators.join(' | ')}`);
+            }
+            
+            // Cell voltage details (if available)
+            if (data.cell_voltages && data.cell_voltages.length > 0) {
+                const cellVoltages = data.cell_voltages.map(v => `${v.toFixed(2)}V`).join(', ');
+                console.log(`   🔋 Cells: [${cellVoltages}]`);
+            }
+        }
+        console.log('');
     }
     
     handleUserInput(input) {
