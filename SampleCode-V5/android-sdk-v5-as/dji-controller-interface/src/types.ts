@@ -113,6 +113,7 @@ export interface HSICompassProps {
   attitude: TelemetryData['attitude'] | null;
   heading: number;
   homeDirection?: number;
+  size?: 'small' | 'normal';
 }
 
 export interface MapDisplayProps {

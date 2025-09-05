@@ -36,9 +36,9 @@ export const App: React.FC = () => {
       />
       
       {/* Main Content Area */}
-      <div className="flex-1 flex relative">
+      <div className="flex-1 flex relative min-h-0">
         {/* Left Side - Flight Controls */}
-        <div className="w-32 bg-black bg-opacity-60 flex flex-col gap-3 p-3 z-10">
+        <div className="w-24 sm:w-32 bg-black bg-opacity-60 flex flex-col gap-3 p-2 sm:p-3 z-10 flex-shrink-0">
           <TakeOffButton />
           <ReturnHomeButton />
           
@@ -54,7 +54,7 @@ export const App: React.FC = () => {
         </div>
         
         {/* Center - Video Display */}
-        <div className="flex-1 relative">
+        <div className="flex-1 relative bg-black min-w-0">
           <FPVDisplay className="w-full h-full" />
           
           {/* Mini FPV overlay (secondary camera) */}
@@ -62,6 +62,16 @@ export const App: React.FC = () => {
             <div className="w-36 h-24 bg-gray-900 border border-gray-600 rounded flex items-center justify-center text-xs text-gray-400">
               Secondary FPV
             </div>
+          </div>
+          
+          {/* HSI Compass - Bottom Right Corner */}
+          <div className="absolute bottom-4 right-4 z-20 w-32 h-32">
+            <HSICompass 
+              attitude={bridgeData.telemetry?.attitude || null}
+              heading={bridgeData.telemetry?.heading || 0}
+              homeDirection={bridgeData.telemetry?.home_bearing}
+              size="small"
+            />
           </div>
           
           {/* Flight data overlay */}
@@ -107,7 +117,7 @@ export const App: React.FC = () => {
         </div>
         
         {/* Right Side - Camera Controls & Map */}
-        <div className="w-80 bg-black bg-opacity-60 flex flex-col z-10">
+        <div className="w-64 lg:w-80 bg-black bg-opacity-60 flex flex-col z-10 flex-shrink-0">
           <CameraControls cameraData={bridgeData.camera} />
           
           {/* Map at bottom right */}
@@ -118,15 +128,6 @@ export const App: React.FC = () => {
             />
           </div>
         </div>
-      </div>
-      
-      {/* Bottom - HSI Compass */}
-      <div className="h-48 bg-black bg-opacity-80 flex items-center justify-center border-t border-gray-700">
-        <HSICompass 
-          attitude={bridgeData.telemetry?.attitude || null}
-          heading={bridgeData.telemetry?.heading || 0}
-          homeDirection={bridgeData.telemetry?.home_bearing}
-        />
       </div>
     </div>
     );

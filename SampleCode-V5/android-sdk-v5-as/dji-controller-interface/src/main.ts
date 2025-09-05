@@ -25,14 +25,15 @@ class DJIControllerApp {
     this.mainWindow = new BrowserWindow({
       width: 1920,
       height: 1080,
-      minWidth: 1280,
-      minHeight: 720,
+      minWidth: 800,
+      minHeight: 600,
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
         preload: path.join(__dirname, 'preload.js'),
       },
-      frame: false,
+      frame: true,
+      resizable: true,
       alwaysOnTop: false,
       title: 'DJI Controller Interface',
       backgroundColor: '#0D1117',
