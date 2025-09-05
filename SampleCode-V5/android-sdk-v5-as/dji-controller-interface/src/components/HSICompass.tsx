@@ -4,7 +4,8 @@ import { HSICompassProps } from '../types';
 export const HSICompass: React.FC<HSICompassProps> = ({ 
   attitude, 
   heading, 
-  homeDirection 
+  homeDirection,
+  size = 'normal'
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -141,60 +142,72 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     drawCompassRose(ctx, centerX, centerY, radius, heading, homeDirection, attitude || undefined);
   }, [attitude, heading, homeDirection]);
 
+  // Size configurations
+  const sizeConfig = size === 'small' 
+    ? { width: 128, height: 128, canvasWidth: 160, canvasHeight: 160 }
+    : { width: 350, height: 200, canvasWidth: 350, canvasHeight: 200 };
+
   return (
-    <div className="glass-panel p-4">
-      <div className="text-center mb-2">
-        <div className="text-sm font-semibold text-gray-300">
-          Horizontal Situation Indicator
+    <div className={`glass-panel ${size === 'small' ? 'p-2' : 'p-4'}`}>
+      {size === 'normal' && (
+        <div className="text-center mb-2">
+          <div className="text-sm font-semibold text-gray-300">
+            Horizontal Situation Indicator
+          </div>
         </div>
-      </div>
+      )}
       
       <div className="flex justify-center">
         <canvas 
           ref={canvasRef}
-          width={350}
-          height={200}
+          width={sizeConfig.canvasWidth}
+          height={sizeConfig.canvasHeight}
           className="border border-gray-600 rounded"
-          style={{ width: '350px', height: '200px' }}
+          style={{ 
+            width: `${sizeConfig.width}px`, 
+            height: `${sizeConfig.height}px` 
+          }}
         />
       </div>
       
-      {/* Digital readouts */}
-      <div className="mt-3 flex justify-between text-xs">
-        <div className="text-center">
-          <div className="text-gray-400">HDG</div>
-          <div className="font-mono text-dji-blue">
-            {heading.toFixed(0)}°
-          </div>
-        </div>
-        
-        {attitude && (
-          <>
-            <div className="text-center">
-              <div className="text-gray-400">ROLL</div>
-              <div className="font-mono text-yellow-400">
-                {attitude.roll.toFixed(1)}°
-              </div>
-            </div>
-            
-            <div className="text-center">
-              <div className="text-gray-400">PITCH</div>
-              <div className="font-mono text-green-400">
-                {attitude.pitch.toFixed(1)}°
-              </div>
-            </div>
-          </>
-        )}
-        
-        {homeDirection !== undefined && (
+      {/* Digital readouts - only show for normal size */}
+      {size === 'normal' && (
+        <div className="mt-3 flex justify-between text-xs">
           <div className="text-center">
-            <div className="text-gray-400">HOME</div>
-            <div className="font-mono text-status-good">
-              {homeDirection.toFixed(0)}°
+            <div className="text-gray-400">HDG</div>
+            <div className="font-mono text-dji-blue">
+              {heading.toFixed(0)}°
             </div>
           </div>
-        )}
-      </div>
+          
+          {attitude && (
+            <>
+              <div className="text-center">
+                <div className="text-gray-400">ROLL</div>
+                <div className="font-mono text-yellow-400">
+                  {attitude.roll.toFixed(1)}°
+                </div>
+              </div>
+              
+              <div className="text-center">
+                <div className="text-gray-400">PITCH</div>
+                <div className="font-mono text-green-400">
+                  {attitude.pitch.toFixed(1)}°
+                </div>
+              </div>
+            </>
+          )}
+          
+          {homeDirection !== undefined && (
+            <div className="text-center">
+              <div className="text-gray-400">HOME</div>
+              <div className="font-mono text-status-good">
+                {homeDirection.toFixed(0)}°
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };

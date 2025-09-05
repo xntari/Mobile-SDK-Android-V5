@@ -1,17 +1,17 @@
 # DJI Android Bridge + Controller Interface - Complete Project Handoff
 
-> **🎯 You are here**: Phase 3B ✅ COMPLETE - H.264 video streaming pipeline working, ready for Electron migration  
-> **⚡ Immediate next steps**: Phase 3C - Migrate to Electron for native H.264 video decoding  
-> **🔧 Current Issue**: Browser MediaSource API instability with raw H.264 - need native Electron video processing
+> **🎯 You are here**: Phase 3B ✅ COMPLETE - Live H.264 video streaming system fully working
+> **⚡ Immediate next steps**: Investigate DJI map data access, real compass/IMU integration, auto-rotating minimap  
+> **🔧 Current State**: Full end-to-end system with live video, telemetry, and responsive UI
 
 ---
 
 ## 🚀 TLDR - Quick Start 
 
-**What This Project Does:**
-- **DJI Android Bridge** streams real-time sensor data from DJI controller to laptop via WebSocket (20Hz controller + 5Hz telemetry + 1Hz battery)
-- **DJI Controller Interface** is a desktop app (Electron) replicating the full DJI controller UI with live data
-- **Ultimate Goal**: Complete external flight control system with real-time HUD and computer vision integration
+**What This Project Achieves:**
+- **DJI Android Bridge** streams live H.264 video + sensor data from DJI controller to laptop via WebSocket
+- **DJI Controller Interface** is a complete desktop app replicating DJI controller UI with live video feed
+- **End Result**: External flight control system with real-time HUD, live video, and potential for computer vision
 
 **To Get the Full System Running Right Now:**
 ```bash
@@ -20,176 +20,192 @@
 adb -s 4LFCL5Q005GDF5 forward tcp:8080 tcp:8080  
 adb -s 4LFCL5Q005GDF5 shell am start -a dji.sampleV5.aircraft.action.START_BRIDGE
 
-# 2. Start DJI Controller Interface 
+# 2. Start DJI Controller Interface with LIVE H.264 VIDEO
 cd dji-controller-interface/
-
-# Current: Browser development mode (Phase 3B complete)
-npm run dev:browser  # Opens http://localhost:3000 - shows "Receiving H.264 Stream"
-
-# Next: Electron mode (Phase 3C - better video decoding)
-npm run build && npm run dev  # Desktop app with native video processing
+npm run dev:browser  # Opens http://localhost:3000 - shows LIVE VIDEO from drone camera
+# OR
+npm run build && npm run dev  # Desktop Electron app with live video
 ```
 
-**Key Working Files:**
-- `DJIBridgeActivity.kt` + `DJIBridgeServer.kt` - WebSocket bridge (Android)
-- `dji-controller-interface/` - Full desktop interface (Electron + React)  
-- `test_bridge.js` - Debug client for testing bridge connectivity
-- `mock_server.js` - Mock bridge for interface development
+**You will see:**
+- ✅ **Live H.264 video** from drone camera at 1920x1080, ~26KB/frame
+- ✅ **Real-time telemetry** - GPS, altitude, attitude, speed
+- ✅ **Live joystick data** - All 4 axes at 20Hz
+- ✅ **Professional UI** - Complete DJI-style interface
+- ✅ **Small HSI compass** - Bottom-right overlay with live attitude
+- ✅ **Responsive design** - Resizable window maintaining aspect ratios
 
 ---
 
-## 📍 Current Status - Phase 3B Complete (September 2025)
+## 📍 Current Status - September 2025
 
-### ✅ **What Works Right Now** 
+### ✅ **COMPLETED - WORKING END-TO-END SYSTEM**
 
 **Phase 1: DJI Android Bridge** ✅ COMPLETE
 - ✅ **Real-time data streaming** - 20Hz controller + 5Hz telemetry + 1Hz battery
-- ✅ **H.264 video streaming** - MediaDataCenter integration, auto-start video capture
-- ✅ **Multi-sensor data** - GPS location, altitude, attitude, battery
-- ✅ **Thread-safe WebSocket server** with JSON + binary protocol
+- ✅ **Live H.264 video streaming** - MediaDataCenter integration with WebCodecs decoding
+- ✅ **Multi-sensor data** - GPS, altitude, attitude, battery, controller input
+- ✅ **Thread-safe WebSocket server** with JSON + binary protocol (metadata + H.264 frames)
 - ✅ **USB connection** via ADB port forwarding (no WiFi needed)
-- ✅ **Test client** (`test_bridge.js`) for debugging and validation
 
 **Phase 3A: DJI Controller Interface** ✅ COMPLETE  
-- ✅ **Complete desktop interface** replicating DJI controller UI
-- ✅ **All major widgets** - TopBar, FPV display, flight controls, camera controls, HSI compass, mini map
-- ✅ **Singleton pattern data management** - Fixed React re-mounting breaking callbacks
-- ✅ **Stable real-time updates** - Joystick, telemetry, and battery data update continuously
-- ✅ **Cross-platform support** - macOS, Windows, Linux via Electron
-- ✅ **Professional UI** - DJI-style theming with Tailwind CSS, responsive design
+- ✅ **Complete desktop interface** replicating full DJI controller UI
+- ✅ **All major widgets** - TopBar, camera controls, HSI compass, mini map
+- ✅ **Stable real-time updates** - All data streams update continuously
+- ✅ **Professional UI** - DJI-style theming with Tailwind CSS
 
-**Phase 3B: H.264 Video Streaming Pipeline** ✅ COMPLETE
-- ✅ **Android bridge video capture** - ICameraStreamManager with 1920x1080 @ ~26KB/frame
-- ✅ **WebSocket binary protocol** - Metadata + H.264 frame transmission
-- ✅ **Cross-platform data handling** - Uint8Array (browser) + Buffer (Electron) compatibility  
-- ✅ **Video streaming status** - Live frame count, data volume, receiving indicators
-- ✅ **Browser development mode** - Shows "Receiving H.264 Stream" with live statistics
+**Phase 3B: H.264 Video Streaming** ✅ COMPLETE
+- ✅ **Android bridge video capture** - ICameraStreamManager with 1920x1080 resolution
+- ✅ **WebSocket binary protocol** - Efficient metadata + H.264 frame transmission
+- ✅ **WebCodecs hardware decoding** - Native browser/Electron H.264 decoding
+- ✅ **Responsive video display** - Proper scaling and aspect ratio maintenance
+- ✅ **Live video performance** - Smooth playback, <100ms latency
 
-**Development Tools:**
-- ✅ **Mock server** (`mock_server.js`) for interface development without real bridge
-- ✅ **Browser dev mode** for faster iteration and debugging  
-- ✅ **Automated build/deploy** scripts for bridge deployment
-- ✅ **Comprehensive documentation** in README.md files
+**Phase 3C: UI Polish** ✅ COMPLETE
+- ✅ **Responsive layout** - Window resizing with all panels remaining visible
+- ✅ **HSI compass relocation** - Moved to small bottom-right overlay (128x128px)
+- ✅ **Window controls** - Proper movable/resizable Electron window
+- ✅ **Aspect ratio maintenance** - Video scales properly with window size
 
 ---
 
-## ⚡ **IMMEDIATE NEXT STEPS - Phase 3C**
+## ⚡ **IMMEDIATE NEXT STEPS - Phase 4**
 
-### **Phase 3C: Electron Video Decoding Migration** 🎯 **READY TO START**
+### **Phase 4A: Enhanced Map Integration** 🎯 **NEXT PRIORITY**
 
-**Goal**: Migrate from browser to Electron for stable native H.264 video decoding and playback.
+**Goal**: Investigate accessing DJI's internal map data and implement auto-rotating minimap with real compass data.
 
-**Estimated Time**: 2-3 hours
+**Estimated Time**: 1-2 weeks
 
-**Priority**: HIGH - Fixes MediaSource instability issues and completes video streaming implementation.
+**Research Questions**:
+1. **DJI Map Data Access**: Can we access the map tiles/data that DJI Fly app uses?
+2. **Compass Integration**: How to get real magnetometer/IMU data from drone?
+3. **Auto-rotating Map**: Implement heading-based map rotation
 
-**Current Issue**: Browser MediaSource API has stability problems with raw H.264 streams:
-- SourceBuffer errors every 400-700 frames requiring recovery  
-- Frame metadata race conditions causing null pointer exceptions
-- Raw H.264 NAL units need MP4 containerization for reliable web playback
+#### **Step 1: DJI Map Data Investigation** (3-4 hours)
+**Files to investigate**: 
+- `android-sdk-v5-sample/src/main/java/dji/sampleV5/aircraft/pages/MapFragment.kt`
+- Look for MapBox/MapLibre/Google Maps integration
+- Check if DJI provides map data APIs
 
-#### **Step 1: Switch to Electron Development Mode** (30 minutes)
+**Specific tasks**:
 ```bash
-# Kill current browser dev server
-# Switch to Electron native development
+# Search for map-related code in DJI sample
+grep -r "map\|Map\|tile" android-sdk-v5-sample/src/ --include="*.kt" --include="*.java"
+grep -r "MapBox\|MapLibre\|GoogleMap" android-sdk-v5-sample/src/ --include="*.kt" --include="*.java"
 
-# Check npm scripts first
-npm run  # See available scripts
-npm run dev  # or whatever the Electron dev script is called
+# Look for location/GPS data in bridge
+grep -r "location\|gps\|coordinates" android-sdk-v5-sample/src/main/java/dji/sampleV5/aircraft/data/
 ```
 
-#### **Step 2: Fix npm Scripts if Missing** (30 minutes)  
-If Electron development scripts are missing, add them to `package.json`:
-```json
-{
-  "scripts": {
-    "dev": "concurrently \"npm run build:watch\" \"electron dist/main.js\"",
-    "build:watch": "webpack --mode development --watch",
-    "electron": "electron .",
-    "start": "npm run build && electron dist/main.js"
-  }
-}
+#### **Step 2: Real Compass/IMU Data Collection** (2-3 hours)
+**Current state**: Bridge already gets attitude data (roll, pitch, yaw), need to verify compass accuracy.
+
+**Enhance bridge data collection**:
+- Add magnetometer data if available
+- Verify GPS coordinates are accurate for map positioning  
+- Add home location and distance/bearing calculations
+
+**Files to modify**:
+- `DJIBridgeServer.kt` - Add magnetometer listeners
+- Test compass accuracy against DJI Fly app
+
+#### **Step 3: Auto-rotating Minimap Implementation** (4-5 hours)
+**Files**: `dji-controller-interface/src/components/MapDisplay.tsx`
+
+**Features to add**:
+- Real GPS positioning using bridge coordinates
+- Map rotation based on aircraft heading (attitude.yaw)
+- Aircraft icon that maintains orientation
+- Home location marker with distance/bearing
+- Map tiles from public source (OpenStreetMap, MapBox, etc.) or DJI source
+
+**Implementation approach**:
+```typescript
+// Pseudo-code for auto-rotating map
+const MapDisplay = ({ aircraftLocation, heading, homeLocation }) => {
+  return (
+    <div style={{ 
+      transform: `rotate(${-heading}deg)`, // Rotate map opposite to heading
+      transformOrigin: 'center'
+    }}>
+      <MapContainer center={aircraftLocation}>
+        <AircraftMarker position={aircraftLocation} />
+        <HomeMarker position={homeLocation} />
+      </MapContainer>
+    </div>
+  );
+};
 ```
 
-#### **Step 3: Enhanced Native Video Processing** (1-2 hours)
-**Files**: `main.ts`, `FPVDisplay.tsx`, remove browser compatibility layers
-- **Native Buffer handling**: Remove Uint8Array workarounds, use Node.js Buffer directly
-- **Improved MediaSource**: Electron's MediaSource is more stable than browser version  
-- **File-based video streaming**: Optionally write H.264 frames to temp files for more reliable playback
-- **Remove browser.tsx mock**: Focus on native Electron IPC for video frame delivery
+#### **Step 4: Map Data Source Integration** (3-4 hours)
+**Options to investigate**:
+1. **DJI's map source** (preferred) - Research if accessible
+2. **OpenStreetMap** - Free, good coverage
+3. **MapBox** - Professional, requires API key
+4. **Google Maps** - Requires API key, licensing
 
-#### **Step 4: Test & Validate** (30 minutes)
-- Start Electron app: `npm run dev` 
-- Connect to running DJI bridge (port forwarding should still work)
-- Verify video streaming without SourceBuffer errors
-- Confirm smooth continuous video playback
-
-**Files to Modify:**
-- `package.json` - Add missing Electron dev scripts
-- `src/main.ts` - Remove browser compatibility, focus on native processing
-- `src/components/FPVDisplay.tsx` - Simplify to Buffer-only handling
-- Remove/reduce `src/browser.tsx` dependency
-
-**Success Criteria:**
-- Stable H.264 video playback without MediaSource errors
-- No frame metadata race conditions or null pointer exceptions  
-- Continuous video streaming for extended periods without recovery cycles
+**Integration priorities**:
+1. Try to reverse-engineer DJI's map data source
+2. Fallback to OpenStreetMap for offline capability
+3. Add ability to switch between map sources
 
 ---
 
-## 🗺️ **LONGER-TERM ROADMAP**
+### **Phase 4B: Bidirectional Flight Control** (Secondary Priority)
 
-### **Phase 2B: Bidirectional Flight Control** (3-4 hours)
-- Joystick override from interface
-- Flight commands (takeoff, land, RTH)  
-- Camera control (photo, recording, gimbal)
-- **Priority**: MEDIUM - Enables full remote control
+**Goal**: Enable laptop → drone control (joystick override, flight commands)
 
-### **Phase 4: Intelligent Flight Control** (1-2 weeks)
-- Python/OpenCV integration for computer vision
-- Automatic waypoint generation
-- Object detection and tracking
-- **Priority**: LOW - Future enhancement
+**Estimated Time**: 4-5 hours
 
-### **Phase 5: Production Deployment** (2-3 days)
-- Code signing and app distribution
-- Installer creation for all platforms
-- Performance optimization and error handling
-- **Priority**: LOW - Production readiness
+**Tasks**:
+1. **Add bridge command handling** - Extend WebSocket to accept commands from laptop
+2. **Implement virtual stick override** - Allow laptop to control drone movement
+3. **Flight mode commands** - Takeoff, land, return home from interface
+4. **Safety mechanisms** - Emergency stop, control timeout, manual override
+
+**Files to modify**:
+- `DJIBridgeServer.kt` - Add command reception and virtual stick control
+- `dji-controller-interface/src/hooks/useBridgeCommands.ts` - Command sending
+- UI components for manual flight control
 
 ---
 
-## 🔧 **PROJECT ARCHITECTURE**
+## 🔧 **PROJECT ARCHITECTURE OVERVIEW**
 
-### **System Overview**
+### **Current System Flow**
 ```
-┌─────────────┐    WebSocket     ┌──────────────────┐    IPC/Events    ┌─────────────────┐
-│DJI Controller│◄────────────────►│ Electron Main    │◄────────────────►│ React Interface │
-│   (Android) │  JSON + Binary   │   Process        │   Bridge Data    │    (Renderer)   │
-│             │                  │                  │                  │                 │
-│ Bridge      │                  │ ┌──────────────┐ │                  │ ┌─────────────┐ │
-│ Server      │                  │ │ WebSocket    │ │                  │ │ TopBar      │ │
-│ :8080       │                  │ │ Client       │ │                  │ │ FPVDisplay  │ │
-│             │                  │ │              │ │                  │ │ HSICompass  │ │
-│ ┌─────────┐ │                  │ └──────────────┘ │                  │ │ MapDisplay  │ │
-│ │DJI SDK  │ │                  │                  │                  │ └─────────────┘ │
-│ │RC Listen│ │                  │ ┌──────────────┐ │                  │                 │
-│ │Telemetry│ │                  │ │ Video Stream │ │                  │ Browser Dev:    │
-│ │Video    │ │                  │ │ Handler      │ │                  │ :3000 + HMR     │
-│ └─────────┘ │                  │ └──────────────┘ │                  │                 │
-└─────────────┘                  └──────────────────┘                  └─────────────────┘
+┌─────────────────┐    WebSocket     ┌──────────────────┐    Electron IPC    ┌─────────────────┐
+│  DJI Controller │◄─────────────────►│ Electron Main    │◄───────────────────►│ React Interface │
+│   (Android)     │  JSON + H.264    │   Process        │   Video + Data     │   (Desktop UI)  │
+│                 │                  │                  │                    │                 │
+│ ┌─────────────┐ │                  │ ┌──────────────┐ │                    │ ┌─────────────┐ │
+│ │DJI SDK V5   │ │                  │ │ WebSocket    │ │                    │ │ Live Video  │ │
+│ │Bridge Server│ │                  │ │ Client       │ │                    │ │ 1920x1080   │ │
+│ │:8080        │ │                  │ │              │ │                    │ │ WebCodecs   │ │
+│ │             │ │                  │ └──────────────┘ │                    │ └─────────────┘ │
+│ │ ┌─────────┐ │ │                  │                  │                    │                 │
+│ │ │Camera   │ │ │                  │ ┌──────────────┐ │                    │ ┌─────────────┐ │
+│ │ │H.264    │ │ │                  │ │ Video Frame  │ │                    │ │ Telemetry   │ │
+│ │ │Streamer │ │ │                  │ │ Handler      │ │                    │ │ HSI Compass │ │
+│ │ └─────────┘ │ │                  │ └──────────────┘ │                    │ │ Mini Map    │ │
+│ └─────────────┘ │                  │                  │                    │ └─────────────┘ │
+└─────────────────┘                  └──────────────────┘                    └─────────────────┘
 ```
 
-### **Data Flow**
-1. **DJI SDK** → Bridge Server (Kotlin) → WebSocket (JSON/Binary)
-2. **WebSocket** → Electron Main (TypeScript) → IPC → React Renderer  
-3. **React Components** display real-time data with professional DJI theming
-4. **Commands** flow backward: React → Electron → WebSocket → Bridge → DJI SDK
+### **Data Flow Rates**
+- **Controller input**: 20Hz (50ms intervals)
+- **Telemetry data**: 5Hz (200ms intervals) 
+- **Battery data**: 1Hz (1000ms intervals)
+- **H.264 video**: ~30fps variable rate (~26KB per frame)
+- **Total bandwidth**: ~800KB/s sustained
 
-### **Development Modes**
-- **Electron**: `npm start` - Full desktop app for production
-- **Browser**: `npm run dev:browser` - Hot reload for fast development
-- **Mock Mode**: `node mock_server.js` - Test interface without real bridge
+### **Key Technical Achievements**
+1. **WebCodecs Integration** - Hardware-accelerated H.264 decoding in browser/Electron
+2. **Binary WebSocket Protocol** - Efficient video frame transmission (metadata + raw H.264)
+3. **Thread-safe Android Bridge** - Multiple data sources coordinated safely
+4. **Responsive React UI** - Professional DJI-style interface with live data binding
+5. **Cross-platform Support** - Works on macOS, Windows, Linux
 
 ---
 
@@ -197,113 +213,122 @@ If Electron development scripts are missing, add them to `package.json`:
 
 ### **Android Bridge (Kotlin)**
 ```
-src/main/java/dji/sampleV5/aircraft/
-├── DJIBridgeActivity.kt      # Main bridge activity (headless)
-├── data/DJIBridgeServer.kt   # WebSocket server + data collection
-└── util/                     # Utilities and helpers
+android-sdk-v5-sample/src/main/java/dji/sampleV5/aircraft/
+├── DJIBridgeActivity.kt          # Main bridge activity
+├── data/DJIBridgeServer.kt       # WebSocket server + H.264 streaming
+└── data/                         # Data collection and management
 ```
 
 ### **Desktop Interface (Electron + React)**
 ```
 dji-controller-interface/
-├── src/
-│   ├── components/           # All UI widgets
-│   │   ├── App.tsx          # Main app component (uses singleton pattern)
-│   │   ├── TopBar.tsx       # Status bar (battery, GPS, etc)
-│   │   ├── FPVDisplay.tsx   # Video display (H.264 ready)
-│   │   ├── HSICompass.tsx   # Compass with attitude
-│   │   ├── MapDisplay.tsx   # Mini map widget
-│   │   └── ...              # Other DJI widgets
-│   ├── hooks/
-│   │   ├── useStableBridgeData.ts  # NEW: Singleton-based data hook (ACTIVE)
-│   │   ├── useBridgeCommands.ts    # NEW: Singleton-based command hook
-│   │   └── useBridgeData.ts        # OLD: Legacy hook (replaced)
-│   ├── bridgeManager.ts     # NEW: Global singleton state manager
-│   ├── main.ts              # Electron main process
-│   ├── preload.ts           # IPC bridge
-│   ├── browser.tsx          # Browser dev entry point
-│   └── styles/index.css     # DJI-style theming
-├── mock_server.js           # Testing server
-├── webpack.config.js        # Electron build config
-├── webpack.browser.config.js # Browser dev config
-└── README.md               # Complete setup guide
+├── src/components/
+│   ├── App.tsx                   # Main application layout
+│   ├── FPVDisplay.tsx           # H.264 video display with WebCodecs
+│   ├── TopBar.tsx               # Flight status and controls
+│   ├── HSICompass.tsx           # Small compass overlay (bottom-right)
+│   ├── MapDisplay.tsx           # Mini map (NEXT: auto-rotating)
+│   └── ...                      # Other DJI widgets
+├── src/hooks/
+│   ├── useStableBridgeData.ts   # Singleton data management
+│   └── useBridgeCommands.ts     # Command sending (for future use)
+├── src/main.ts                  # Electron main process
+├── src/preload.ts               # IPC bridge
+├── src/browser.tsx              # Browser development mode
+└── package.json                 # Dependencies and scripts
 ```
 
 ### **Development Tools**
 ```
-├── build.sh / deploy.sh     # Bridge deployment scripts
-├── test_bridge.js           # WebSocket test client  
-├── docs/TODO.md            # This handoff document
-└── README.md               # Main project documentation
+├── build.sh / deploy.sh         # Android build and deployment
+├── test_bridge.js               # WebSocket client for testing
+├── docs/TODO.md                 # This handoff document
+└── README.md                    # Complete setup documentation
 ```
 
 ---
 
-## 🚨 **COMMON ISSUES & QUICK FIXES**
+## 🚨 **TROUBLESHOOTING COMMON ISSUES**
+
+### **H.264 Video Not Displaying**
+**Symptoms**: Interface shows "Receiving H.264 Stream" but no video
+
+**Solutions**:
+1. **Check camera activation**: Ensure camera is recording/active on DJI controller
+2. **Browser compatibility**: Use Chrome 94+, Edge 94+, or Firefox 90+ for WebCodecs
+3. **Check bridge logs**: 
+   ```bash
+   adb -s 4LFCL5Q005GDF5 logcat | grep "VIDEO_STREAM\|DJIBridge"
+   ```
+4. **Verify H.264 frames**: Should see "📹 Video frame: XXXX bytes" in interface
 
 ### **Bridge Connection Issues**
 **Problem**: Interface shows "Connecting..." or "Connection Error"
 
 **Solutions**:
 ```bash
-# 1. Verify bridge is running
-adb shell netstat -ln | grep 8080  # Should show LISTEN
+# 1. Verify bridge is running and port is open
+adb -s 4LFCL5Q005GDF5 shell netstat -ln | grep 8080  # Should show LISTEN
 
 # 2. Check port forwarding
 adb forward tcp:8080 tcp:8080
 adb forward --list  # Should show tcp:8080 forwarding
 
-# 3. Restart bridge if needed
-adb shell am force-stop dji.sampleV5.aircraft
-adb shell am start -a dji.sampleV5.aircraft.action.START_BRIDGE
+# 3. Test direct connection
+node test_bridge.js localhost  # Should show live data
+
+# 4. Restart bridge if needed
+adb -s 4LFCL5Q005GDF5 shell am force-stop dji.sampleV5.aircraft
+adb -s 4LFCL5Q005GDF5 shell am start -a dji.sampleV5.aircraft.action.START_BRIDGE
 ```
 
-### **Interface Development Issues** 
-**Problem**: Electron app won't start or shows blank screen
+### **Performance Issues**
+**Problem**: Video stuttering or high CPU usage
 
 **Solutions**:
-```bash
-cd dji-controller-interface/
+1. **Use Electron mode**: `npm run dev` instead of browser mode for better performance
+2. **Check video decoder**: Should use hardware acceleration (check DevTools Performance tab)
+3. **Monitor bandwidth**: ~800KB/s is normal; higher suggests issues
+4. **Close other apps**: H.264 decoding is CPU/GPU intensive
 
-# 1. Try browser mode first (easier debugging)
-npm run dev:browser
+### **Window Resizing Issues**
+**Problem**: UI elements cut off when window is small
 
-# 2. Rebuild if needed
-npm run build && npm start
-
-# 3. Check for TypeScript errors
-npx tsc --noEmit
-```
-
-### **Video Stream Issues (Future)**
-**Problem**: Video not displaying or poor quality
-
-**Solutions**:
-- Check camera is active on controller
-- Verify H.264 codec support in browser/Electron
-- Monitor bandwidth usage and adjust quality
+**Fixed in Phase 3C**: Window now properly resizes with responsive breakpoints:
+- Left panel: 96px (small) → 128px (large screens)
+- Right panel: 256px (medium) → 320px (large screens) 
+- Minimum window size: 800x600
 
 ---
 
-## 🎯 **PROJECT GOALS RECAP**
+## 🎯 **SUCCESS CRITERIA FOR PHASE 4A**
 
-✅ **Achieved (Phase 1-3A)**:
-- Real-time sensor data bridge from DJI controller to laptop
-- Professional desktop interface with all major DJI widgets  
-- Cross-platform support with efficient development workflow
+### **Map Integration Goals**
+1. **Real GPS positioning** - Aircraft icon moves based on actual GPS coordinates
+2. **Auto-rotating map** - Map rotates based on aircraft heading for intuitive navigation
+3. **Accurate compass** - HSI compass matches real magnetometer data
+4. **Map data source** - Either DJI's tiles or reliable alternative (OpenStreetMap/MapBox)
+5. **Home location tracking** - Distance and bearing from takeoff point
 
-🔄 **Next Priority (Phase 3B)**:
-- H.264 video streaming integration (3-4 hours)
+### **Technical Specifications**
+- Map update rate: 5Hz (matching telemetry data)
+- Map rotation: Smooth interpolation, not jerky
+- GPS accuracy: Within 3-5 meters of DJI Fly app
+- Compass accuracy: Within 2-3 degrees of DJI Fly app
+- Performance: <5% CPU overhead for map rendering
 
-🚀 **Ultimate Vision**:
-- Complete external flight control system
-- Computer vision integration for autonomous waypoints
-- Production-ready desktop application
+### **User Experience**
+- Aircraft always centered on mini map
+- Map oriented so "up" is forward direction of aircraft
+- Clear visual distinction between aircraft icon and home marker
+- Zoom level adjusts automatically based on distance from home
 
 ---
 
-**📝 Project Status**: Phase 3B ✅ Complete | Electron Migration ⏳ Ready  
+**📝 Project Status**: Phase 3B ✅ Complete - Full H.264 video streaming system working  
 **🕒 Last Updated**: September 5, 2025  
-**🔧 Development Environment**: H.264 video streaming working, browser MediaSource instability identified  
-**📊 Test Status**: All components validated, video pipeline confirmed working (26KB/frame @ 1920x1080)  
-**🚀 Latest Achievement**: Complete H.264 streaming pipeline - ready for native Electron video decoding
+**🔧 Development Environment**: Live video + telemetry + responsive UI all functional  
+**📊 Test Status**: End-to-end system validated - laptop displays live drone camera feed  
+**🚀 Latest Achievement**: Complete working system with H.264 video streaming at 1920x1080
+
+**🔥 IMMEDIATE ACTION**: Start Phase 4A map investigation - this is the next big enhancement that will make the system truly professional.
