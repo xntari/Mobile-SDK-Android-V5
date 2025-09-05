@@ -129,7 +129,19 @@ class DJIBridgeActivity : Activity() {
             bridgeServer = DJIBridgeServer(WEBSOCKET_PORT, this)
             bridgeServer.start()
             
-            updateStatus("DJI Bridge running on port $WEBSOCKET_PORT\nDirect RC stick monitoring active - move joysticks!")
+            // Start H.264 video streaming automatically
+            android.os.Handler(mainLooper).postDelayed({
+                try {
+                    Log.i(TAG, "Auto-starting video streaming...")
+                    bridgeServer.startVideoStreaming()
+                    updateStatus("DJI Bridge running on port $WEBSOCKET_PORT\nRC stick monitoring + H.264 video streaming active!")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not auto-start video streaming: ${e.message}")
+                    updateStatus("DJI Bridge running on port $WEBSOCKET_PORT\nRC monitoring active (video stream failed)")
+                }
+            }, 2000) // Delay to ensure everything is initialized
+            
+            updateStatus("DJI Bridge running on port $WEBSOCKET_PORT\nDirect RC stick monitoring active - starting video...")
             Log.i(TAG, "DJI Android Bridge successfully started on port $WEBSOCKET_PORT")
             
         } catch (e: Exception) {

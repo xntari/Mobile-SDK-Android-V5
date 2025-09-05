@@ -1,0 +1,96 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom DJI-style components */
+@layer components {
+  .dji-widget {
+    @apply bg-black bg-opacity-80 border border-gray-600 rounded text-white;
+  }
+
+  .dji-button {
+    @apply bg-dji-blue hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded transition-colors duration-200;
+  }
+
+  .dji-button:disabled {
+    @apply bg-gray-600 cursor-not-allowed opacity-50;
+  }
+
+  .dji-button-danger {
+    @apply bg-status-error hover:bg-red-600 text-white font-semibold py-2 px-4 rounded transition-colors duration-200;
+  }
+
+  .dji-button-success {
+    @apply bg-status-good hover:bg-green-600 text-white font-semibold py-2 px-4 rounded transition-colors duration-200;
+  }
+
+  .status-indicator {
+    @apply inline-block w-2 h-2 rounded-full mr-2;
+  }
+
+  .status-good {
+    @apply text-status-good;
+  }
+  
+  .status-warning {
+    @apply text-status-warning;
+  }
+  
+  .status-error {
+    @apply text-status-error;
+  }
+
+  .glass-panel {
+    @apply bg-black bg-opacity-60 backdrop-blur-sm border border-gray-700 rounded-lg;
+  }
+}
+
+/* Global styles */
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-gray-800;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-gray-600 rounded;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-gray-500;
+}
+
+/* Disable text selection for UI elements */
+.no-select {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+}
+
+/* Animations */
+@keyframes pulse-blue {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.animate-pulse-blue {
+  animation: pulse-blue 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}

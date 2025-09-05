@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DJI Controller Interface - Browser Development</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background-color: #0D1117;
+            color: white;
+            overflow: hidden;
+        }
+        
+        #root {
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        /* Developer notice */
+        .dev-notice {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            background: rgba(30, 136, 229, 0.9);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            z-index: 10000;
+            font-family: monospace;
+        }
+        
+        .dev-notice.hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="root">
+        <div style="display: flex; align-items: center; justify-content: center; height: 100vh; font-size: 18px;">
+            Loading DJI Controller Interface...
+        </div>
+    </div>
+    
+    <!-- Developer notice -->
+    <div class="dev-notice" id="dev-notice">
+        🔧 Browser Dev Mode - Hot Reload Active
+    </div>
+    
+    <script>
+        // Hide dev notice after 3 seconds
+        setTimeout(() => {
+            const notice = document.getElementById('dev-notice');
+            if (notice) notice.classList.add('hidden');
+        }, 3000);
+        
+        // Add keyboard shortcuts for development
+        document.addEventListener('keydown', (e) => {
+            // F11: Toggle fullscreen
+            if (e.key === 'F11') {
+                e.preventDefault();
+                if (document.fullscreenElement) {
+                    document.exitFullscreen();
+                } else {
+                    document.documentElement.requestFullscreen();
+                }
+            }
+            
+            // Ctrl/Cmd + R: Reload (browser default)
+            // F12: DevTools (browser default)
+        });
+        
+        // Log browser development info
+        console.log('🚁 DJI Controller Interface - Browser Development Mode');
+        console.log('📡 Connecting to bridge at ws://localhost:8080');
+        console.log('⌨️  Shortcuts:');
+        console.log('   F11: Toggle fullscreen');
+        console.log('   F12: Open developer tools');
+        console.log('   Ctrl+R: Reload page');
+    </script>
+</body>
+</html>
