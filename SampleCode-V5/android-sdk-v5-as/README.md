@@ -611,4 +611,26 @@ npm run build && npm run dev  # Electron desktop app
 - Data: 20Hz controller + 5Hz telemetry + 1Hz battery = ~25 updates/second
 - Latency: <100ms end-to-end (controller → laptop display)
 
-**Next Steps**: See `./docs/TODO.md` for advanced features like bidirectional control and map integration.
+## ⚠️ Current Status: PARTIALLY WORKING
+
+**What Works:**
+- ✅ Live H.264 video stream from DJI camera at 1920x1080
+- ✅ Real-time flight data display (GPS, altitude, battery, speed, distance)
+- ✅ Real joystick data transmission (20Hz from controller)
+- ✅ Professional DJI-style desktop interface
+- ✅ Responsive window resizing with proper video aspect ratio
+- ✅ Real compass data collection from DJI SDK FlightControllerKey
+- ✅ Overlay positioning relative to video frame (minimap, HSI compass)
+
+**What's Partially Working:**
+- ⚠️ **HSI compass**: Arrow points approximately in correct direction, but full HSI functionality incomplete
+- ⚠️ **Attitude display**: Roll/pitch data collected but not fully displayed in HSI
+- ⚠️ **Minimap**: Shows aircraft/home positions but no auto-rotation based on compass heading
+
+**What's Missing:**
+- ❌ **DJI native map data access**: Need to investigate MapWidget integration
+- ❌ **Auto-rotating minimap**: Compass heading not driving map orientation
+- ❌ **Complete HSI functionality**: Full attitude indicator behavior needed
+- ❌ **Port forwarding persistence**: Must re-establish `adb forward tcp:8080 tcp:8080` after controller restart
+
+**Next Critical Steps**: See `./docs/TODO.md` for prioritized handoff documentation with immediate next actions focused on accessing DJI's native map data source.

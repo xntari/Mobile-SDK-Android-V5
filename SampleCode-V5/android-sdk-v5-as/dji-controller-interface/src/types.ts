@@ -46,6 +46,7 @@ export interface TelemetryData extends BridgeMessage {
   flight_mode: string;
   distance_to_home: number;
   heading: number;
+  compass_heading?: number;  // Real magnetometer heading
   home_bearing?: number;
   satellite_count?: number;
   gps_signal_quality?: number;
@@ -107,6 +108,7 @@ export interface FPVDisplayProps {
   width?: number;
   height?: number;
   className?: string;
+  children?: React.ReactNode;
 }
 
 export interface HSICompassProps {
@@ -120,6 +122,7 @@ export interface MapDisplayProps {
   aircraftLocation: TelemetryData['location'] | null;
   homeLocation: TelemetryData['home_location'] | null;
   flightPath?: Array<{ latitude: number; longitude: number }>;
+  compassHeading?: number; // For map auto-rotation
 }
 
 // Connection and status types

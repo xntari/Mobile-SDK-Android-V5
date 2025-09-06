@@ -48,7 +48,9 @@ class BridgeManager {
         const mappedTelemetry = {
           ...message,
           speed: message.ground_speed || message.speed || 0,
-          heading: message.heading || 0,
+          heading: message.compass_heading || message.heading || 0,
+          attitude: message.attitude || { pitch: 0, roll: 0, yaw: 0 },
+          compass_heading: message.compass_heading || 0,
         } as TelemetryData;
         
         this.bridgeData = {

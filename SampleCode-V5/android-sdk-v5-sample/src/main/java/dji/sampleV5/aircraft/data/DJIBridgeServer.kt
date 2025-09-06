@@ -13,6 +13,7 @@ import dji.sdk.keyvalue.value.common.LocationCoordinate2D
 import dji.sdk.keyvalue.value.common.LocationCoordinate3D
 import dji.sdk.keyvalue.value.common.Velocity3D
 import dji.sdk.keyvalue.value.common.ComponentIndexType
+import dji.sdk.keyvalue.value.common.Attitude
 import org.json.JSONObject
 import org.json.JSONArray
 import java.io.IOException
@@ -715,19 +716,65 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 "are_motors_on" to false,
                 "is_flying" to false,
                 
-                // GPS data (TODO: integrate with proper SDK keys)
-                "gps_satellite_count" to 0,
-                "gps_signal_quality" to "SDK_V5_INTEGRATED",
                 
-                // Attitude data (TODO: integrate with proper SDK keys) 
-                "attitude" to mapOf(
-                    "pitch" to 0.0,
-                    "roll" to 0.0,
-                    "yaw" to 0.0
-                ),
+                // Real attitude data from flight controller
+                "attitude" to run {
+                    try {
+                        // Get attitude data using proper DJI SDK V5 keys
+                        val attitudeKey = KeyTools.createKey(FlightControllerKey.KeyAircraftAttitude)
+                        val attitude = keyManager.getValue(attitudeKey) as? Attitude
+                        
+                        attitude?.let {
+                            mapOf(
+                                "pitch" to it.pitch.toDouble(),
+                                "roll" to it.roll.toDouble(), 
+                                "yaw" to it.yaw.toDouble()
+                            )
+                        } ?: mapOf("pitch" to 0.0, "roll" to 0.0, "yaw" to 0.0)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to get attitude data: ${e.message}")
+                        mapOf("pitch" to 0.0, "roll" to 0.0, "yaw" to 0.0)
+                    }
+                },
+                
+                // Real compass heading from magnetometer (distinct from attitude yaw)
+                "compass_heading" to run {
+                    try {
+                        // Get true compass heading from magnetometer
+                        val compassKey = KeyTools.createKey(FlightControllerKey.KeyCompassHeading)
+                        val heading = keyManager.getValue(compassKey) as? Double
+                        heading ?: 0.0
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to get compass heading: ${e.message}")
+                        0.0
+                    }
+                },
+                
+                // GPS accuracy and satellite info
+                "gps_info" to run {
+                    try {
+                        val gpsCountKey = KeyTools.createKey(FlightControllerKey.KeyGPSSignalLevel)
+                        val gpsLevel = keyManager.getValue(gpsCountKey) as? Int ?: 0
+                        
+                        mapOf(
+                            "satellite_count" to gpsLevel,
+                            "signal_quality" to when {
+                                gpsLevel >= 4 -> "EXCELLENT"
+                                gpsLevel >= 3 -> "GOOD" 
+                                gpsLevel >= 2 -> "FAIR"
+                                else -> "POOR"
+                            }
+                        )
+                    } catch (e: Exception) {
+                        mapOf(
+                            "satellite_count" to 0,
+                            "signal_quality" to "NO_SIGNAL"
+                        )
+                    }
+                },
                 
                 // Note for development
-                "note" to "Phase 2A: Real SDK data integration - altitude, location, velocity working"
+                "note" to "Phase 4A: Real compass and attitude data integrated - ready for map implementation"
             )
         } catch (e: Exception) {
             Log.w(TAG, "Failed to collect telemetry data: ${e.message}")

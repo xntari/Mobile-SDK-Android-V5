@@ -95,7 +95,7 @@ const connectToMockBridge = () => {
           if (pendingVideoFrame) {
             const reader = new FileReader();
             reader.onload = () => {
-              if (reader.result instanceof ArrayBuffer) {
+              if (reader.result instanceof ArrayBuffer && pendingVideoFrame) {
                 // Use Uint8Array instead of Buffer for browser compatibility
                 const uint8Array = new Uint8Array(reader.result);
                 console.log(`🎬 Browser: Received H.264 frame: ${uint8Array.length} bytes, frame #${pendingVideoFrame.frameNumber}`);
@@ -107,6 +107,8 @@ const connectToMockBridge = () => {
                 });
                 
                 pendingVideoFrame = null; // Clear pending frame
+              } else {
+                console.warn('🎬 Browser: Skipping dropped frame - pendingVideoFrame is null');
               }
             };
             reader.readAsArrayBuffer(event.data);

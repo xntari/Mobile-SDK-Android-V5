@@ -4,16 +4,65 @@ import { FPVDisplayProps } from '../types';
 export const FPVDisplay: React.FC<FPVDisplayProps> = ({ 
   width, 
   height, 
-  className = '' 
+  className = '',
+  children
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const videoDecoderRef = useRef<VideoDecoder | null>(null);
   const [videoStatus, setVideoStatus] = useState<'waiting' | 'loading' | 'playing' | 'error' | 'receiving' | 'decoding'>('waiting');
   const [frameStats, setFrameStats] = useState({ frames: 0, totalBytes: 0, lastFrame: 0, decodedFrames: 0 });
   const [decoderSupported, setDecoderSupported] = useState<boolean | null>(null);
+  const [videoDimensions, setVideoDimensions] = useState({ width: 1920, height: 1080 });
+  const [displayRect, setDisplayRect] = useState({ left: 0, top: 0, width: 0, height: 0 });
   const spsRef = useRef<Uint8Array | null>(null);
   const ppsRef = useRef<Uint8Array | null>(null);
   const decoderConfiguredRef = useRef<boolean>(false);
+
+  // Calculate actual video display rectangle with object-contain behavior
+  const calculateDisplayRect = () => {
+    if (!containerRef.current) return;
+    
+    const container = containerRef.current;
+    const containerWidth = container.clientWidth;
+    const containerHeight = container.clientHeight;
+    
+    const videoAspect = videoDimensions.width / videoDimensions.height;
+    const containerAspect = containerWidth / containerHeight;
+    
+    let displayWidth, displayHeight, left, top;
+    
+    if (containerAspect > videoAspect) {
+      // Container is wider than video - fit by height
+      displayHeight = containerHeight;
+      displayWidth = displayHeight * videoAspect;
+      left = (containerWidth - displayWidth) / 2;
+      top = 0;
+    } else {
+      // Container is taller than video - fit by width
+      displayWidth = containerWidth;
+      displayHeight = displayWidth / videoAspect;
+      left = 0;
+      top = (containerHeight - displayHeight) / 2;
+    }
+    
+    setDisplayRect({ left, top, width: displayWidth, height: displayHeight });
+  };
+
+  // Update display rect when container size or video dimensions change
+  useEffect(() => {
+    calculateDisplayRect();
+    
+    const resizeObserver = new ResizeObserver(() => {
+      calculateDisplayRect();
+    });
+    
+    if (containerRef.current) {
+      resizeObserver.observe(containerRef.current);
+    }
+    
+    return () => resizeObserver.disconnect();
+  }, [videoDimensions]);
 
   // H.264 NAL unit parsing helpers
   const parseH264NALUnits = (data: Uint8Array) => {
@@ -113,6 +162,11 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
         videoDecoderRef.current = new VideoDecoder({
           output: (frame: VideoFrame) => {
             try {
+              // Update video dimensions if changed
+              if (videoDimensions.width !== frame.codedWidth || videoDimensions.height !== frame.codedHeight) {
+                setVideoDimensions({ width: frame.codedWidth, height: frame.codedHeight });
+              }
+              
               // Draw the decoded frame to canvas
               if (canvas.width !== frame.codedWidth || canvas.height !== frame.codedHeight) {
                 canvas.width = frame.codedWidth;
@@ -303,17 +357,17 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
 
         // Determine if this is a keyframe
         const isKey = isKeyFrame(nalUnits);
-        console.log(`Frame type: ${isKey ? 'KEY' : 'DELTA'} frame`);
+        //console.log(`Frame type: ${isKey ? 'KEY' : 'DELTA'} frame`);
 
         // Skip non-key frames if decoder just configured (wait for next I-frame)
         if (!isKey && videoStatus === 'decoding') {
-          console.log('Skipping P-frame, waiting for next I-frame after configuration');
+          //console.log('Skipping P-frame, waiting for next I-frame after configuration');
           return;
         }
 
         // Create EncodedVideoChunk for WebCodecs
         try {
-          console.log(`Creating chunk: type=${isKey ? 'key' : 'delta'}, size=${h264Data.length}, timestamp=${now * 1000}`);
+          //console.log(`Creating chunk: type=${isKey ? 'key' : 'delta'}, size=${h264Data.length}, timestamp=${now * 1000}`);
           const chunk = new EncodedVideoChunk({
             type: isKey ? 'key' : 'delta',
             timestamp: now * 1000, // Convert to microseconds
@@ -325,9 +379,9 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
             setVideoStatus('decoding');
           }
           
-          console.log(`Decoding chunk with decoder state: ${videoDecoderRef.current.state}`);
+          //console.log(`Decoding chunk with decoder state: ${videoDecoderRef.current.state}`);
           videoDecoderRef.current.decode(chunk);
-          console.log('Decode call successful');
+          //console.log('Decode call successful');
         } catch (decodeError) {
           console.error('Decode error:', decodeError);
           console.error('Decode error details:', {
@@ -464,48 +518,61 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
   };
 
   return (
-    <div className={`relative bg-dji-dark ${className}`}>
+    <div ref={containerRef} className={`relative bg-dji-dark ${className}`}>
       <canvas
         ref={canvasRef}
-        className="w-full h-full object-cover"
-        style={{ width, height }}
+        className="w-full h-full object-contain"
       />
       
-      {getStatusOverlay()}
-      
-      {/* Video info overlay */}
-      {videoStatus === 'playing' && (
-        <div className="absolute top-4 right-4 glass-panel p-2 text-xs">
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 bg-status-good rounded-full animate-pulse-blue"></div>
-            <span>LIVE H.264</span>
+      {/* Video content overlay area - matches actual video display rectangle */}
+      <div 
+        className="absolute"
+        style={{
+          left: `${displayRect.left}px`,
+          top: `${displayRect.top}px`,
+          width: `${displayRect.width}px`,
+          height: `${displayRect.height}px`
+        }}
+      >
+          {getStatusOverlay()}
+          
+          {/* Video info overlay */}
+          {videoStatus === 'playing' && (
+            <div className="absolute top-4 right-4 glass-panel p-2 text-xs">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 bg-status-good rounded-full animate-pulse-blue"></div>
+                <span>LIVE H.264</span>
+              </div>
+              <div className="text-xs text-gray-400 mt-1">
+                {frameStats.decodedFrames} frames decoded
+              </div>
+            </div>
+          )}
+          
+          {/* Camera settings overlay */}
+          <div className="absolute bottom-4 left-4 glass-panel p-3 text-sm">
+            <div className="flex items-center gap-4">
+              <div>
+                <span className="text-gray-400">Mode: </span>
+                <span className="text-white">Video</span>
+              </div>
+              <div>
+                <span className="text-gray-400">Lens: </span>
+                <span className="text-white">Wide</span>
+              </div>
+              <div>
+                <span className="text-gray-400">ISO: </span>
+                <span className="text-white">AUTO</span>
+              </div>
+              <div>
+                <span className="text-gray-400">Quality: </span>
+                <span className="text-white">4K/60</span>
+              </div>
+            </div>
           </div>
-          <div className="text-xs text-gray-400 mt-1">
-            {frameStats.decodedFrames} frames decoded
-          </div>
-        </div>
-      )}
-      
-      {/* Camera settings overlay */}
-      <div className="absolute bottom-4 left-4 glass-panel p-3 text-sm">
-        <div className="flex items-center gap-4">
-          <div>
-            <span className="text-gray-400">Mode: </span>
-            <span className="text-white">Video</span>
-          </div>
-          <div>
-            <span className="text-gray-400">Lens: </span>
-            <span className="text-white">Wide</span>
-          </div>
-          <div>
-            <span className="text-gray-400">ISO: </span>
-            <span className="text-white">AUTO</span>
-          </div>
-          <div>
-            <span className="text-gray-400">Quality: </span>
-            <span className="text-white">4K/60</span>
-          </div>
-        </div>
+          
+          {/* Custom overlays passed as children */}
+          {children}
       </div>
     </div>
   );
