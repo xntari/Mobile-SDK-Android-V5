@@ -12,267 +12,101 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const drawArtificialHorizon = (
+  const drawHUD = (
     ctx: CanvasRenderingContext2D,
-    x: number,
-    y: number,
-    radius: number,
-    attitude: { roll: number; pitch: number } | null
-  ) => {
-    if (!attitude) return;
-
-    ctx.save();
-    ctx.translate(x, y);
-    
-    // Create circular clipping mask
-    ctx.beginPath();
-    ctx.arc(0, 0, radius, 0, Math.PI * 2);
-    ctx.clip();
-    
-    // Rotate for roll angle
-    ctx.rotate(-attitude.roll * Math.PI / 180);
-    
-    // Calculate pitch offset
-    const pitchOffset = attitude.pitch * 2; // Scale pitch for visual effect
-    
-    // Draw sky (blue)
-    ctx.fillStyle = '#4A90E2';
-    ctx.fillRect(-radius, -radius - pitchOffset, radius * 2, radius + pitchOffset);
-    
-    // Draw ground (brown)
-    ctx.fillStyle = '#8B4513';
-    ctx.fillRect(-radius, -pitchOffset, radius * 2, radius * 2);
-    
-    // Draw horizon line
-    ctx.strokeStyle = '#FFFFFF';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(-radius, -pitchOffset);
-    ctx.lineTo(radius, -pitchOffset);
-    ctx.stroke();
-    
-    // Draw pitch lines
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
-    ctx.lineWidth = 1;
-    for (let i = -30; i <= 30; i += 10) {
-      if (i === 0) continue; // Skip horizon line
-      const lineY = -pitchOffset - (i * 2);
-      const lineLength = i % 20 === 0 ? radius * 0.3 : radius * 0.2;
-      
-      ctx.beginPath();
-      ctx.moveTo(-lineLength, lineY);
-      ctx.lineTo(lineLength, lineY);
-      ctx.stroke();
-      
-      // Add degree labels for major lines
-      if (i % 20 === 0 && Math.abs(i) <= 20) {
-        ctx.fillStyle = '#FFFFFF';
-        ctx.font = '10px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(Math.abs(i).toString(), 0, lineY + 3);
-      }
-    }
-    
-    ctx.restore();
-    
-    // Draw aircraft symbol (fixed in center)
-    ctx.strokeStyle = '#FFFF00';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    // Aircraft wings
-    ctx.moveTo(x - radius * 0.3, y);
-    ctx.lineTo(x - radius * 0.1, y);
-    ctx.moveTo(x + radius * 0.1, y);
-    ctx.lineTo(x + radius * 0.3, y);
-    // Aircraft center
-    ctx.moveTo(x, y - 5);
-    ctx.lineTo(x, y + 5);
-    ctx.stroke();
-    
-    // Draw outer ring
-    ctx.strokeStyle = '#FFFFFF';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
-    ctx.stroke();
-  };
-
-  const drawAltitudeIndicator = (
-    ctx: CanvasRenderingContext2D,
-    x: number,
-    y: number,
     width: number,
     height: number,
-    altitude: number
-  ) => {
-    // Background
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-    ctx.fillRect(x, y, width, height);
-    ctx.strokeStyle = '#FFFFFF';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x, y, width, height);
-    
-    // Altitude tape
-    const centerY = y + height / 2;
-    const pixelsPerMeter = height / 200; // 200m range
-    
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = '12px monospace';
-    ctx.textAlign = 'right';
-    
-    // Draw altitude scale
-    for (let alt = Math.floor(altitude / 10) * 10 - 100; alt <= altitude + 100; alt += 20) {
-      const altY = centerY - (alt - altitude) * pixelsPerMeter;
-      if (altY > y && altY < y + height) {
-        // Tick mark
-        ctx.strokeStyle = '#FFFFFF';
-        ctx.beginPath();
-        ctx.moveTo(x + width - 10, altY);
-        ctx.lineTo(x + width, altY);
-        ctx.stroke();
-        
-        // Altitude label
-        if (alt % 40 === 0) {
-          ctx.fillText(alt.toString(), x + width - 12, altY + 4);
-        }
-      }
-    }
-    
-    // Current altitude box
-    ctx.fillStyle = '#000000';
-    ctx.fillRect(x + width - 50, centerY - 12, 48, 24);
-    ctx.strokeStyle = '#FFFF00';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(x + width - 50, centerY - 12, 48, 24);
-    
-    ctx.fillStyle = '#FFFF00';
-    ctx.font = '14px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText(Math.round(altitude).toString(), x + width - 26, centerY + 5);
-  };
-
-  const drawSpeedIndicator = (
-    ctx: CanvasRenderingContext2D,
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    speed: number
-  ) => {
-    // Background
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-    ctx.fillRect(x, y, width, height);
-    ctx.strokeStyle = '#FFFFFF';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x, y, width, height);
-    
-    // Speed tape
-    const centerY = y + height / 2;
-    const pixelsPerMps = height / 20; // 20 m/s range
-    
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = '12px monospace';
-    ctx.textAlign = 'left';
-    
-    // Draw speed scale
-    for (let spd = Math.floor(speed / 2) * 2 - 10; spd <= speed + 10; spd += 2) {
-      if (spd < 0) continue;
-      const spdY = centerY - (spd - speed) * pixelsPerMps;
-      if (spdY > y && spdY < y + height) {
-        // Tick mark
-        ctx.strokeStyle = '#FFFFFF';
-        ctx.beginPath();
-        ctx.moveTo(x, spdY);
-        ctx.lineTo(x + 10, spdY);
-        ctx.stroke();
-        
-        // Speed label
-        if (spd % 4 === 0) {
-          ctx.fillText(spd.toString(), x + 12, spdY + 4);
-        }
-      }
-    }
-    
-    // Current speed box
-    ctx.fillStyle = '#000000';
-    ctx.fillRect(x + 2, centerY - 12, 48, 24);
-    ctx.strokeStyle = '#00FF00';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(x + 2, centerY - 12, 48, 24);
-    
-    ctx.fillStyle = '#00FF00';
-    ctx.font = '14px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText(speed.toFixed(1), x + 26, centerY + 5);
-  };
-
-  const drawCompass = (
-    ctx: CanvasRenderingContext2D,
-    x: number,
-    y: number,
-    width: number,
-    height: number,
+    attitude: { roll: number; pitch: number } | null,
+    altitude: number,
+    speed: number,
     heading: number
   ) => {
-    // Background
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-    ctx.fillRect(x, y, width, height);
-    ctx.strokeStyle = '#FFFFFF';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x, y, width, height);
+    const centerX = width / 2;
+    const centerY = height / 2;
     
-    // Compass tape
-    const centerX = x + width / 2;
-    const pixelsPerDegree = width / 60; // 60 degree range
-    
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = '12px monospace';
-    ctx.textAlign = 'center';
-    
-    // Draw heading scale
-    for (let hdg = Math.floor(heading / 10) * 10 - 30; hdg <= heading + 30; hdg += 10) {
-      let normalizedHdg = ((hdg % 360) + 360) % 360;
-      const hdgX = centerX - (hdg - heading) * pixelsPerDegree;
+    // Set green color for all HUD elements
+    ctx.strokeStyle = '#00FF00';
+    ctx.fillStyle = '#00FF00';
+    ctx.lineWidth = 2;
+
+    if (attitude) {
+      ctx.save();
+      ctx.translate(centerX, centerY);
       
-      if (hdgX > x && hdgX < x + width) {
-        // Tick mark
-        ctx.strokeStyle = '#FFFFFF';
+      // Rotate for roll angle
+      ctx.rotate(-attitude.roll * Math.PI / 180);
+      
+      // Calculate pitch offset (pixels per degree)
+      const pitchPixelsPerDegree = 3;
+      const pitchOffset = attitude.pitch * pitchPixelsPerDegree;
+      
+      // Draw horizon line (wider)
+      ctx.beginPath();
+      ctx.moveTo(-150, -pitchOffset);
+      ctx.lineTo(150, -pitchOffset);
+      ctx.stroke();
+      
+      // Draw pitch ladder lines
+      for (let pitch = -30; pitch <= 30; pitch += 10) {
+        if (pitch === 0) continue; // Skip horizon line
+        const lineY = -pitchOffset - (pitch * pitchPixelsPerDegree);
+        const lineLength = pitch % 20 === 0 ? 60 : 40;
+        
+        // Draw pitch line
         ctx.beginPath();
-        ctx.moveTo(hdgX, y);
-        ctx.lineTo(hdgX, y + 10);
+        ctx.moveTo(-lineLength/2, lineY);
+        ctx.lineTo(lineLength/2, lineY);
         ctx.stroke();
         
-        // Heading label
-        if (normalizedHdg % 30 === 0) {
-          const label = normalizedHdg === 0 ? 'N' : 
-                       normalizedHdg === 90 ? 'E' :
-                       normalizedHdg === 180 ? 'S' :
-                       normalizedHdg === 270 ? 'W' :
-                       normalizedHdg.toString();
-          ctx.fillText(label, hdgX, y + 22);
+        // Add pitch labels
+        if (pitch % 20 === 0) {
+          ctx.font = '12px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText(Math.abs(pitch).toString(), -lineLength/2 - 15, lineY + 4);
+          ctx.fillText(Math.abs(pitch).toString(), lineLength/2 + 15, lineY + 4);
         }
       }
+      
+      ctx.restore();
     }
     
-    // Current heading indicator
-    ctx.strokeStyle = '#FFFF00';
-    ctx.lineWidth = 2;
+    // Draw aircraft symbol (fixed in center)
     ctx.beginPath();
-    ctx.moveTo(centerX - 8, y);
-    ctx.lineTo(centerX, y + 8);
-    ctx.lineTo(centerX + 8, y);
+    // Center dot
+    ctx.arc(centerX, centerY, 3, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Horizontal wings (shorter to clear center)
+    ctx.beginPath();
+    ctx.moveTo(centerX - 25, centerY);
+    ctx.lineTo(centerX - 8, centerY);
+    ctx.moveTo(centerX + 8, centerY);
+    ctx.lineTo(centerX + 25, centerY);
     ctx.stroke();
     
-    // Current heading box
-    ctx.fillStyle = '#000000';
-    ctx.fillRect(centerX - 25, y + height - 20, 50, 18);
-    ctx.strokeStyle = '#FFFF00';
-    ctx.strokeRect(centerX - 25, y + height - 20, 50, 18);
+    // Vertical line
+    ctx.beginPath();
+    ctx.moveTo(centerX, centerY - 8);
+    ctx.lineTo(centerX, centerY + 8);
+    ctx.stroke();
     
-    ctx.fillStyle = '#FFFF00';
-    ctx.font = '14px monospace';
-    ctx.fillText(Math.round(heading).toString().padStart(3, '0'), centerX, y + height - 7);
+    // Draw altitude on far right side
+    ctx.font = '16px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(`${Math.round(altitude)}m`, width - 80, centerY - 20);
+    ctx.fillText('ALT', width - 80, centerY - 5);
+    
+    // Draw speed on far left side
+    ctx.textAlign = 'right';
+    ctx.fillText(`${speed.toFixed(1)}`, 80, centerY - 20);
+    ctx.fillText('m/s', 80, centerY - 5);
+    
+    // Draw heading at top
+    ctx.textAlign = 'center';
+    ctx.fillText(`${Math.round(heading).toString().padStart(3, '0')}°`, centerX, 40);
+    ctx.fillText('HDG', centerX, 60);
   };
+
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -286,64 +120,34 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
     canvas.height = rect.height * devicePixelRatio;
     ctx.scale(devicePixelRatio, devicePixelRatio);
 
-    // Clear canvas
+    // Clear canvas with transparent background
     ctx.clearRect(0, 0, rect.width, rect.height);
 
-    if (size === 'compact') {
-      // Compact layout: attitude indicator + digital displays
-      const centerX = rect.width / 2;
-      const attRadius = Math.min(rect.width, rect.height) * 0.25;
-      
-      // Artificial horizon
-      drawArtificialHorizon(ctx, centerX, attRadius + 20, attRadius, telemetryData.attitude);
-      
-      // Digital readouts below
-      const startY = attRadius * 2 + 50;
-      ctx.fillStyle = '#FFFFFF';
-      ctx.font = '14px monospace';
-      ctx.textAlign = 'center';
-      
-      ctx.fillText(`ALT: ${telemetryData.altitude.toFixed(0)}m`, centerX, startY);
-      ctx.fillText(`SPD: ${telemetryData.speed.toFixed(1)}m/s`, centerX, startY + 20);
-      ctx.fillText(`HDG: ${telemetryData.heading.toFixed(0)}°`, centerX, startY + 40);
-      
-    } else {
-      // Full layout: attitude indicator + analog tapes
-      const ahSize = Math.min(rect.width * 0.4, rect.height * 0.6);
-      const ahX = rect.width / 2;
-      const ahY = rect.height / 2;
-      
-      drawArtificialHorizon(ctx, ahX, ahY, ahSize / 2, telemetryData.attitude);
-      
-      // Speed tape (left)
-      drawSpeedIndicator(ctx, 20, ahY - ahSize / 2, 60, ahSize, telemetryData.speed);
-      
-      // Altitude tape (right) 
-      drawAltitudeIndicator(ctx, rect.width - 80, ahY - ahSize / 2, 60, ahSize, telemetryData.altitude);
-      
-      // Compass tape (bottom)
-      drawCompass(ctx, ahX - 100, rect.height - 50, 200, 40, telemetryData.heading);
-    }
+    // Draw HUD overlay
+    drawHUD(
+      ctx,
+      rect.width,
+      rect.height,
+      telemetryData.attitude,
+      telemetryData.altitude,
+      telemetryData.speed,
+      telemetryData.heading
+    );
   }, [telemetryData, size]);
 
   const sizeConfig = size === 'compact' 
-    ? { width: 200, height: 200 }
-    : { width: 400, height: 350 };
+    ? { width: 300, height: 200 }
+    : { width: 600, height: 400 };
 
   return (
-    <div className="glass-panel p-3">
-      <div className="text-xs text-gray-400 mb-2 text-center">
-        Primary Flight Display
-      </div>
-      
-      <canvas 
-        ref={canvasRef}
-        className="border border-gray-600 rounded"
-        style={{ 
-          width: `${sizeConfig.width}px`, 
-          height: `${sizeConfig.height}px` 
-        }}
-      />
-    </div>
+    <canvas 
+      ref={canvasRef}
+      className="pointer-events-none"
+      style={{ 
+        width: `${sizeConfig.width}px`, 
+        height: `${sizeConfig.height}px`,
+        background: 'transparent'
+      }}
+    />
   );
 };
