@@ -1,6 +1,0 @@
-{
-  "valueParamList": [
-    "{\"frontLEDsOn\":true,\"statusIndicatorLEDsOn\":true,\"rearLEDsOn\":true,\"navigationLEDsOn\":true}",
-    "{\"frontLEDsOn\":false,\"statusIndicatorLEDsOn\":false,\"rearLEDsOn\":false,\"navigationLEDsOn\":false}"
-  ]
-}
