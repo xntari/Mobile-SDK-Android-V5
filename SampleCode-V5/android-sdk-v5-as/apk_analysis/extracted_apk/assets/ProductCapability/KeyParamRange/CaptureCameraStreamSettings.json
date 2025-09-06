@@ -1,8 +1,0 @@
-{
-  "dependKeyName": "CameraMode",
-  "dependKeyValue": "{\"value\":0}",
-  "valueParamList": [
-    "{\"requestCurrentScreen\":false,\"cameraVideoStreamSources\":[1,2]}",
-    "{\"requestCurrentScreen\":true,\"cameraVideoStreamSources\":[1,2]}"
-  ]
-}
