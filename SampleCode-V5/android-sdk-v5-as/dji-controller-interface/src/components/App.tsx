@@ -6,6 +6,7 @@ import { TakeOffButton } from './TakeOffButton';
 import { ReturnHomeButton } from './ReturnHomeButton';
 import { HSICompass } from './HSICompass';
 import { MapDisplay } from './MapDisplay';
+import { FlightDisplay } from './FlightDisplay';
 import { CameraControls } from './CameraControls';
 import { ConnectionStatus } from './ConnectionStatus';
 
@@ -60,30 +61,19 @@ export const App: React.FC = () => {
             </div>
           </div>
           
-          {/* Flight data overlay - Top Center */}
-          <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-20">
-            <div className="glass-panel p-3 text-sm">
-              <div className="flex items-center gap-4 mb-2">
-                {bridgeData.telemetry && (
-                  <>
-                    <div>
-                      <span className="text-gray-300">ALT: </span>
-                      <span className="font-mono">{bridgeData.telemetry.altitude.toFixed(1)}m</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-300">SPD: </span>
-                      <span className="font-mono">{bridgeData.telemetry.speed.toFixed(1)}m/s</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-300">DIST: </span>
-                      <span className="font-mono">{bridgeData.telemetry.distance_to_home.toFixed(1)}m</span>
-                    </div>
-                  </>
-                )}
-              </div>
-              {/* Controller joystick data */}
-              {bridgeData.controller && (
-                <div className="flex items-center gap-4 text-xs border-t border-gray-600 pt-2">
+          {/* Primary Flight Display - Bottom Center */}
+          <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 z-20">
+            <FlightDisplay 
+              telemetryData={bridgeData.telemetry}
+              size="compact"
+            />
+          </div>
+
+          {/* Controller data overlay - Top Center */}
+          {bridgeData.controller && (
+            <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-20">
+              <div className="glass-panel p-2 text-xs">
+                <div className="flex items-center gap-4">
                   <div>
                     <span className="text-gray-400">L: </span>
                     <span className="font-mono text-dji-blue">
@@ -97,9 +87,9 @@ export const App: React.FC = () => {
                     </span>
                   </div>
                 </div>
-              )}
+              </div>
             </div>
-          </div>
+          )}
         </FPVDisplay>
       </div>
     </div>

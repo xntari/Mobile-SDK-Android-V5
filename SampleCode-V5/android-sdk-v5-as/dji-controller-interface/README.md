@@ -12,10 +12,11 @@ Electron app that replicates the DJI controller interface with real-time data di
 - ✅ **Cross-platform desktop application** (macOS, Windows, Linux via Electron)
 - ✅ **Flight controls** (takeoff, return home) - UI ready, commands implemented
 - ✅ **Camera controls and gimbal control** - Full interface with photo, recording, gimbal positioning
-- ✅ **Horizontal Situation Indicator (compass)** with live attitude data
-- ✅ **Mini map** with aircraft position tracking
+- ✅ **Horizontal Situation Indicator (HSI)** with auto-rotating compass (track-up mode)
+- ✅ **Live MapLibre minimap** with auto-rotation, OpenStreetMap tiles, and custom markers
+- ✅ **Flicker-free video rendering** with double buffering and optimized frame transitions
 - ✅ **Battery and telemetry status** with comprehensive health monitoring
-- 🔄 **Native video decoding** - Moving to Electron for robust H.264 playback (Phase 3C)
+- ✅ **Native H.264 video decoding** with WebCodecs API for hardware acceleration (Phase 3C ✅)
 
 ## Prerequisites
 
@@ -141,7 +142,8 @@ src/
 - **React + TypeScript** - UI framework
 - **Tailwind CSS** - Styling
 - **WebSocket** - Real-time communication
-- **MediaSource API** - H.264 video playback
+- **WebCodecs API** - H.264 hardware video decoding
+- **MapLibre GL JS** - Interactive maps with OpenStreetMap
 
 ### Build Commands
 ```bash
@@ -154,6 +156,15 @@ npm run dist        # Create installers
 ```
 
 ## Recent Updates (September 2025)
+
+### ✅ Phase 3C - Complete Video & Navigation System  
+Advanced the interface with professional-grade video rendering and navigation:
+
+- **Double-buffered video rendering**: Eliminated frame flicker with offscreen canvas implementation
+- **WebCodecs H.264 decoding**: Hardware-accelerated video playback with smooth frame transitions
+- **MapLibre GL integration**: Real-time minimap with OpenStreetMap tiles and custom aircraft/home markers  
+- **Auto-rotating navigation**: Both map and HSI compass auto-orient in track-up mode (aircraft always points up)
+- **Electron CSP optimization**: Updated Content Security Policy for MapLibre worker and image loading support
 
 ### ✅ Phase 3B - H.264 Video Streaming Complete  
 Successfully implemented complete video streaming pipeline:
