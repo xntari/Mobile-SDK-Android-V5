@@ -45,12 +45,57 @@ class BridgeManager {
         break;
 
       case 'telemetry_data':
+        // Convert yaw (-180 to +180) to compass heading (0 to 360)
+        const convertYawToCompass = (yaw: number): number => {
+          let compass = yaw;
+          if (compass < 0) compass += 360;
+          return compass;
+        };
+        
+        // Calculate bearing to home if we have both locations
+        const calculateBearing = (from: any, to: any): number => {
+          if (!from || !to) return 0;
+          
+          const lat1 = from.latitude * Math.PI / 180;
+          const lat2 = to.latitude * Math.PI / 180;
+          const deltaLng = (to.longitude - from.longitude) * Math.PI / 180;
+          
+          const x = Math.sin(deltaLng) * Math.cos(lat2);
+          const y = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLng);
+          
+          let bearing = Math.atan2(x, y) * 180 / Math.PI;
+          return (bearing + 360) % 360;
+        };
+        
+        // Use attitude yaw and convert to proper compass heading since compass_heading seems broken
+        const rawYaw = message.attitude?.yaw || message.compass_heading || message.heading || 0;
+        const trueCompassHeading = convertYawToCompass(rawYaw);
+        const bearingToHome = calculateBearing(message.location, message.home_location);
+        
+        // Debug compass data
+        console.log('🧭 Compass Data Debug:', {
+          received_compass_heading: message.compass_heading,
+          received_heading: message.heading,
+          attitude_yaw: message.attitude?.yaw,
+          converted_compass: trueCompassHeading,
+          bearing_to_home: bearingToHome
+        });
+
+        // Debug obstacle avoidance data
+        console.log('🚧 Obstacle Avoidance Debug:', {
+          obstacle_avoidance: message.obstacle_avoidance,
+          has_obstacle_data: !!message.obstacle_avoidance,
+          enabled: message.obstacle_avoidance?.enabled,
+          sectors_count: message.obstacle_avoidance?.sectors?.length || 0
+        });
+        
         const mappedTelemetry = {
           ...message,
           speed: message.ground_speed || message.speed || 0,
-          heading: message.compass_heading || message.heading || 0,
+          heading: trueCompassHeading,
           attitude: message.attitude || { pitch: 0, roll: 0, yaw: 0 },
-          compass_heading: message.compass_heading || 0,
+          compass_heading: trueCompassHeading,
+          home_bearing: bearingToHome,
         } as TelemetryData;
         
         this.bridgeData = {

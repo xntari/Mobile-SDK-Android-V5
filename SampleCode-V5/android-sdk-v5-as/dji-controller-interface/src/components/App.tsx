@@ -46,16 +46,17 @@ export const App: React.FC = () => {
               <MapDisplay 
                 aircraftLocation={bridgeData.telemetry?.location || null}
                 homeLocation={bridgeData.telemetry?.home_location || null}
-                compassHeading={bridgeData.telemetry?.compass_heading || 0}
+                compassHeading={bridgeData.telemetry?.compass_heading || bridgeData.telemetry?.heading || 0}
               />
               
-              {/* HSI Compass - Smaller size to fit under map */}
-              <div className="w-48 flex justify-center">
+              {/* HSI Compass - Match Live Map width */}
+              <div className="w-52">
                 <HSICompass 
                   attitude={bridgeData.telemetry?.attitude || null}
-                  heading={bridgeData.telemetry?.heading || 0}
+                  heading={bridgeData.telemetry?.compass_heading || bridgeData.telemetry?.heading || 0}
                   homeDirection={bridgeData.telemetry?.home_bearing}
                   size="small"
+                  telemetryData={bridgeData.telemetry}
                 />
               </div>
             </div>

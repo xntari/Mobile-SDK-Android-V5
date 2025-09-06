@@ -1,0 +1,49 @@
+{
+  "supportedMSDKVersion": "5.4.0",
+  "productType" : "M350_RTK_AIRLINK",
+  "supportedMinFirmwareVersion" : "00.00.00.01",
+  "component" :
+      {
+            "className": "DJIAirLinkKey",
+            "keyList":[
+              {
+                "keyName" : "KeyConnection"
+              },
+             {
+               "keyName" : "KeyAirLinkType"
+             },
+              {
+                "keyName" : "KeySignalQuality"
+              },
+              {
+                "keyName" : "KeyDynamicDataRate"
+              },
+             {
+               "keyName" : "KeyVideoDataRate"
+             },
+             {
+               "keyName" : "KeyFrequencyInterference"
+             },
+             {
+               "keyName" : "KeyFrequencyBandRange"
+             },
+             {
+               "keyName" : "KeyFrequencyBand"
+             },
+             {
+               "keyName" : "KeyChannelSelectionMode"
+             },
+             {
+               "keyName" : "KeyBandwidth"
+             },
+             {
+               "keyName" : "KeyFrequencyPointRange"
+             },
+             {
+               "keyName" : "KeyFrequencyPoint"
+             }
+           ]
+     }
+
+
+}
