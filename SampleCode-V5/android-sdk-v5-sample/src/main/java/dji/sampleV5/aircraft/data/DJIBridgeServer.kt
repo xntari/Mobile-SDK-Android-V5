@@ -824,6 +824,10 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                         var systemEnabled = false
                         var closestDistance = Double.MAX_VALUE
                         
+                        // Extract raw distance arrays
+                        val radarDistances = cachedRadarObstacleData?.horizontalObstacleDistance
+                        val perceptionDistances = cachedPerceptionObstacleData?.horizontalObstacleDistance
+                        
                         // Transform cached radar obstacle data to sectors format
                         cachedRadarObstacleData?.let { radarData ->
                             val radarSectors = transformObstacleDataToSectors(radarData, "radar")
@@ -871,7 +875,9 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                             "closest_distance" to if (closestDistance < Double.MAX_VALUE) closestDistance else null,
                             "data_source" to "PerceptionManager_Listeners",
                             "radar_available" to (cachedRadarObstacleData != null),
-                            "perception_available" to (cachedPerceptionObstacleData != null)
+                            "perception_available" to (cachedPerceptionObstacleData != null),
+                            "radar_distances" to radarDistances?.toList(),
+                            "perception_distances" to perceptionDistances?.toList()
                         )
                     } catch (e: Exception) {
                         Log.w(TAG, "Obstacle avoidance error: ${e.message}")
