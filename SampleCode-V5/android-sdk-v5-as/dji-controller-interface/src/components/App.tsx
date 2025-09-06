@@ -36,46 +36,32 @@ export const App: React.FC = () => {
       />
       
       {/* Main Content Area */}
-      <div className="flex-1 flex relative min-h-0">
-        {/* Left Side - Flight Controls */}
-        <div className="w-24 sm:w-32 bg-black bg-opacity-60 flex flex-col gap-3 p-2 sm:p-3 z-10 flex-shrink-0">
-          <TakeOffButton />
-          <ReturnHomeButton />
-          
-          {/* Controller Status */}
-          <div className="mt-auto">
-            <div className="glass-panel p-2 text-xs">
-              <div className="text-gray-300">RC Signal</div>
-              <div className="status-good font-mono">
-                {bridgeData.controller?.virtual_stick_enabled ? 'VIRTUAL' : 'MANUAL'}
+      <div className="flex-1 relative bg-black">
+        <FPVDisplay className="w-full h-full">
+          {/* Navigation panel - Top Left Corner */}
+          <div className="absolute top-4 left-4 z-20">
+            <div className="flex flex-col space-y-2">
+              {/* Minimap */}
+              <MapDisplay 
+                aircraftLocation={bridgeData.telemetry?.location || null}
+                homeLocation={bridgeData.telemetry?.home_location || null}
+                compassHeading={bridgeData.telemetry?.compass_heading || 0}
+              />
+              
+              {/* HSI Compass - Smaller size to fit under map */}
+              <div className="w-48 flex justify-center">
+                <HSICompass 
+                  attitude={bridgeData.telemetry?.attitude || null}
+                  heading={bridgeData.telemetry?.heading || 0}
+                  homeDirection={bridgeData.telemetry?.home_bearing}
+                  size="small"
+                />
               </div>
             </div>
           </div>
-        </div>
-        
-        {/* Center - Video Display */}
-        <div className="flex-1 relative bg-black min-w-0">
-          <FPVDisplay className="w-full h-full" />
           
-          {/* Mini FPV overlay (secondary camera) */}
-          <div className="absolute top-4 left-4 z-20">
-            <div className="w-36 h-24 bg-gray-900 border border-gray-600 rounded flex items-center justify-center text-xs text-gray-400">
-              Secondary FPV
-            </div>
-          </div>
-          
-          {/* HSI Compass - Bottom Right Corner */}
-          <div className="absolute bottom-4 right-4 z-20 w-32 h-32">
-            <HSICompass 
-              attitude={bridgeData.telemetry?.attitude || null}
-              heading={bridgeData.telemetry?.heading || 0}
-              homeDirection={bridgeData.telemetry?.home_bearing}
-              size="small"
-            />
-          </div>
-          
-          {/* Flight data overlay */}
-          <div className="absolute top-4 left-44 z-20">
+          {/* Flight data overlay - Top Center */}
+          <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-20">
             <div className="glass-panel p-3 text-sm">
               <div className="flex items-center gap-4 mb-2">
                 {bridgeData.telemetry && (
@@ -114,20 +100,7 @@ export const App: React.FC = () => {
               )}
             </div>
           </div>
-        </div>
-        
-        {/* Right Side - Camera Controls & Map */}
-        <div className="w-64 lg:w-80 bg-black bg-opacity-60 flex flex-col z-10 flex-shrink-0">
-          <CameraControls cameraData={bridgeData.camera} />
-          
-          {/* Map at bottom right */}
-          <div className="mt-auto p-4">
-            <MapDisplay 
-              aircraftLocation={bridgeData.telemetry?.location || null}
-              homeLocation={bridgeData.telemetry?.home_location || null}
-            />
-          </div>
-        </div>
+        </FPVDisplay>
       </div>
     </div>
     );

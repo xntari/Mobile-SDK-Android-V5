@@ -28,7 +28,12 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
     ctx.stroke();
 
-    // Draw compass markings
+    // Draw compass markings (rotate the compass rose instead of the arrow)
+    ctx.save();
+    ctx.translate(centerX, centerY);
+    ctx.rotate(heading * Math.PI / 180); // Rotate compass rose by heading
+    ctx.translate(-centerX, -centerY);
+    
     ctx.strokeStyle = '#9CA3AF';
     ctx.lineWidth = 1;
     ctx.font = '12px monospace';
@@ -56,30 +61,27 @@ export const HSICompass: React.FC<HSICompassProps> = ({
         ctx.fillText(labels[i / 90], labelX, labelY);
       }
     }
-
-    // Draw aircraft heading indicator (triangle pointing up)
-    ctx.save();
-    ctx.translate(centerX, centerY);
-    ctx.rotate(-heading * Math.PI / 180);
     
+    ctx.restore();
+
+    // Draw aircraft heading indicator (triangle always pointing up)
     ctx.fillStyle = '#1E88E5';
     ctx.strokeStyle = '#FFFFFF';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(0, -radius + 10);
-    ctx.lineTo(-8, -radius + 25);
-    ctx.lineTo(8, -radius + 25);
+    ctx.moveTo(centerX, centerY - radius + 10);
+    ctx.lineTo(centerX - 8, centerY - radius + 25);
+    ctx.lineTo(centerX + 8, centerY - radius + 25);
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
-    
-    ctx.restore();
 
-    // Draw home direction indicator (if available)
+    // Draw home direction indicator (if available) - relative to rotated compass
     if (homeDirection !== undefined) {
       ctx.save();
       ctx.translate(centerX, centerY);
-      ctx.rotate(-homeDirection * Math.PI / 180);
+      // Rotate by (homeDirection - heading) to account for the rotated compass rose
+      ctx.rotate(-(homeDirection - heading) * Math.PI / 180);
       
       ctx.fillStyle = '#00D084';
       ctx.strokeStyle = '#FFFFFF';

@@ -1,23 +1,33 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import maplibregl from 'maplibre-gl';
+import 'maplibre-gl/dist/maplibre-gl.css';
 import { MapDisplayProps } from '../types';
 
 export const MapDisplay: React.FC<MapDisplayProps> = ({ 
   aircraftLocation, 
   homeLocation, 
-  flightPath = [] 
+  flightPath = [],
+  compassHeading = 0
 }) => {
+  const mapContainer = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<maplibregl.Map | null>(null);
+  const aircraftMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const homeMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const [mapReady, setMapReady] = useState(false);
+
+  // Calculate distance and bearing for display
   const calculateDistance = (
     lat1: number, lon1: number, 
     lat2: number, lon2: number
   ): number => {
-    const R = 6371; // Earth's radius in km
+    const R = 6371;
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
     const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
       Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
       Math.sin(dLon/2) * Math.sin(dLon/2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-    return R * c * 1000; // Convert to meters
+    return R * c * 1000;
   };
 
   const calculateBearing = (
@@ -38,11 +48,7 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
 
   const getMapInfo = () => {
     if (!aircraftLocation || !homeLocation) {
-      return {
-        distance: 0,
-        bearing: 0,
-        valid: false
-      };
+      return { distance: 0, bearing: 0, valid: false };
     }
 
     const distance = calculateDistance(
@@ -51,8 +57,8 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
     );
 
     const bearing = calculateBearing(
-      aircraftLocation.latitude, aircraftLocation.longitude,
-      homeLocation.latitude, homeLocation.longitude
+      homeLocation.latitude, homeLocation.longitude,
+      aircraftLocation.latitude, aircraftLocation.longitude
     );
 
     return { distance, bearing, valid: true };
@@ -60,131 +66,177 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
 
   const mapInfo = getMapInfo();
 
-  // Calculate relative positions for display (simplified 2D projection)
-  const getRelativePosition = (
-    targetLat: number, targetLon: number,
-    refLat: number, refLon: number,
-    mapWidth: number, mapHeight: number
-  ) => {
-    if (!mapInfo.valid) return { x: 50, y: 50 }; // Center if no data
+  // Initialize map
+  useEffect(() => {
+    if (!mapContainer.current) return;
 
-    // Simple approximation for small distances
-    const deltaLat = (targetLat - refLat) * 111000; // meters per degree lat
-    const deltaLon = (targetLon - refLon) * 111000 * Math.cos(refLat * Math.PI / 180);
+    // Initialize MapLibre map with OpenStreetMap tiles
+    const map = new maplibregl.Map({
+      container: mapContainer.current,
+      style: {
+        version: 8,
+        sources: {
+          'osm-tiles': {
+            type: 'raster',
+            tiles: [
+              'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
+            ],
+            tileSize: 256,
+            attribution: '© OpenStreetMap contributors'
+          }
+        },
+        layers: [
+          {
+            id: 'osm-tiles-layer',
+            type: 'raster',
+            source: 'osm-tiles'
+          }
+        ]
+      },
+      center: [0, 0],
+      zoom: 16,
+      attributionControl: false,
+      logoPosition: 'bottom-right'
+    });
 
-    // Scale to fit in map (arbitrary scale factor)
-    const scale = 0.01; // Adjust based on typical flight distances
-    const x = 50 + (deltaLon * scale);
-    const y = 50 - (deltaLat * scale); // Flip Y axis
+    mapRef.current = map;
 
-    // Clamp to map bounds
-    return {
-      x: Math.max(5, Math.min(95, x)),
-      y: Math.max(5, Math.min(95, y))
+    map.on('load', () => {
+      setMapReady(true);
+    });
+
+    return () => {
+      if (mapRef.current) {
+        mapRef.current.remove();
+      }
     };
-  };
+  }, []);
 
-  const aircraftPos = aircraftLocation && homeLocation ? 
-    getRelativePosition(
-      aircraftLocation.latitude, aircraftLocation.longitude,
-      homeLocation.latitude, homeLocation.longitude,
-      160, 112
-    ) : { x: 50, y: 50 };
+  // Update map center and markers when location changes
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
 
-  const homePos = { x: 50, y: 50 }; // Home is always at center
+    const map = mapRef.current;
+
+    // Center map on aircraft if available, otherwise on home
+    const centerLocation = aircraftLocation || homeLocation;
+    if (centerLocation) {
+      map.setCenter([centerLocation.longitude, centerLocation.latitude]);
+    }
+
+    // Remove existing markers
+    if (homeMarkerRef.current) {
+      homeMarkerRef.current.remove();
+      homeMarkerRef.current = null;
+    }
+    if (aircraftMarkerRef.current) {
+      aircraftMarkerRef.current.remove();
+      aircraftMarkerRef.current = null;
+    }
+
+    // Add home marker
+    if (homeLocation) {
+      const homeEl = document.createElement('div');
+      homeEl.style.width = '8px';
+      homeEl.style.height = '8px';
+      homeEl.style.borderRadius = '50%';
+      homeEl.style.backgroundColor = '#4ade80';
+      homeEl.style.border = '2px solid white';
+
+      homeMarkerRef.current = new maplibregl.Marker({ element: homeEl })
+        .setLngLat([homeLocation.longitude, homeLocation.latitude])
+        .addTo(map);
+    }
+
+    // Add aircraft marker
+    if (aircraftLocation) {
+      const aircraftEl = document.createElement('div');
+      aircraftEl.style.width = '20px';
+      aircraftEl.style.height = '20px';
+      aircraftEl.style.fontSize = '16px';
+      aircraftEl.style.color = '#ef4444';  // Red color
+      aircraftEl.style.textShadow = '0 0 3px rgba(0,0,0,0.8)';
+      aircraftEl.style.display = 'flex';
+      aircraftEl.style.alignItems = 'center';
+      aircraftEl.style.justifyContent = 'center';
+      aircraftEl.innerHTML = '▲';
+
+      aircraftMarkerRef.current = new maplibregl.Marker({ element: aircraftEl })
+        .setLngLat([aircraftLocation.longitude, aircraftLocation.latitude])
+        .addTo(map);
+    }
+  }, [mapReady, aircraftLocation, homeLocation]);
+
+  // Auto-rotate map based on compass heading
+  useEffect(() => {
+    if (!mapReady || !mapRef.current || !aircraftLocation) return;
+
+    const map = mapRef.current;
+    
+    // Rotate map counter to compass heading so aircraft always points "up"
+    // No offset needed - MapLibre 0° points north, compass heading 0° is north
+    map.rotateTo(-compassHeading, { duration: 500 });
+  }, [mapReady, compassHeading, aircraftLocation]);
+
+  // Add flight path
+  useEffect(() => {
+    if (!mapReady || !mapRef.current || flightPath.length < 2) return;
+
+    const map = mapRef.current;
+
+    // Remove existing flight path
+    if (map.getSource('flight-path')) {
+      map.removeLayer('flight-path-layer');
+      map.removeSource('flight-path');
+    }
+
+    // Add flight path as GeoJSON
+    map.addSource('flight-path', {
+      type: 'geojson',
+      data: {
+        type: 'Feature',
+        properties: {},
+        geometry: {
+          type: 'LineString',
+          coordinates: flightPath.map(point => [point.longitude, point.latitude])
+        }
+      }
+    });
+
+    map.addLayer({
+      id: 'flight-path-layer',
+      type: 'line',
+      source: 'flight-path',
+      layout: {
+        'line-join': 'round',
+        'line-cap': 'round'
+      },
+      paint: {
+        'line-color': '#1E88E5',
+        'line-width': 2,
+        'line-opacity': 0.7
+      }
+    });
+  }, [mapReady, flightPath]);
 
   return (
-    <div className="glass-panel p-3">
-      <div className="text-xs text-gray-400 mb-2 text-center">Mini Map</div>
+    <div className="glass-panel p-3 w-52">
+      <div className="text-xs text-gray-400 mb-2 text-center">Live Map</div>
       
-      <div className="w-40 h-28 bg-gray-900 border border-gray-600 relative overflow-hidden rounded">
-        {/* Map background grid */}
-        <div className="absolute inset-0">
-          {/* Vertical lines */}
-          {[25, 50, 75].map(x => (
-            <div
-              key={`v-${x}`}
-              className="absolute top-0 bottom-0 w-px bg-gray-700 opacity-30"
-              style={{ left: `${x}%` }}
-            />
-          ))}
-          {/* Horizontal lines */}
-          {[25, 50, 75].map(y => (
-            <div
-              key={`h-${y}`}
-              className="absolute left-0 right-0 h-px bg-gray-700 opacity-30"
-              style={{ top: `${y}%` }}
-            />
-          ))}
-        </div>
-
-        {/* Flight path */}
-        {flightPath.length > 1 && (
-          <svg className="absolute inset-0 w-full h-full">
-            <polyline
-              points={flightPath.map(point => {
-                if (!homeLocation) return '0,0';
-                const pos = getRelativePosition(
-                  point.latitude, point.longitude,
-                  homeLocation.latitude, homeLocation.longitude,
-                  160, 112
-                );
-                return `${pos.x * 1.6},${pos.y * 1.12}`;
-              }).join(' ')}
-              fill="none"
-              stroke="#1E88E5"
-              strokeWidth="1"
-              opacity="0.7"
-            />
-          </svg>
-        )}
-
-        {/* Home position (center) */}
+      {/* MapLibre container */}
+      <div className="w-44 h-32 rounded border border-gray-600 overflow-hidden relative mx-auto">
         <div 
-          className="absolute w-3 h-3 transform -translate-x-1.5 -translate-y-1.5"
-          style={{ 
-            left: `${homePos.x}%`, 
-            top: `${homePos.y}%` 
-          }}
-        >
-          <div className="w-full h-full bg-status-good rounded-full border border-white animate-pulse-blue"></div>
-          <div className="absolute -top-1 -left-1 w-5 h-5 border border-status-good rounded-full opacity-50"></div>
-        </div>
+          ref={mapContainer} 
+          className="w-full h-full"
+          style={{ minHeight: '128px' }}
+        />
         
-        {/* Aircraft position */}
-        <div 
-          className="absolute w-3 h-3 transform -translate-x-1.5 -translate-y-1.5"
-          style={{ 
-            left: `${aircraftPos.x}%`, 
-            top: `${aircraftPos.y}%` 
-          }}
-        >
-          <div className="w-full h-full bg-dji-blue rounded-full border border-white"></div>
-          {/* Direction indicator */}
-          {aircraftLocation && (
-            <div 
-              className="absolute top-0 left-1/2 w-px h-2 bg-dji-blue transform -translate-x-1/2 -translate-y-2"
-              style={{ 
-                transform: `translateX(-50%) translateY(-8px) rotate(${mapInfo.bearing}deg)` 
-              }}
-            ></div>
-          )}
-        </div>
 
-        {/* Connection line between aircraft and home */}
-        {mapInfo.valid && (
-          <svg className="absolute inset-0 w-full h-full pointer-events-none">
-            <line
-              x1={`${homePos.x}%`}
-              y1={`${homePos.y}%`}
-              x2={`${aircraftPos.x}%`}
-              y2={`${aircraftPos.y}%`}
-              stroke="#6B7280"
-              strokeWidth="1"
-              strokeDasharray="2,2"
-              opacity="0.5"
-            />
-          </svg>
+        {/* Connection status indicator */}
+        {!mapReady && (
+          <div className="absolute inset-0 bg-gray-900 bg-opacity-80 flex items-center justify-center">
+            <div className="text-xs text-gray-400">Loading Map...</div>
+          </div>
         )}
       </div>
       
@@ -203,11 +255,18 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
             {mapInfo.valid ? mapInfo.bearing.toFixed(0) : '--'}°
           </div>
         </div>
+
+        <div className="text-center">
+          <div className="text-gray-400">HDG</div>
+          <div className="font-mono text-white">
+            {compassHeading?.toFixed(0) || '--'}°
+          </div>
+        </div>
       </div>
 
       {/* GPS coordinates */}
       {aircraftLocation && (
-        <div className="mt-2 text-xs text-gray-500">
+        <div className="mt-2 text-xs text-gray-500 font-mono leading-tight">
           <div>{aircraftLocation.latitude.toFixed(6)}</div>
           <div>{aircraftLocation.longitude.toFixed(6)}</div>
         </div>

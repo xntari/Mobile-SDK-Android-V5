@@ -1,19 +1,68 @@
-# DJI Android Bridge + Controller Interface
+# DJI Android Bridge + Controller Interface - HANDOFF DOCUMENT
 
-## 🚀 TLDR - Quick Start (Project Scout Bot/Drone)
+## 🚀 TLDR - You Are Here
 
-**What This Project Achieves:**
-- **End Result**: External flight control system using natural language undestanding, dynamic waypoints, with real-time HUD, live videof for computer vision and active inference
-- **DJI Android Bridge** streams live H.264 video + sensor data from DJI controller to laptop via WebSocket
-- **DJI Controller Interface** is a complete desktop app replicating DJI controller UI with live video feed
+**CURRENT STATE**: Working system with **partially functional HSI compass** and **auto-rotating minimap needed**.
 
-> ** Just finished**: Phase 3B  COMPLETE - Live H.264 video streaming system fully working
-> ** Immediate next steps**: Investigate DJI map data access, real compass/IMU integration, auto-rotating minimap  
-> ** Current State**: Full end-to-end system with live video, telemetry, and responsive UI
+**IMMEDIATE NEXT STEPS:**
+1. **Investigate DJI native map data access** - Can we use DJI's built-in MapWidget data source?
+2. **Fix HSI compass full functionality** - Arrow direction approximately correct, but full attitude display incomplete
+3. **Implement auto-rotating minimap** - Use real compass heading to drive map orientation
+
+**CONTEXT**: Live H.264 video streaming + telemetry works perfectly. UI positioning fixed. **Only compass/map integration remains incomplete**.
 
 ---
 
-## **PROJECT ARCHITECTURE OVERVIEW**
+## 📍 **CURRENT STATUS - PARTIALLY WORKING SYSTEM**
+
+### ✅ **What Works Perfectly**
+- **Live H.264 video stream** from DJI camera at 1920x1080 resolution
+- **Real-time telemetry data** - GPS, altitude, speed, distance to home, battery
+- **Live joystick data** - All 4 axes streaming at 20Hz from controller
+- **Professional desktop interface** - Electron app with DJI-style UI
+- **Responsive window behavior** - Resizable with proper aspect ratios
+- **Overlay positioning** - HSI compass (bottom-right), minimap (top-left) positioned relative to video frame
+- **Real compass data collection** - `FlightControllerKey.KeyCompassHeading` successfully integrated
+
+### ⚠️ **What's Partially Working**
+- **HSI Compass**: Arrow points approximately in correct direction, but full HSI functionality incomplete
+  - Real compass data is collected and transmitted from Android bridge
+  - Arrow direction roughly matches actual aircraft heading  
+  - Missing: Full attitude display (roll/pitch indicators), precision calibration
+- **Attitude Data**: Roll/pitch data collected but not fully displayed
+- **Minimap**: Shows aircraft/home positions but no auto-rotation based on compass heading
+
+### ❌ **What Needs Investigation**
+- **DJI native map data source**: Can we access the same map tiles that DJI Pilot app uses?
+- **Auto-rotating minimap**: How to implement smooth map rotation driven by compass heading?
+- **Complete HSI functionality**: What's missing for full attitude indicator behavior?
+
+---
+
+## 🎯 **IMMEDIATE INVESTIGATION PRIORITY**
+
+### **Research Question**: DJI MapWidget Integration
+
+**Goal**: Determine if we can access DJI's native map data source instead of using custom map provider.
+
+**Why This Matters**: 
+- DJI Pilot app has seamless auto-rotating minimap with high-quality tiles
+- Would eliminate need for external map API keys or tile sources
+- Ensures visual consistency with official DJI interface
+
+**Investigation Steps**:
+1. **Examine DJI SDK V5 MapWidget** - Can we extract/reuse the map data source?
+2. **Review DJI UX SDK widgets** - Look for map tile providers in the source
+4. **Research DJI API documentation** - Search for map tile access methods
+
+**Files to Investigate**:
+- DJI SDK V5 UX SDK map widgets
+- DJI Mobile SDK documentation for MapWidget API
+
+---
+
+## 🔧 **TECHNICAL CURRENT STATE**
+
 
 ### **Current System Flow**
 ```
@@ -35,298 +84,247 @@
 └─────────────────┘                   └──────────────────┘                     └─────────────────┘
 ```
 
-### **Data Flow Rates**
-- **Controller input**: 20Hz (50ms intervals)
-- **Telemetry data**: 5Hz (200ms intervals) 
-- **Battery data**: 1Hz (1000ms intervals)
-- **H.264 video**: ~30fps variable rate (~26KB per frame)
-- **Total bandwidth**: ~800KB/s sustained
-
-### **Key Technical Achievements**
-1. **WebCodecs Integration** - Hardware-accelerated H.264 decoding in browser/Electron
-2. **Binary WebSocket Protocol** - Efficient video frame transmission (metadata + raw H.264)
-3. **Thread-safe Android Bridge** - Multiple data sources coordinated safely
-4. **Responsive React UI** - Professional DJI-style interface with live data binding
-5. **Cross-platform Support** - Works on macOS, Windows, Linux
----
-
-
-**To Get the Full System Running Right Now:**
-```bash
-# 1. Deploy bridge to DJI controller
-./build.sh debug && ./deploy.sh debug 4LFCL5Q005GDF5
-adb -s 4LFCL5Q005GDF5 forward tcp:8080 tcp:8080  
-adb -s 4LFCL5Q005GDF5 shell am start -a dji.sampleV5.aircraft.action.START_BRIDGE
-
-# 2. Start DJI Controller Interface with LIVE H.264 VIDEO
-cd dji-controller-interface/
-npm run dev:browser  # Opens http://localhost:3000 - shows LIVE VIDEO from drone camera
-# OR
-npm run build && npm run dev  # Desktop Electron app with live video
+### What's Working**
+```
+┌─────────────────┐    WebSocket      ┌──────────────────┐    Electron IPC     ┌─────────────────┐
+│  DJI Controller │◄─────────────────►│ Electron Main    │◄───────────────────►│ React Interface │
+│   (Android)     │  JSON + H.264     │   Process        │   Video + Data      │   (Desktop UI)  │
+│                 │                   │                  │                     │                 │
+│ ✅ DJI SDK V5   │                   │ ✅ WebSocket     │                     │ ✅ Live Video   │
+│ ✅ H.264 Stream │                   │ ✅ Binary Proto  │                     │ ✅ WebCodecs    │
+│ ⚠️ Compass Data  │                   │ ✅ Data Relay    │                     │ ⚠️ HSI Compass  │
+│ ⚠️ Attitude      │                   │ ✅ Frame Handler │                     │ ⚠️ Minimap      │
+└─────────────────┘                   └──────────────────┘                     └─────────────────┘
 ```
 
-**Current state:**
-- **Live H.264 video** from drone camera at 1920x1080, ~26KB/frame
-- **Real-time telemetry** - GPS, altitude, attitude, speed
-- **Live joystick data** - All 4 axes at 20Hz
+### **Data Flow - What We Have**
+- **Controller Data**: 20Hz, all joystick axes working
+- **Telemetry Data**: 5Hz, GPS/altitude/attitude/speed working
+- **Battery Data**: 1Hz, percentage/voltage/temperature working  
+- **H.264 Video**: 30fps variable, ~26KB per frame, smooth playback
+- **Compass Data**: Real magnetometer heading collected via `FlightControllerKey.KeyCompassHeading`
 
----
+### **Current Implementation Files**
 
-## 📍 Current Status - September 2025
+**Android Bridge** (`DJIBridgeServer.kt:712-745`):
+```kotlin
+// ✅ Working - Real compass data collection
+"compass_heading" to run {
+    val compassKey = KeyTools.createKey(FlightControllerKey.KeyCompassHeading)
+    val heading = keyManager.getValue(compassKey) as? Double
+    heading ?: 0.0
+}
 
-### ✅ **COMPLETED - WORKING END-TO-END SYSTEM**
-
-**Phase 1: DJI Android Bridge** ✅ COMPLETE
-- ✅ **Real-time data streaming** - 20Hz controller + 5Hz telemetry + 1Hz battery
-- ✅ **Live H.264 video streaming** - MediaDataCenter integration with WebCodecs decoding
-- ✅ **Multi-sensor data** - GPS, altitude, attitude, battery, controller input
-- ✅ **Thread-safe WebSocket server** with JSON + binary protocol (metadata + H.264 frames)
-- ✅ **USB connection** via ADB port forwarding (no WiFi needed)
-
-**Phase 3A: DJI Controller Interface** ✅ COMPLETE  
-- ✅ **Complete desktop interface** replicating full DJI controller UI
-- ✅ **All major widgets** - TopBar, camera controls, HSI compass, mini map
-- ✅ **Stable real-time updates** - All data streams update continuously
-- ✅ **Professional UI** - DJI-style theming with Tailwind CSS
-
-**Phase 3B: H.264 Video Streaming** ✅ COMPLETE
-- ✅ **Android bridge video capture** - ICameraStreamManager with 1920x1080 resolution
-- ✅ **WebSocket binary protocol** - Efficient metadata + H.264 frame transmission
-- ✅ **WebCodecs hardware decoding** - Native browser/Electron H.264 decoding
-- ✅ **Responsive video display** - Proper scaling and aspect ratio maintenance
-- ✅ **Live video performance** - Smooth playback, <100ms latency
-
-**Phase 3C: UI Polish** ✅ COMPLETE
-- ✅ **Responsive layout** - Window resizing with all panels remaining visible
-- ✅ **HSI compass relocation** - Moved to small bottom-right overlay (128x128px)
-- ✅ **Window controls** - Proper movable/resizable Electron window
-- ✅ **Aspect ratio maintenance** - Video scales properly with window size
-
----
-
-## ⚡ **IMMEDIATE NEXT STEPS - Phase 4**
-
-### **Phase 4A: Enhanced Map Integration** 🎯 **NEXT PRIORITY**
-
-**Goal**: Investigate accessing DJI's internal map data and implement auto-rotating minimap with real compass data.
-
-**Estimated Time**: 1-2 weeks
-
-**Research Questions**:
-1. **DJI Map Data Access**: Can we access the map tiles/data that DJI Fly app uses?
-2. **Compass Integration**: How to get real magnetometer/IMU data from drone?
-3. **Auto-rotating Map**: Implement heading-based map rotation
-
-#### **Step 1: DJI Map Data Investigation** (3-4 hours)
-**Files to investigate**: 
-- `android-sdk-v5-sample/src/main/java/dji/sampleV5/aircraft/pages/MapFragment.kt`
-- Look for MapBox/MapLibre/Google Maps integration
-- Check if DJI provides map data APIs
-
-**Specific tasks**:
-```bash
-# Search for map-related code in DJI sample
-grep -r "map\|Map\|tile" android-sdk-v5-sample/src/ --include="*.kt" --include="*.java"
-grep -r "MapBox\|MapLibre\|GoogleMap" android-sdk-v5-sample/src/ --include="*.kt" --include="*.java"
-
-# Look for location/GPS data in bridge
-grep -r "location\|gps\|coordinates" android-sdk-v5-sample/src/main/java/dji/sampleV5/aircraft/data/
+// ⚠️ Partially working - Attitude data collection  
+"attitude" to run {
+    val attitudeKey = KeyTools.createKey(FlightControllerKey.KeyAircraftAttitude)
+    val attitude = keyManager.getValue(attitudeKey) as? Attitude
+    mapOf(
+        "roll" to (attitude?.roll ?: 0.0),
+        "pitch" to (attitude?.pitch ?: 0.0), 
+        "yaw" to (attitude?.yaw ?: 0.0)
+    )
+}
 ```
 
-#### **Step 2: Real Compass/IMU Data Collection** (2-3 hours)
-**Current state**: Bridge already gets attitude data (roll, pitch, yaw), need to verify compass accuracy.
-
-**Enhance bridge data collection**:
-- Add magnetometer data if available
-- Verify GPS coordinates are accurate for map positioning  
-- Add home location and distance/bearing calculations
-
-**Files to modify**:
-- `DJIBridgeServer.kt` - Add magnetometer listeners
-- Test compass accuracy against DJI Fly app
-
-#### **Step 3: Auto-rotating Minimap Implementation** (4-5 hours)
-**Files**: `dji-controller-interface/src/components/MapDisplay.tsx`
-
-**Features to add**:
-- Real GPS positioning using bridge coordinates
-- Map rotation based on aircraft heading (attitude.yaw)
-- Aircraft icon that maintains orientation
-- Home location marker with distance/bearing
-- Map tiles from public source (OpenStreetMap, MapBox, etc.) or DJI source
-
-**Implementation approach**:
+**Desktop Interface** (`App.tsx:42-49`):
 ```typescript
-// Pseudo-code for auto-rotating map
-const MapDisplay = ({ aircraftLocation, heading, homeLocation }) => {
-  return (
-    <div style={{ 
-      transform: `rotate(${-heading}deg)`, // Rotate map opposite to heading
-      transformOrigin: 'center'
-    }}>
-      <MapContainer center={aircraftLocation}>
-        <AircraftMarker position={aircraftLocation} />
-        <HomeMarker position={homeLocation} />
-      </MapContainer>
-    </div>
-  );
+// ✅ Working - HSI compass positioning
+<div className="absolute bottom-8 right-8 z-20 w-32 h-32">
+  <HSICompass 
+    attitude={bridgeData.telemetry?.attitude || null}
+    heading={bridgeData.telemetry?.heading || 0}
+    homeDirection={bridgeData.telemetry?.home_bearing}
+    size="small"
+  />
+</div>
+```
+
+**Data Mapping** (`bridgeManager.ts:45-50`):
+```typescript
+// ✅ Working - Compass data mapping
+const mappedTelemetry = {
+    ...message,
+    heading: message.compass_heading || message.heading || 0,
+    compass_heading: message.compass_heading || 0,
 };
 ```
 
-#### **Step 4: Map Data Source Integration** (3-4 hours)
-**Options to investigate**:
-1. **DJI's map source** (preferred) - Research if accessible
-2. **OpenStreetMap** - Free, good coverage
-3. **MapBox** - Professional, requires API key
-4. **Google Maps** - Requires API key, licensing
-
-**Integration priorities**:
-1. Try to reverse-engineer DJI's map data source
-2. Fallback to OpenStreetMap for offline capability
-3. Add ability to switch between map sources
-
 ---
 
-### **Phase 4B: Bidirectional Flight Control** (Secondary Priority)
+## 🕒 **HOW TO REPRODUCE CURRENT STATE**
 
-**Goal**: Enable laptop → drone control (joystick override, flight commands)
-
-**Estimated Time**: 4-5 hours
-
-**Tasks**:
-1. **Add bridge command handling** - Extend WebSocket to accept commands from laptop
-2. **Implement virtual stick override** - Allow laptop to control drone movement
-3. **Flight mode commands** - Takeoff, land, return home from interface
-4. **Safety mechanisms** - Emergency stop, control timeout, manual override
-
-**Files to modify**:
-- `DJIBridgeServer.kt` - Add command reception and virtual stick control
-- `dji-controller-interface/src/hooks/useBridgeCommands.ts` - Command sending
-- UI components for manual flight control
-
-
----
-
-## 📁 **KEY FILES AND LOCATIONS**
-
-### **Android Bridge (Kotlin)**
-```
-android-sdk-v5-sample/src/main/java/dji/sampleV5/aircraft/
-├── DJIBridgeActivity.kt          # Main bridge activity
-├── data/DJIBridgeServer.kt       # WebSocket server + H.264 streaming
-└── data/                         # Data collection and management
-```
-
-### **Desktop Interface (Electron + React)**
-```
-dji-controller-interface/
-├── src/components/
-│   ├── App.tsx                   # Main application layout
-│   ├── FPVDisplay.tsx           # H.264 video display with WebCodecs
-│   ├── TopBar.tsx               # Flight status and controls
-│   ├── HSICompass.tsx           # Small compass overlay (bottom-right)
-│   ├── MapDisplay.tsx           # Mini map (NEXT: auto-rotating)
-│   └── ...                      # Other DJI widgets
-├── src/hooks/
-│   ├── useStableBridgeData.ts   # Singleton data management
-│   └── useBridgeCommands.ts     # Command sending (for future use)
-├── src/main.ts                  # Electron main process
-├── src/preload.ts               # IPC bridge
-├── src/browser.tsx              # Browser development mode
-└── package.json                 # Dependencies and scripts
-```
-
-### **Development Tools**
-```
-├── build.sh / deploy.sh         # Android build and deployment
-├── test_bridge.js               # WebSocket client for testing
-├── docs/TODO.md                 # This handoff document
-└── README.md                    # Complete setup documentation
-```
-
----
-
-## 🚨 **TROUBLESHOOTING COMMON ISSUES**
-
-### **H.264 Video Not Displaying**
-**Symptoms**: Interface shows "Receiving H.264 Stream" but no video
-
-**Solutions**:
-1. **Check camera activation**: Ensure camera is recording/active on DJI controller
-2. **Browser compatibility**: Use Chrome 94+, Edge 94+, or Firefox 90+ for WebCodecs
-3. **Check bridge logs**: 
-   ```bash
-   adb -s 4LFCL5Q005GDF5 logcat | grep "VIDEO_STREAM\|DJIBridge"
-   ```
-4. **Verify H.264 frames**: Should see "📹 Video frame: XXXX bytes" in interface
-
-### **Bridge Connection Issues**
-**Problem**: Interface shows "Connecting..." or "Connection Error"
-
-**Solutions**:
+### **Quick Start Commands**
 ```bash
-# 1. Verify bridge is running and port is open
-adb -s 4LFCL5Q005GDF5 shell netstat -ln | grep 8080  # Should show LISTEN
+# 1. Deploy bridge to DJI controller  
+./build.sh debug && ./deploy.sh debug [YOUR_DEVICE_ID]
 
-# 2. Check port forwarding
-adb forward tcp:8080 tcp:8080
-adb forward --list  # Should show tcp:8080 forwarding
+# 2. ⚠️ CRITICAL: Re-establish port forwarding (lost after controller restart)
+adb -s [YOUR_DEVICE_ID] forward tcp:8080 tcp:8080
 
-# 3. Test direct connection
-node test_bridge.js localhost  # Should show live data
+# 3. Launch bridge on controller
+adb -s [YOUR_DEVICE_ID] shell am start -a dji.sampleV5.aircraft.action.START_BRIDGE
 
-# 4. Restart bridge if needed
-adb -s 4LFCL5Q005GDF5 shell am force-stop dji.sampleV5.aircraft
-adb -s 4LFCL5Q005GDF5 shell am start -a dji.sampleV5.aircraft.action.START_BRIDGE
+# 4. Start desktop interface (RECOMMENDED: browser mode for development)
+cd dji-controller-interface/
+npm run dev:browser  # Opens http://localhost:3000
 ```
 
-### **Performance Issues**
-**Problem**: Video stuttering or high CPU usage
+### **What You Should See**
+✅ **Working**: Live video from drone camera, real-time flight data, joystick values updating  
+⚠️ **Partial**: HSI compass arrow pointing roughly correct direction  
+❌ **Missing**: Auto-rotating minimap, full HSI attitude display
 
-**Solutions**:
-1. **Use Electron mode**: `npm run dev` instead of browser mode for better performance
-2. **Check video decoder**: Should use hardware acceleration (check DevTools Performance tab)
-3. **Monitor bandwidth**: ~800KB/s is normal; higher suggests issues
-4. **Close other apps**: H.264 decoding is CPU/GPU intensive
-
-### **Window Resizing Issues**
-**Problem**: UI elements cut off when window is small
-
-**Fixed in Phase 3C**: Window now properly resizes with responsive breakpoints:
-- Left panel: 96px (small) → 128px (large screens)
-- Right panel: 256px (medium) → 320px (large screens) 
-- Minimum window size: 800x600
+### **Key Testing Points**
+- **Compass accuracy**: Arrow should track aircraft heading within ~10° (currently approximate)
+- **Video quality**: 1920x1080 H.264 stream with <100ms latency
+- **Data rates**: 20Hz controller + 5Hz telemetry + 1Hz battery
+- **UI responsiveness**: Window resizing maintains video aspect ratio
 
 ---
 
-## 🎯 **SUCCESS CRITERIA FOR PHASE 4A**
+## 🎯 **NEXT STEPS - PRIORITIZED ACTION PLAN**
 
-### **Map Integration Goals**
-1. **Real GPS positioning** - Aircraft icon moves based on actual GPS coordinates
-2. **Auto-rotating map** - Map rotates based on aircraft heading for intuitive navigation
-3. **Accurate compass** - HSI compass matches real magnetometer data
-4. **Map data source** - Either DJI's tiles or reliable alternative (OpenStreetMap/MapBox)
-5. **Home location tracking** - Distance and bearing from takeoff point
+### **Step 1: Investigate DJI Native Map Data (HIGH PRIORITY)**
 
-### **Technical Specifications**
-- Map update rate: 5Hz (matching telemetry data)
-- Map rotation: Smooth interpolation, not jerky
-- GPS accuracy: Within 3-5 meters of DJI Fly app
-- Compass accuracy: Within 2-3 degrees of DJI Fly app
-- Performance: <5% CPU overhead for map rendering
+**Goal**: Determine feasibility of using DJI's built-in map tiles
 
-### **User Experience**
-- Aircraft always centered on mini map
-- Map oriented so "up" is forward direction of aircraft
-- Clear visual distinction between aircraft icon and home marker
-- Zoom level adjusts automatically based on distance from home
+**Actions**:
+
+1. **Research DJI SDK V5 MapWidget API**:
+   - Look for map tile provider configuration
+   - Check if DJI provides tile server endpoints
+   - Investigate MapLibre/Google Maps integration points
+
+2. **Test map data access**:
+   - Try extracting tile URLs from DJI SDK
+   - Test accessing DJI map servers directly
+   - Compare with OpenStreetMap/MapBox alternatives
+
+**Success Criteria**: 
+- Can access same map tiles as DJI Pilot app
+- No external API keys needed
+- Visual consistency with official DJI interface
+
+### **Step 2: Complete HSI Compass Functionality (MEDIUM PRIORITY)**
+
+**Current Issue**: Arrow direction approximately correct but full HSI incomplete
+
+**Investigation Areas**:
+1. **Compass calibration**: Is our heading data properly calibrated?
+2. **Attitude integration**: How to properly display roll/pitch on HSI?
+3. **Visual accuracy**: Does our HSI match DJI Pilot app presentation?
+
+**Files to Modify**:
+- `HSICompass.tsx` - Fix attitude display and visual accuracy
+- `DJIBridgeServer.kt` - Verify compass/attitude data accuracy
+- `types.ts` - Ensure proper data structure definitions
+
+### **Step 3: Implement Auto-Rotating Minimap (MEDIUM PRIORITY)**
+
+**Goal**: Map rotates based on aircraft heading, aircraft always points "up"
+
+**Implementation Approach**:
+```typescript
+// Counter-rotate map so aircraft points up
+<div style={{ 
+  transform: `rotate(${-compassHeading}deg)`,
+  transformOrigin: 'center center'
+}}>
+  <MapContainer>
+    {/* Map tiles rotate, aircraft icon stays pointing up */}
+  </MapContainer>
+</div>
+```
+
+**Requirements**:
+- Smooth rotation interpolation (not jerky)
+- Aircraft always centered and pointing up
+- North indicator shows true north direction
+- Compatible with chosen map tile source
 
 ---
 
-**📝 Project Status**: Phase 3B ✅ Complete - Full H.264 video streaming system working  
-**🕒 Last Updated**: September 5, 2025  
-**🔧 Development Environment**: Live video + telemetry + responsive UI all functional  
-**📊 Test Status**: End-to-end system validated - laptop displays live drone camera feed  
-**🚀 Latest Achievement**: Complete working system with H.264 video streaming at 1920x1080
+## 🚨 **KNOWN ISSUES & WORKAROUNDS**
 
-**🔥 IMMEDIATE ACTION**: Start Phase 4A map investigation - this is the next big enhancement that will make the system truly professional.
+### **Port Forwarding Must Be Re-established After Controller Restart**
+**Problem**: Connection fails after DJI controller restart  
+**Root Cause**: ADB port forwarding doesn't persist across device restarts  
+**Solution**: Always run `adb forward tcp:8080 tcp:8080` when troubleshooting connection issues
+
+### **Electron vs Browser Single Client Limitation**
+**Problem**: Only one client can connect to bridge at a time  
+**Current Workaround**: Use browser development mode (`npm run dev:browser`) for development, Electron for production testing
+
+### **Null Frame Handling in Browser Version**
+**Problem**: Occasional crash with "Cannot read properties of null (reading 'frameNumber')"  
+**Status**: Fixed in `browser.tsx` with null checks before accessing `pendingVideoFrame`
+
+---
+
+## 📁 **KEY FILES FOR NEXT DEVELOPER**
+
+### **Critical Files to Understand**
+```
+android-sdk-v5-sample/src/main/java/dji/sampleV5/aircraft/data/
+├── DJIBridgeServer.kt:712-745     # Compass/attitude data collection
+└── DJIBridgeActivity.kt           # Bridge startup and lifecycle
+
+dji-controller-interface/src/
+├── components/App.tsx:42-57        # HSI/minimap overlay positioning  
+├── components/HSICompass.tsx       # ⚠️ Partially working compass
+├── components/MapDisplay.tsx       # ❌ Needs auto-rotation
+├── bridgeManager.ts:45-50          # Compass data mapping
+└── types.ts:48-53                  # Compass/attitude data structures
+```
+
+### **External Resources**
+```
+docs/                               # This TODO.md handoff document
+README.md                           # Complete setup and status documentation
+test_bridge.js                      # WebSocket client for testing bridge connection
+```
+
+---
+
+## 💡 **DEVELOPER HANDOFF NOTES**
+
+### **If You're Coming Back to This Project**
+1. **Start with**: `./README.md` for complete current status and setup instructions
+2. **Focus on**: DJI native map data investigation - this is the key missing piece  
+3. **Test first**: Ensure basic system still works before making changes
+4. **Critical dependency**: Port forwarding must be re-established after any controller restart
+
+### **If You're a New Developer**
+1. **Read**: `./README.md` sections "Current Status" and "Getting Started"
+2. **Understand**: We have a working video streaming system with partial compass integration
+4. **Goal**: Auto-rotating minimap using DJI native map data, not external providers
+
+### **Development Environment**
+- **System**: macOS 14.6, Android SDK, DJI Controller, Node.js 18+
+- **Languages**: Kotlin (Android bridge), TypeScript/React (desktop interface)  
+- **Key Dependencies**: DJI SDK V5, Electron, WebCodecs API, Tailwind CSS
+- **Test Hardware**: DJI controller with SDK V5 support
+
+---
+
+## 📊 **PROJECT TIMELINE & ACHIEVEMENTS**
+
+**September 2025**: 
+- ✅ Phase 1: DJI Android Bridge with real-time data streaming
+- ✅ Phase 2: Desktop interface with professional DJI-style UI
+- ✅ Phase 3A: Complete UI widgets and controls  
+- ✅ Phase 3B: Live H.264 video streaming integration
+- ✅ Phase 3C: Responsive UI with proper overlay positioning
+- ⚠️ **Current**: HSI compass partially working, investigation needed for map integration
+
+**Estimated Completion for Remaining Work**: 1-2 weeks focused development  
+**Key Blocker**: Need to determine best approach for map data source (DJI native vs external)
+
+---
+
+**📝 Document Status**: Complete handoff documentation created  
+**🕒 Last Updated**: September 6, 2025  
+**📍 Current State**: Partially working HSI compass, auto-rotating minimap investigation needed  
+**🎯 Next Action**: DJI SDK MapWidget API for native map data access  
+**⚠️ Key Reminder**: Always re-establish port forwarding after controller restart: `adb forward tcp:8080 tcp:8080`

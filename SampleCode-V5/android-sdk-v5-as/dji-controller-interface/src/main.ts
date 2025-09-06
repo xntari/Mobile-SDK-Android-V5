@@ -87,8 +87,8 @@ class DJIControllerApp {
       this.wsClient.on('message', (data: WebSocket.Data) => {
         try {
           // Debug: Log what type of data we're receiving
-          const dataLength = Buffer.isBuffer(data) ? data.length : (data instanceof ArrayBuffer ? data.byteLength : 'unknown');
-          console.log(`Received data type: ${typeof data}, length: ${dataLength}`);
+          const dataLength = Buffer.isBuffer(data) ? data.length : (data instanceof ArrayBuffer ? data.byteLength : (typeof data === 'string' ? data.length : 'unknown'));
+          //console.log(`Received data type: ${typeof data}, length: ${dataLength}`);
           
           // Check if data can be parsed as JSON (text message)
           let message: BridgeMessage | null = null;
@@ -97,12 +97,12 @@ class DJIControllerApp {
           try {
             const dataStr = data.toString();
             message = JSON.parse(dataStr);
-            console.log(`✅ Parsed JSON message: ${message.type}`);
+            //console.log(`✅ Parsed JSON message: ${message.type}`);
           } catch (parseError) {
             // Not JSON, this is binary data
             isTextMessage = false;
-            const binaryDataLength = Buffer.isBuffer(data) ? data.length : (data instanceof ArrayBuffer ? data.byteLength : 'unknown');
-            console.log(`📦 Binary data received, size: ${binaryDataLength}`);
+            const binaryDataLength = Buffer.isBuffer(data) ? data.length : (data instanceof ArrayBuffer ? data.byteLength : (typeof data === 'string' ? data.length : 'unknown'));
+            //console.log(`📦 Binary data received, size: ${binaryDataLength}`);
           }
           
           if (isTextMessage && message) {
