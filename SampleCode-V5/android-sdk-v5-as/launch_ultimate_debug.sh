@@ -1,0 +1,20 @@
+#!/bin/bash
+echo "🚁 LAUNCHING DRONELINK ULTIMATE"
+echo "==============================="
+echo ""
+echo "✨ Improvements:"
+echo "   🔄 Fixed curve calculations (Catmull-Rom splines)"
+echo "   🏔️ Added 3D terrain view with Mapbox GL"
+echo "   🧹 Cleaned up branding"
+echo "   🎯 Improved path smoothing"
+echo ""
+echo "🗺️ Three map views:"
+echo "   📡 Satellite imagery"
+echo "   🛣️ Street view"
+echo "   🏔️ 3D terrain with buildings"
+echo ""
+echo "🌐 Opening http://localhost:3004"
+echo "Press Ctrl+C to stop when done."
+echo ""
+
+node dronelink_ultimate.js

@@ -131,7 +131,7 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
       telemetryData.attitude,
       telemetryData.altitude,
       telemetryData.speed,
-      telemetryData.heading
+      telemetryData.compass_heading || telemetryData.heading
     );
   }, [telemetryData, size]);
 

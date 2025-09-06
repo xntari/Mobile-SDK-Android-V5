@@ -2,14 +2,14 @@
 
 ## 🚀 TLDR - You Are Here
 
-**CURRENT STATE**: Working system with **partially functional HSI compass** and **auto-rotating minimap needed**.
+**CURRENT STATE**: Working system with **HSI compass** and **obstacle avoidance structure implemented**.
 
 **IMMEDIATE NEXT STEPS:**
-1. **Investigate DJI native map data access** - Can we use DJI's built-in MapWidget data source?
-2. **Fix HSI compass full functionality** - Arrow direction approximately correct, but full attitude display incomplete
-3. **Implement auto-rotating minimap** - Use real compass heading to drive map orientation
+1. **Complete PerceptionManager integration** - Add real-time obstacle data listeners using same pattern as official HSI widget
+2. **Implement auto-rotating minimap** - Use real compass heading to drive map orientation
+3. **Test obstacle detection** - Deploy updated bridge and verify obstacle sectors display in HSI
 
-**CONTEXT**: Live H.264 video streaming + telemetry works perfectly. UI positioning fixed. **Only compass/map integration remains incomplete**.
+**CONTEXT**: Live H.264 video streaming + telemetry works perfectly. HSI now uses same SDK keys as official DJI widget. **Obstacle avoidance pipeline ready for real data**.
 
 ---
 
@@ -39,25 +39,38 @@
 
 ---
 
-## 🎯 **IMMEDIATE INVESTIGATION PRIORITY**
+## 🎯 **IMMEDIATE IMPLEMENTATION PRIORITY**
 
-### **Research Question**: DJI MapWidget Integration
+### **Task 1**: Complete PerceptionManager Integration (HIGH PRIORITY)
 
-**Goal**: Determine if we can access DJI's native map data source instead of using custom map provider.
+**Goal**: Add real-time obstacle data listeners to bridge server using exact same pattern as official HSI widget.
 
-**Why This Matters**: 
-- DJI Pilot app has seamless auto-rotating minimap with high-quality tiles
-- Would eliminate need for external map API keys or tile sources
-- Ensures visual consistency with official DJI interface
+**Implementation Steps**:
+1. **Add PerceptionManager listeners in DJIBridgeServer.kt**:
+   ```kotlin
+   private val radarObstacleDataListener = ObstacleDataListener { data -> 
+       // Cache obstacle data for telemetry collection
+   }
+   private val perceptionObstacleDataListener = ObstacleDataListener { data ->
+       // Cache perception data for telemetry collection  
+   }
+   ```
+2. **Register listeners on bridge startup**:
+   ```kotlin
+   PerceptionManager.getInstance().getRadarManager().addObstacleDataListener(radarObstacleDataListener)
+   PerceptionManager.getInstance().addObstacleDataListener(perceptionObstacleDataListener)
+   ```
+3. **Transform ObstacleData to sectors format** for HSI display
+4. **Test with physical obstacles** - wave hand near drone sensors
 
-**Investigation Steps**:
-1. **Examine DJI SDK V5 MapWidget** - Can we extract/reuse the map data source?
-2. **Review DJI UX SDK widgets** - Look for map tile providers in the source
-4. **Research DJI API documentation** - Search for map tile access methods
+### **Task 2**: Auto-Rotating Minimap Implementation (MEDIUM PRIORITY)
 
-**Files to Investigate**:
-- DJI SDK V5 UX SDK map widgets
-- DJI Mobile SDK documentation for MapWidget API
+**Goal**: Map rotates based on aircraft heading, aircraft always points "up".
+
+**Implementation**:
+- Update `MapDisplay.tsx` to apply `transform: rotate(${-compassHeading}deg)` to map container
+- Ensure smooth rotation interpolation (not jerky)
+- Add north indicator showing true north direction
 
 ---
 
@@ -106,7 +119,7 @@
 
 ### **Current Implementation Files**
 
-**Android Bridge** (`DJIBridgeServer.kt:712-745`):
+**Android Bridge** (`DJIBridgeServer.kt:742-750` + `DJIBridgeServer.kt:777-820`):
 ```kotlin
 // ✅ Working - Real compass data collection
 "compass_heading" to run {
@@ -115,7 +128,7 @@
     heading ?: 0.0
 }
 
-// ⚠️ Partially working - Attitude data collection  
+// ✅ Working - Attitude data collection using same keys as HSI widget
 "attitude" to run {
     val attitudeKey = KeyTools.createKey(FlightControllerKey.KeyAircraftAttitude)
     val attitude = keyManager.getValue(attitudeKey) as? Attitude
@@ -124,6 +137,13 @@
         "pitch" to (attitude?.pitch ?: 0.0), 
         "yaw" to (attitude?.yaw ?: 0.0)
     )
+}
+
+// ⚠️ Ready for implementation - Obstacle avoidance using PerceptionManager
+"obstacle_avoidance" to run {
+    // Structure ready, need to add listeners for real-time data
+    val radarManager = PerceptionManager.getInstance().radarManager
+    // TODO: Add ObstacleDataListener and RadarInformationListener
 }
 ```
 

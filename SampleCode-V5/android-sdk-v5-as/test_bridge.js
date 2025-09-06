@@ -1,27 +1,50 @@
 #!/usr/bin/env node
 
 /**
- * DJI Android Bridge Test Client - Phase 1
+ * DJI Android Bridge Test Client - Debug Filtered Data
  * 
- * Simple WebSocket client to test the DJI controller data streaming
- * Usage: node test_bridge.js [device_ip]
+ * Focuses on specific data types to avoid video frame flood
+ * Usage: node test_bridge.js [device_ip] [filter]
+ * 
+ * Filters:
+ * - obstacle: Show only obstacle avoidance data
+ * - telemetry: Show only telemetry data (no video frames)
+ * - compass: Show only compass/heading data
+ * - all: Show all data (WARNING: includes video frames!)
  */
 
 const WebSocket = require('ws');
 const readline = require('readline');
 
 // Configuration
-const DEFAULT_IP = '192.168.1.100';  // Replace with your DJI controller IP
+const DEFAULT_IP = '127.0.0.1';  // Use localhost with port forwarding
 const WEBSOCKET_PORT = 8080;
 const RECONNECT_INTERVAL = 5000;
 
+// Data filters
+const FILTERS = {
+    obstacle: ['obstacle_avoidance'],
+    telemetry: ['telemetry_data', 'sensor_data', 'battery_status', 'gps_data'],
+    compass: ['compass_heading', 'heading', 'attitude'],
+    all: null // Show everything (dangerous with video frames)
+};
+
 class DJIBridgeClient {
-    constructor(deviceIp) {
+    constructor(deviceIp, filter = 'obstacle') {
         this.deviceIp = deviceIp || DEFAULT_IP;
+        this.filter = filter;
+        this.allowedTypes = FILTERS[filter];
         this.wsUrl = `ws://${this.deviceIp}:${WEBSOCKET_PORT}`;
         this.ws = null;
         this.reconnectTimer = null;
         this.isRunning = false;
+        
+        console.log(`🎯 Filter mode: ${filter}`);
+        if (this.allowedTypes) {
+            console.log(`📋 Showing only: ${this.allowedTypes.join(', ')}`);
+        } else {
+            console.log(`⚠️  WARNING: Showing ALL data including video frames!`);
+        }
         
         this.setupReadline();
     }
@@ -81,30 +104,69 @@ class DJIBridgeClient {
     
     handleMessage(data) {
         try {
+            // Skip binary data (video frames) by checking if it looks like JSON
+            if (data[0] !== 123) { // 123 is '{'
+                if (this.allowedTypes === null) {
+                    console.log('📹 [FILTERED] Binary video frame data');
+                }
+                return;
+            }
+            
             const message = JSON.parse(data.toString());
             
+            // Apply filter
+            if (this.allowedTypes && !this.shouldShow(message)) {
+                return; // Filtered out
+            }
+            
             if (message.type === 'controller_data') {
-                console.log('🎮 DEBUG: Received controller_data message');
-                this.displayControllerData(message);
+                console.log('🎮 Controller Data:', this.formatControllerData(message));
             } else if (message.type === 'telemetry_data') {
-                console.log('📡 DEBUG: Received telemetry_data message');
                 this.displayTelemetryData(message);
             } else if (message.type === 'battery_status') {
-                console.log('🔋 DEBUG: Received battery_status message');
-                this.displayBatteryData(message);
+                console.log('🔋 Battery:', this.formatBatteryData(message));
             } else if (message.type === 'test') {
                 console.log('✅ Test message from bridge:', message.message);
                 console.log(`   Timestamp: ${new Date(message.timestamp).toISOString()}`);
-                console.log('');
             } else {
-                console.log('📨 Unknown message type:', message.type);
-                console.log('   Full message:', JSON.stringify(message, null, 2));
+                console.log(`📨 ${message.type}:`, JSON.stringify(message, null, 2));
             }
             
         } catch (error) {
-            console.error('❌ Failed to parse message:', error.message);
-            console.log('   Raw data:', data.toString());
+            if (this.allowedTypes === null) {
+                console.error('❌ Failed to parse message:', error.message);
+            }
         }
+    }
+    
+    shouldShow(message) {
+        if (!this.allowedTypes) return true; // Show all
+        
+        // Check if message type matches filter
+        if (this.allowedTypes.includes(message.type)) return true;
+        
+        // Special check for obstacle avoidance data within telemetry
+        if (message.type === 'telemetry_data' && this.filter === 'obstacle') {
+            return message.obstacle_avoidance !== undefined;
+        }
+        
+        // Check data properties
+        if (message.data) {
+            for (const key of Object.keys(message.data)) {
+                if (this.allowedTypes.includes(key)) return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    formatControllerData(data) {
+        const j = data.joystick;
+        return `Left:(${j.left_x.toFixed(2)}, ${j.left_y.toFixed(2)}) Right:(${j.right_x.toFixed(2)}, ${j.right_y.toFixed(2)})`;
+    }
+    
+    formatBatteryData(data) {
+        return `${data.percentage}% (${data.voltage}V, ${data.temperature}°C)`;
     }
     
     displayControllerData(data) {
@@ -193,8 +255,57 @@ class DJIBridgeClient {
             if (statusIndicators.length > 0) {
                 console.log(`   Status: ${statusIndicators.join(' | ')}`);
             }
+            
+            // 🎯 Obstacle Avoidance Data (PerceptionManager integration)
+            if (data.obstacle_avoidance) {
+                this.displayObstacleData(data.obstacle_avoidance);
+            }
+            
+            // 🧭 Compass Data
+            if (data.heading !== undefined || data.compass_heading !== undefined) {
+                console.log(`   🧭 Heading: ${data.heading?.toFixed(1) || 'N/A'}° (Compass: ${data.compass_heading?.toFixed(1) || 'N/A'}°)`);
+            }
+            if (data.attitude) {
+                console.log(`   ⚡ Attitude: Roll=${data.attitude.roll?.toFixed(1)}° Pitch=${data.attitude.pitch?.toFixed(1)}° Yaw=${data.attitude.yaw?.toFixed(1)}°`);
+            }
         }
         console.log('');
+    }
+    
+    displayObstacleData(obstacle) {
+        if (!obstacle.enabled) {
+            console.log(`   🚫 Obstacle Avoidance: DISABLED`);
+            return;
+        }
+        
+        console.log(`   🛡️  OBSTACLE AVOIDANCE (${obstacle.data_source || 'Unknown'}):`);
+        console.log(`      📊 Status: ${obstacle.system_status?.toUpperCase() || 'UNKNOWN'}`);
+        console.log(`      🎯 Radar Available: ${obstacle.radar_available ? '✅' : '❌'}`);
+        console.log(`      👁️  Perception Available: ${obstacle.perception_available ? '✅' : '❌'}`);
+        
+        if (obstacle.closest_distance) {
+            const distance = obstacle.closest_distance;
+            let distanceIcon = '🟢'; // Green for safe
+            if (distance < 5) distanceIcon = '🟡'; // Yellow for caution
+            if (distance < 3) distanceIcon = '🟠'; // Orange for warning
+            if (distance < 1) distanceIcon = '🔴'; // Red for critical
+            
+            console.log(`      📏 Closest Obstacle: ${distanceIcon} ${distance.toFixed(1)}m`);
+        }
+        
+        if (obstacle.sectors && obstacle.sectors.length > 0) {
+            console.log(`      🎯 Active Warning Sectors: ${obstacle.sectors.length}`);
+            obstacle.sectors.forEach((sector, i) => {
+                const angle = sector.angle?.toFixed(0) || '?';
+                const dist = sector.distance?.toFixed(1) || '?';
+                const level = sector.warning_level || '?';
+                const source = sector.source || '?';
+                const levelIcon = {critical: '🔴', warning: '🟠', caution: '🟡'}[level] || '⚪';
+                console.log(`         ${levelIcon} Sector ${i+1}: ${angle}° at ${dist}m (${level}, ${source})`);
+            });
+        } else {
+            console.log(`      ✅ No obstacles detected`);
+        }
     }
     
     displayBatteryData(data) {

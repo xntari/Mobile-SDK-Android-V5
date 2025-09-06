@@ -14,6 +14,13 @@ import dji.sdk.keyvalue.value.common.LocationCoordinate3D
 import dji.sdk.keyvalue.value.common.Velocity3D
 import dji.sdk.keyvalue.value.common.ComponentIndexType
 import dji.sdk.keyvalue.value.common.Attitude
+import dji.v5.manager.aircraft.perception.PerceptionManager
+import dji.v5.manager.aircraft.perception.data.ObstacleData
+import dji.v5.manager.aircraft.perception.data.PerceptionInfo
+import dji.v5.manager.aircraft.perception.listener.ObstacleDataListener
+import dji.v5.manager.aircraft.perception.listener.PerceptionInformationListener
+import dji.v5.manager.aircraft.perception.radar.RadarInformation
+import dji.v5.manager.aircraft.perception.radar.RadarInformationListener
 import org.json.JSONObject
 import org.json.JSONArray
 import java.io.IOException
@@ -98,6 +105,37 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     private var videoFramesStreamed = 0L
     private val cameraIndex = ComponentIndexType.FPV // Primary camera - using FPV as default
     
+    // Obstacle avoidance data (cached from listeners for telemetry collection)
+    @Volatile
+    private var cachedRadarObstacleData: ObstacleData? = null
+    @Volatile
+    private var cachedPerceptionObstacleData: ObstacleData? = null
+    @Volatile
+    private var cachedRadarInformation: RadarInformation? = null
+    @Volatile
+    private var cachedPerceptionInformation: PerceptionInfo? = null
+    
+    // Obstacle data listeners (same pattern as official HSI widget)
+    private val radarObstacleDataListener = ObstacleDataListener { data -> 
+        cachedRadarObstacleData = data
+        Log.v(TAG, "Radar obstacle data updated: ${data.horizontalObstacleDistance?.size ?: 0} sectors")
+    }
+    
+    private val perceptionObstacleDataListener = ObstacleDataListener { data ->
+        cachedPerceptionObstacleData = data  
+        Log.v(TAG, "Perception obstacle data updated: ${data.horizontalObstacleDistance?.size ?: 0} sectors")
+    }
+    
+    private val radarInformationListener = RadarInformationListener { radarInformation ->
+        cachedRadarInformation = radarInformation
+        Log.v(TAG, "Radar information updated")
+    }
+    
+    private val perceptionInformationListener = PerceptionInformationListener { perceptionInfo ->
+        cachedPerceptionInformation = perceptionInfo
+        Log.v(TAG, "Perception information updated")
+    }
+    
     // H.264 video stream listener - streams raw video data to WebSocket clients
     private val videoStreamListener = ICameraStreamManager.ReceiveStreamListener { data, offset, length, info ->
         if (!isVideoStreamingEnabled || clients.isEmpty()) {
@@ -154,6 +192,9 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             // Start streaming controller data
             startControllerDataStreaming()
             
+            // Register obstacle data listeners (same pattern as HSI widget)
+            setupObstacleDataListeners()
+            
         } catch (e: IOException) {
             Log.e(TAG, "Failed to start server on port $port", e)
             throw e
@@ -167,6 +208,9 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         
         // Stop video streaming
         stopVideoStreaming()
+        
+        // Remove obstacle data listeners
+        cleanupObstacleDataListeners()
         
         try {
             // Close all client connections
@@ -773,8 +817,75 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                     }
                 },
                 
+                // Obstacle avoidance using real data from PerceptionManager listeners (same as HSI widget)
+                "obstacle_avoidance" to run {
+                    try {
+                        val sectors = mutableListOf<Map<String, Any>>()
+                        var systemEnabled = false
+                        var closestDistance = Double.MAX_VALUE
+                        
+                        // Transform cached radar obstacle data to sectors format
+                        cachedRadarObstacleData?.let { radarData ->
+                            val radarSectors = transformObstacleDataToSectors(radarData, "radar")
+                            sectors.addAll(radarSectors)
+                            systemEnabled = true
+                            
+                            // Find closest obstacle from horizontal obstacle distance array  
+                            radarData.horizontalObstacleDistance?.let { distances ->
+                                val minDistance = distances.minOrNull()?.let { it / 1000.0 } // Convert mm to meters
+                                if (minDistance != null && minDistance > 0 && minDistance < closestDistance) {
+                                    closestDistance = minDistance
+                                }
+                            }
+                        }
+                        
+                        // Transform cached perception obstacle data to sectors format
+                        cachedPerceptionObstacleData?.let { perceptionData ->
+                            val perceptionSectors = transformObstacleDataToSectors(perceptionData, "perception")
+                            sectors.addAll(perceptionSectors)
+                            systemEnabled = true
+                            
+                            // Find closest obstacle from horizontal obstacle distance array
+                            perceptionData.horizontalObstacleDistance?.let { distances ->
+                                val minDistance = distances.minOrNull()?.let { it / 1000.0 } // Convert mm to meters
+                                if (minDistance != null && minDistance > 0 && minDistance < closestDistance) {
+                                    closestDistance = minDistance
+                                }
+                            }
+                        }
+                        
+                        // Determine system status based on closest obstacle
+                        val systemStatus = when {
+                            !systemEnabled -> "disabled"
+                            sectors.isEmpty() -> "no_obstacles_detected"
+                            closestDistance < 1.0 -> "critical" 
+                            closestDistance < 3.0 -> "warning"
+                            closestDistance < 5.0 -> "caution"
+                            else -> "active"
+                        }
+                        
+                        mapOf(
+                            "enabled" to systemEnabled,
+                            "sectors" to sectors,
+                            "system_status" to systemStatus,
+                            "closest_distance" to if (closestDistance < Double.MAX_VALUE) closestDistance else null,
+                            "data_source" to "PerceptionManager_Listeners",
+                            "radar_available" to (cachedRadarObstacleData != null),
+                            "perception_available" to (cachedPerceptionObstacleData != null)
+                        )
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Obstacle avoidance error: ${e.message}")
+                        mapOf(
+                            "enabled" to false,
+                            "sectors" to emptyList<Map<String, Any>>(),
+                            "system_status" to "error",
+                            "error" to e.message
+                        )
+                    }
+                },
+                
                 // Note for development
-                "note" to "Phase 4A: Real compass and attitude data integrated - ready for map implementation"
+                "note" to "Phase 4C: Real-time obstacle avoidance integrated using PerceptionManager listeners"
             )
         } catch (e: Exception) {
             Log.w(TAG, "Failed to collect telemetry data: ${e.message}")
@@ -1060,5 +1171,93 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             "camera_index" to cameraIndex.name,
             "connected_clients" to clients.size
         )
+    }
+    
+    /**
+     * Transform ObstacleData to sectors format for HSI display
+     */
+    private fun transformObstacleDataToSectors(obstacleData: ObstacleData, source: String): List<Map<String, Any>> {
+        val sectors = mutableListOf<Map<String, Any>>()
+        
+        try {
+            obstacleData.horizontalObstacleDistance?.let { distances ->
+                // Process each angle in the horizontal obstacle distance array
+                distances.forEachIndexed { angleIndex, distanceInMm ->
+                    val distanceInMeters = distanceInMm / 1000.0 // Convert mm to meters
+                    if (distanceInMeters > 0) {
+                        
+                        // Determine warning level based on distance (same thresholds as HSI compass)
+                        val warningLevel = when {
+                            distanceInMeters < 1.0 -> "critical"
+                            distanceInMeters < 3.0 -> "warning" 
+                            distanceInMeters < 5.0 -> "caution"
+                            else -> "none"
+                        }
+                        
+                        // Only create sectors for obstacles that need warnings
+                        if (warningLevel != "none") {
+                            // Convert array index to angle (0-359 degrees)
+                            val angle = angleIndex * (360.0 / distances.size)
+                            
+                            sectors.add(mapOf(
+                                "angle" to angle,
+                                "distance" to distanceInMeters,
+                                "warning_level" to warningLevel,
+                                "source" to source
+                            ))
+                            
+                            Log.v(TAG, "$source obstacle: ${distanceInMeters}m at ${angle}°, level: $warningLevel")
+                        }
+                    }
+                }
+            }
+            
+        } catch (e: Exception) {
+            Log.w(TAG, "Error transforming $source obstacle data: ${e.message}")
+        }
+        
+        return sectors
+    }
+    
+    /**
+     * Setup obstacle data listeners (same pattern as HSI widget)
+     */
+    private fun setupObstacleDataListeners() {
+        try {
+            val perceptionManager = PerceptionManager.getInstance()
+            
+            // Register radar obstacle data listener
+            perceptionManager.radarManager?.addObstacleDataListener(radarObstacleDataListener)
+            perceptionManager.radarManager?.addRadarInformationListener(radarInformationListener)
+            
+            // Register perception obstacle data listener
+            perceptionManager.addObstacleDataListener(perceptionObstacleDataListener)
+            perceptionManager.addPerceptionInformationListener(perceptionInformationListener)
+            
+            Log.i(TAG, "Obstacle data listeners registered successfully")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to register obstacle data listeners: ${e.message}")
+        }
+    }
+    
+    /**
+     * Cleanup obstacle data listeners
+     */
+    private fun cleanupObstacleDataListeners() {
+        try {
+            val perceptionManager = PerceptionManager.getInstance()
+            
+            // Remove radar obstacle data listeners
+            perceptionManager.radarManager?.removeObstacleDataListener(radarObstacleDataListener)
+            perceptionManager.radarManager?.removeRadarInformationListener(radarInformationListener)
+            
+            // Remove perception obstacle data listeners
+            perceptionManager.removeObstacleDataListener(perceptionObstacleDataListener)
+            perceptionManager.removePerceptionInformationListener(perceptionInformationListener)
+            
+            Log.i(TAG, "Obstacle data listeners removed successfully")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to remove obstacle data listeners: ${e.message}")
+        }
     }
 }

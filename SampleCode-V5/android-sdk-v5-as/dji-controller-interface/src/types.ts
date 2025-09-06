@@ -50,6 +50,14 @@ export interface TelemetryData extends BridgeMessage {
   home_bearing?: number;
   satellite_count?: number;
   gps_signal_quality?: number;
+  obstacle_avoidance?: {
+    enabled: boolean;
+    sectors: Array<{
+      angle: number;      // Angle in degrees (0 = front, clockwise)
+      distance: number;   // Distance in meters
+      warning_level: 'none' | 'caution' | 'warning' | 'critical';
+    }>;
+  };
 }
 
 export interface BatteryData extends BridgeMessage {
@@ -116,6 +124,7 @@ export interface HSICompassProps {
   heading: number;
   homeDirection?: number;
   size?: 'small' | 'normal';
+  telemetryData?: TelemetryData | null; // Full telemetry for obstacle data
 }
 
 export interface MapDisplayProps {
