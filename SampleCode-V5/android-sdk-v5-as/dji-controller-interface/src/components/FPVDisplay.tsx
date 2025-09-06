@@ -10,6 +10,8 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const videoDecoderRef = useRef<VideoDecoder | null>(null);
+  const offscreenCanvasRef = useRef<OffscreenCanvas | null>(null);
+  const offscreenCtxRef = useRef<OffscreenCanvasRenderingContext2D | null>(null);
   const [videoStatus, setVideoStatus] = useState<'waiting' | 'loading' | 'playing' | 'error' | 'receiving' | 'decoding'>('waiting');
   const [frameStats, setFrameStats] = useState({ frames: 0, totalBytes: 0, lastFrame: 0, decodedFrames: 0 });
   const [decoderSupported, setDecoderSupported] = useState<boolean | null>(null);
@@ -158,6 +160,14 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
           throw new Error('Failed to get canvas context');
         }
 
+        // Create offscreen canvas for double buffering
+        offscreenCanvasRef.current = new OffscreenCanvas(1920, 1080);
+        offscreenCtxRef.current = offscreenCanvasRef.current.getContext('2d');
+        
+        if (!offscreenCtxRef.current) {
+          throw new Error('Failed to get offscreen canvas context');
+        }
+
         // Create the decoder (but don't configure until we have SPS/PPS)
         videoDecoderRef.current = new VideoDecoder({
           output: (frame: VideoFrame) => {
@@ -167,27 +177,47 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
                 setVideoDimensions({ width: frame.codedWidth, height: frame.codedHeight });
               }
               
-              // Draw the decoded frame to canvas
+              // Resize offscreen canvas if needed
+              const offscreenCanvas = offscreenCanvasRef.current;
+              const offscreenCtx = offscreenCtxRef.current;
+              
+              if (!offscreenCanvas || !offscreenCtx) {
+                frame.close();
+                return;
+              }
+              
+              if (offscreenCanvas.width !== frame.codedWidth || offscreenCanvas.height !== frame.codedHeight) {
+                offscreenCanvas.width = frame.codedWidth;
+                offscreenCanvas.height = frame.codedHeight;
+              }
+              
+              // Draw frame to offscreen canvas (back buffer)
+              offscreenCtx.clearRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+              offscreenCtx.drawImage(frame, 0, 0);
+              
+              // Now atomically copy the complete frame to the visible canvas (front buffer)
               if (canvas.width !== frame.codedWidth || canvas.height !== frame.codedHeight) {
                 canvas.width = frame.codedWidth;
                 canvas.height = frame.codedHeight;
               }
               
-              // Clear canvas and draw frame
-              ctx.clearRect(0, 0, canvas.width, canvas.height);
-              ctx.drawImage(frame, 0, 0);
+              // This is atomic - no flicker
+              ctx.drawImage(offscreenCanvas, 0, 0);
+              
               frame.close();
               
-              // Update stats  
-              setFrameStats(prev => ({
-                ...prev,
-                decodedFrames: prev.decodedFrames + 1
-              }));
-              
-              // Change to playing state on first frame
-              if (frameStats.decodedFrames === 0) {
-                setVideoStatus('playing');
-              }
+              // Update stats and immediately set to playing state
+              setFrameStats(prev => {
+                const newFrameCount = prev.decodedFrames + 1;
+                // Change to playing state immediately on first decoded frame
+                if (newFrameCount === 1) {
+                  setVideoStatus('playing');
+                }
+                return {
+                  ...prev,
+                  decodedFrames: newFrameCount
+                };
+              });
               
             } catch (error) {
               console.error('Error drawing video frame:', error);
@@ -221,6 +251,9 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
           if (videoDecoderRef.current && videoDecoderRef.current.state !== 'closed') {
             videoDecoderRef.current.close();
           }
+          // Clean up offscreen canvas references
+          offscreenCanvasRef.current = null;
+          offscreenCtxRef.current = null;
         };
 
       } catch (error) {
@@ -374,10 +407,13 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
             data: h264Data
           });
 
-          // Only set to 'decoding' if we're not already playing
-          if (videoStatus !== 'playing') {
-            setVideoStatus('decoding');
-          }
+          // Only set to 'decoding' if we're not already playing or have decoded frames
+          setFrameStats(prev => {
+            if (prev.decodedFrames === 0 && videoStatus !== 'playing') {
+              setVideoStatus('decoding');
+            }
+            return prev;
+          });
           
           //console.log(`Decoding chunk with decoder state: ${videoDecoderRef.current.state}`);
           videoDecoderRef.current.decode(chunk);
@@ -534,10 +570,11 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
           height: `${displayRect.height}px`
         }}
       >
-          {getStatusOverlay()}
+          {/* Only show error overlay when there's actually an error */}
+          {videoStatus === 'error' && getStatusOverlay()}
           
-          {/* Video info overlay */}
-          {videoStatus === 'playing' && (
+          {/* Video info overlay - always show when we have frames */}
+          {frameStats.decodedFrames > 0 && (
             <div className="absolute top-4 right-4 glass-panel p-2 text-xs">
               <div className="flex items-center gap-2">
                 <div className="w-2 h-2 bg-status-good rounded-full animate-pulse-blue"></div>
