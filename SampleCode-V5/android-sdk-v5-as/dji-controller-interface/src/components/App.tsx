@@ -61,8 +61,8 @@ export const App: React.FC = () => {
             </div>
           </div>
           
-          {/* Primary Flight Display - Bottom Center */}
-          <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 z-20">
+          {/* HUD Overlay - Center of screen */}
+          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-30">
             <FlightDisplay 
               telemetryData={bridgeData.telemetry}
               size="compact"
