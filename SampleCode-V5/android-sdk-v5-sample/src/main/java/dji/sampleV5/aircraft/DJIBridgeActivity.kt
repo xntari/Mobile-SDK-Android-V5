@@ -12,6 +12,7 @@ import dji.v5.manager.SDKManager
 import dji.v5.common.callback.CommonCallbacks
 import dji.v5.common.error.IDJIError
 import dji.sdk.keyvalue.key.RemoteControllerKey
+// GPS imports removed for now to fix build
 import dji.v5.et.create
 import dji.v5.et.listen
 
@@ -44,6 +45,9 @@ class DJIBridgeActivity : Activity() {
     @Volatile private var leftV = 0   // Throttle
     @Volatile private var rightH = 0  // Roll
     @Volatile private var rightV = 0  // Pitch
+    
+    // Listener status for UI display
+    @Volatile private var listenersRegistered = false
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -210,9 +214,13 @@ class DJIBridgeActivity : Activity() {
             LogUtils.i(TAG, "✅ Direct RC stick listeners set up successfully!")
             Log.i(TAG, "✅ Direct RC stick listeners set up successfully!")
             
+            // Mark listeners as successfully registered
+            listenersRegistered = true
+            
         } catch (e: Exception) {
             LogUtils.e(TAG, "❌ Error setting up direct RC stick monitoring: ${e.message}")
             Log.e(TAG, "❌ Error setting up direct RC stick monitoring: ${e.message}")
+            listenersRegistered = false
         }
     }
     
@@ -245,10 +253,14 @@ class DJIBridgeActivity : Activity() {
         // Log VirtualStick format for compatibility
         LogUtils.d("VirtualStick", "Input: P=${String.format("%.3f", pitch)}, R=${String.format("%.3f", roll)}, Y=${String.format("%.3f", yaw)}, T=${String.format("%.3f", throttle)}")
         
-        // Update UI with live joystick values
+        // Update UI with live joystick values and listener status
         runOnUiThread {
+            val listenerStatus = if (listenersRegistered) "✅ REGISTERED" else "❌ FAILED"
+            
             val statusMessage = """DJI Bridge running on port $WEBSOCKET_PORT
-Direct RC stick monitoring active
+RC stick monitoring + H.264 video streaming active!
+
+Listener Status: $listenerStatus
 
 Live Joystick Values:
 Left H (Yaw): $leftH (${String.format("%.2f", yaw)})

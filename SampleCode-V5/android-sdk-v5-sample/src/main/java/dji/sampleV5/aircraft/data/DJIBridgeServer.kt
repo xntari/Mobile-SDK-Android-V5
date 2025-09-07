@@ -100,10 +100,26 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     private val executor: ScheduledExecutorService = Executors.newScheduledThreadPool(4)
     
     // Video streaming
+    // ================== DUAL CAMERA STREAMING SUPPORT ==================
+    // FPV camera (always present)
+    private val fpvCameraIndex = ComponentIndexType.FPV
+    private var isFpvStreamEnabled = false
+    private var fpvBytesStreamed = 0L
+    private var fpvFramesStreamed = 0L
+    
+    // Secondary camera (H20N/Gimbal - optional)
+    private val secondaryCameraIndex = ComponentIndexType.LEFT_OR_MAIN
+    private var isSecondaryCameraAvailable = false
+    private var isSecondaryStreamEnabled = false
+    private var secondaryBytesStreamed = 0L
+    private var secondaryFramesStreamed = 0L
+    
+    // Legacy compatibility
     private var isVideoStreamingEnabled = false
     private var videoBytesStreamed = 0L
     private var videoFramesStreamed = 0L
-    private val cameraIndex = ComponentIndexType.FPV // Primary camera - using FPV as default
+    @Deprecated("Use fpvCameraIndex and secondaryCameraIndex instead")
+    private val cameraIndex = ComponentIndexType.FPV // Maintained for backward compatibility
     
     // Obstacle avoidance data (cached from listeners for telemetry collection)
     @Volatile
@@ -136,9 +152,11 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         Log.v(TAG, "Perception information updated")
     }
     
-    // H.264 video stream listener - streams raw video data to WebSocket clients
-    private val videoStreamListener = ICameraStreamManager.ReceiveStreamListener { data, offset, length, info ->
-        if (!isVideoStreamingEnabled || clients.isEmpty()) {
+    // ================== DUAL CAMERA VIDEO STREAM LISTENERS ==================
+    
+    // FPV camera stream listener (always present)
+    private val fpvVideoStreamListener = ICameraStreamManager.ReceiveStreamListener { data, offset, length, info ->
+        if (!isFpvStreamEnabled || clients.isEmpty()) {
             return@ReceiveStreamListener
         }
         
@@ -146,33 +164,90 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             // Extract H.264 frame data
             val videoFrame = data.sliceArray(offset until offset + length)
             
-            // Create video frame message with metadata
+            // Create video frame message with FPV camera metadata
             val videoFrameInfo = mapOf(
-                "frameNumber" to videoFramesStreamed,
+                "camera_source" to "fpv",           // NEW: Camera source identifier
+                "camera_index" to fpvCameraIndex.name,
+                "frameNumber" to fpvFramesStreamed,
                 "timestamp" to System.currentTimeMillis(),
                 "frameSize" to length,
                 "mimeType" to (info.mimeType?.name ?: "H264"),
                 "width" to (info.width ?: 1920),
                 "height" to (info.height ?: 1080),
-                "frameRate" to 30 // TODO: Get actual frame rate
+                "frameRate" to 30, // TODO: Get actual frame rate
+                "is_primary" to true,               // NEW: FPV is primary camera
+                "secondary_available" to isSecondaryCameraAvailable  // NEW: Secondary camera status
             )
             
             // Broadcast H.264 frame to all connected clients
             broadcastVideoFrame(videoFrame, videoFrameInfo)
             
-            // Update statistics
-            videoBytesStreamed += length
-            videoFramesStreamed++
+            // Update FPV statistics
+            fpvBytesStreamed += length
+            fpvFramesStreamed++
+            
+            // Update legacy compatibility statistics
+            videoBytesStreamed = fpvBytesStreamed + secondaryBytesStreamed
+            videoFramesStreamed = fpvFramesStreamed
             
             // Log video streaming progress
-            if (videoFramesStreamed % 30 == 0L) { // Log every 30 frames (1 second at 30fps)
-                Log.d(TAG, "Video streaming: ${videoFramesStreamed} frames, ${videoBytesStreamed / 1024 / 1024} MB streamed")
+            if (fpvFramesStreamed % 60 == 0L) { // Log every 60 frames
+                Log.d(TAG, "FPV streaming: ${fpvFramesStreamed} frames, ${fpvBytesStreamed / 1024 / 1024} MB streamed")
             }
             
         } catch (e: Exception) {
-            Log.e(TAG, "Error processing video frame", e)
+            Log.e(TAG, "Error processing FPV video frame", e)
         }
     }
+    
+    // Secondary camera stream listener (H20N/Gimbal - optional)
+    private val secondaryVideoStreamListener = ICameraStreamManager.ReceiveStreamListener { data, offset, length, info ->
+        if (!isSecondaryStreamEnabled || clients.isEmpty()) {
+            return@ReceiveStreamListener
+        }
+        
+        try {
+            // Extract H.264 frame data
+            val videoFrame = data.sliceArray(offset until offset + length)
+            
+            // Create video frame message with secondary camera metadata
+            val videoFrameInfo = mapOf(
+                "camera_source" to "secondary",     // NEW: Camera source identifier
+                "camera_index" to secondaryCameraIndex.name,
+                "frameNumber" to secondaryFramesStreamed,
+                "timestamp" to System.currentTimeMillis(),
+                "frameSize" to length,
+                "mimeType" to (info.mimeType?.name ?: "H264"),
+                "width" to (info.width ?: 1920),
+                "height" to (info.height ?: 1080),
+                "frameRate" to 30, // TODO: Get actual frame rate
+                "is_primary" to false,              // NEW: Secondary camera
+                "secondary_available" to true       // NEW: This camera is available
+            )
+            
+            // Broadcast H.264 frame to all connected clients
+            broadcastVideoFrame(videoFrame, videoFrameInfo)
+            
+            // Update secondary statistics
+            secondaryBytesStreamed += length
+            secondaryFramesStreamed++
+            
+            // Update legacy compatibility statistics
+            videoBytesStreamed = fpvBytesStreamed + secondaryBytesStreamed
+            
+            // Log video streaming progress
+            if (secondaryFramesStreamed % 60 == 0L) { // Log every 60 frames
+                Log.d(TAG, "Secondary streaming: ${secondaryFramesStreamed} frames, ${secondaryBytesStreamed / 1024 / 1024} MB streamed")
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error processing secondary video frame", e)
+        }
+    }
+    
+    // Legacy compatibility listener (deprecated but maintained)
+    @Deprecated("Use fpvVideoStreamListener and secondaryVideoStreamListener instead")
+    private val videoStreamListener = fpvVideoStreamListener
     
     fun start() {
         if (isRunning) {
@@ -1041,10 +1116,63 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         }
     }
     
+    // ================== CAMERA AVAILABILITY DETECTION ==================
+    
+    /**
+     * Detect if secondary camera (H20N/Gimbal) is available
+     */
+    private fun detectSecondaryCameraAvailability(): Boolean {
+        return try {
+            val cameraStreamManager = MediaDataCenter.getInstance().cameraStreamManager
+            
+            // Try to enable secondary camera stream briefly to test availability
+            // Note: enableStream() returns Unit, so we rely on exception handling for detection
+            cameraStreamManager.enableStream(secondaryCameraIndex, true)
+            
+            // If we get here without exception, camera is available
+            // Immediately disable it - we were just testing availability
+            cameraStreamManager.enableStream(secondaryCameraIndex, false)
+            
+            Log.i(TAG, "Secondary camera (${secondaryCameraIndex.name}) detected as available")
+            true
+            
+        } catch (e: Exception) {
+            Log.i(TAG, "Secondary camera (${secondaryCameraIndex.name}) not available: ${e.message}")
+            false
+        }
+    }
+    
+    /**
+     * Update camera availability status
+     */
+    private fun updateCameraAvailability() {
+        val previousAvailability = isSecondaryCameraAvailable
+        isSecondaryCameraAvailable = detectSecondaryCameraAvailability()
+        
+        if (previousAvailability != isSecondaryCameraAvailable) {
+            Log.i(TAG, "Camera availability changed: secondary=${isSecondaryCameraAvailable}")
+            
+            // Broadcast camera status to clients
+            val statusMessage = createMessage(
+                MessageType.SYSTEM_STATUS,
+                mapOf(
+                    "camera_status" to mapOf(
+                        "fpv_available" to true, // FPV is always available
+                        "secondary_available" to isSecondaryCameraAvailable,
+                        "secondary_camera_index" to secondaryCameraIndex.name
+                    ),
+                    "message" to "Camera availability updated"
+                )
+            )
+            broadcastToClients(statusMessage)
+        }
+    }
+
     // ================== VIDEO STREAMING METHODS ==================
     
     /**
-     * Start H.264 video streaming from DJI camera to WebSocket clients
+     * Start H.264 video streaming from DJI cameras to WebSocket clients
+     * Supports dual camera streaming (FPV + Secondary) with backward compatibility
      */
     fun startVideoStreaming() {
         if (isVideoStreamingEnabled) {
@@ -1053,30 +1181,92 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         }
         
         try {
-            Log.i(TAG, "Starting H.264 video streaming from camera $cameraIndex")
+            // First, detect camera availability
+            updateCameraAvailability()
             
-            // Add stream listener to receive H.264 frames
-            MediaDataCenter.getInstance().cameraStreamManager.addReceiveStreamListener(cameraIndex, videoStreamListener)
+            val cameraStreamManager = MediaDataCenter.getInstance().cameraStreamManager
+            var successCount = 0
             
-            // Enable camera stream
-            MediaDataCenter.getInstance().cameraStreamManager.enableStream(cameraIndex, true)
+            // ================== START FPV CAMERA STREAM (Always Present) ==================
+            Log.i(TAG, "Starting FPV video streaming from camera ${fpvCameraIndex.name}")
             
-            isVideoStreamingEnabled = true
-            videoBytesStreamed = 0L
-            videoFramesStreamed = 0L
+            try {
+                // Add FPV stream listener
+                cameraStreamManager.addReceiveStreamListener(fpvCameraIndex, fpvVideoStreamListener)
+                
+                // Enable FPV camera stream
+                cameraStreamManager.enableStream(fpvCameraIndex, true)
+                
+                isFpvStreamEnabled = true
+                fpvBytesStreamed = 0L
+                fpvFramesStreamed = 0L
+                successCount++
+                
+                Log.i(TAG, "FPV video streaming started successfully")
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start FPV video streaming", e)
+                isFpvStreamEnabled = false
+            }
             
-            Log.i(TAG, "H.264 video streaming started successfully")
+            // ================== START SECONDARY CAMERA STREAM (Optional) ==================
+            if (isSecondaryCameraAvailable) {
+                Log.i(TAG, "Starting secondary video streaming from camera ${secondaryCameraIndex.name}")
+                
+                try {
+                    // Add secondary stream listener
+                    cameraStreamManager.addReceiveStreamListener(secondaryCameraIndex, secondaryVideoStreamListener)
+                    
+                    // Enable secondary camera stream
+                    cameraStreamManager.enableStream(secondaryCameraIndex, true)
+                    
+                    isSecondaryStreamEnabled = true
+                    secondaryBytesStreamed = 0L
+                    secondaryFramesStreamed = 0L
+                    successCount++
+                    
+                    Log.i(TAG, "Secondary video streaming started successfully")
+                    
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to start secondary video streaming", e)
+                    isSecondaryStreamEnabled = false
+                    Log.w(TAG, "Continuing with FPV-only streaming")
+                }
+            } else {
+                Log.i(TAG, "Secondary camera not available - streaming FPV only")
+            }
             
-            // Broadcast video stream status to clients
-            val statusMessage = createMessage(
-                MessageType.SYSTEM_STATUS,
-                mapOf(
-                    "video_streaming_enabled" to true,
-                    "camera_index" to cameraIndex.name,
-                    "message" to "H.264 video streaming started"
+            // ================== UPDATE STREAMING STATUS ==================
+            if (successCount > 0) {
+                isVideoStreamingEnabled = true
+                videoBytesStreamed = 0L
+                videoFramesStreamed = 0L
+                
+                Log.i(TAG, "H.264 video streaming started: FPV=${isFpvStreamEnabled}, Secondary=${isSecondaryStreamEnabled}")
+                
+                // Broadcast comprehensive video stream status to clients
+                val statusMessage = createMessage(
+                    MessageType.SYSTEM_STATUS,
+                    mapOf(
+                        "video_streaming_enabled" to true,
+                        "dual_camera_streaming" to mapOf(
+                            "fpv_enabled" to isFpvStreamEnabled,
+                            "fpv_camera_index" to fpvCameraIndex.name,
+                            "secondary_enabled" to isSecondaryStreamEnabled,
+                            "secondary_available" to isSecondaryCameraAvailable,
+                            "secondary_camera_index" to secondaryCameraIndex.name,
+                            "total_streams" to successCount
+                        ),
+                        // Legacy compatibility
+                        "camera_index" to fpvCameraIndex.name,  // For backward compatibility
+                        "message" to "H.264 dual camera streaming started (${successCount} streams active)"
+                    )
                 )
-            )
-            broadcastToClients(statusMessage)
+                broadcastToClients(statusMessage)
+                
+            } else {
+                throw Exception("No camera streams could be started")
+            }
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start video streaming", e)
@@ -1086,7 +1276,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 MessageType.ERROR,
                 mapOf(
                     "error" to "Failed to start video streaming: ${e.message}",
-                    "component" to "video_stream"
+                    "component" to "dual_video_stream"
                 )
             )
             broadcastToClients(errorMessage)
@@ -1094,7 +1284,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     }
     
     /**
-     * Stop H.264 video streaming
+     * Stop H.264 video streaming for both cameras
      */
     fun stopVideoStreaming() {
         if (!isVideoStreamingEnabled) {
@@ -1103,32 +1293,92 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         }
         
         try {
-            Log.i(TAG, "Stopping H.264 video streaming")
+            Log.i(TAG, "Stopping H.264 dual camera video streaming")
             
-            // Remove stream listener
-            MediaDataCenter.getInstance().cameraStreamManager.removeReceiveStreamListener(videoStreamListener)
+            val cameraStreamManager = MediaDataCenter.getInstance().cameraStreamManager
             
-            // Disable camera stream
-            MediaDataCenter.getInstance().cameraStreamManager.enableStream(cameraIndex, false)
+            // ================== STOP FPV CAMERA STREAM ==================
+            if (isFpvStreamEnabled) {
+                try {
+                    Log.i(TAG, "Stopping FPV video streaming")
+                    
+                    // Remove FPV stream listener
+                    cameraStreamManager.removeReceiveStreamListener(fpvVideoStreamListener)
+                    
+                    // Disable FPV camera stream
+                    cameraStreamManager.enableStream(fpvCameraIndex, false)
+                    
+                    Log.i(TAG, "FPV streaming stopped. Stats: ${fpvFramesStreamed} frames, ${fpvBytesStreamed / 1024 / 1024} MB")
+                    
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error stopping FPV video streaming", e)
+                }
+                
+                isFpvStreamEnabled = false
+            }
             
+            // ================== STOP SECONDARY CAMERA STREAM ==================
+            if (isSecondaryStreamEnabled) {
+                try {
+                    Log.i(TAG, "Stopping secondary video streaming")
+                    
+                    // Remove secondary stream listener
+                    cameraStreamManager.removeReceiveStreamListener(secondaryVideoStreamListener)
+                    
+                    // Disable secondary camera stream
+                    cameraStreamManager.enableStream(secondaryCameraIndex, false)
+                    
+                    Log.i(TAG, "Secondary streaming stopped. Stats: ${secondaryFramesStreamed} frames, ${secondaryBytesStreamed / 1024 / 1024} MB")
+                    
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error stopping secondary video streaming", e)
+                }
+                
+                isSecondaryStreamEnabled = false
+            }
+            
+            // ================== UPDATE STREAMING STATUS ==================
             isVideoStreamingEnabled = false
             
-            Log.i(TAG, "H.264 video streaming stopped. Stats: ${videoFramesStreamed} frames, ${videoBytesStreamed / 1024 / 1024} MB total")
+            val totalFrames = fpvFramesStreamed + secondaryFramesStreamed
+            val totalBytes = fpvBytesStreamed + secondaryBytesStreamed
             
-            // Broadcast video stream status to clients
+            Log.i(TAG, "H.264 dual camera streaming stopped. Total stats: ${totalFrames} frames, ${totalBytes / 1024 / 1024} MB")
+            
+            // Broadcast comprehensive video stream status to clients
             val statusMessage = createMessage(
                 MessageType.SYSTEM_STATUS,
                 mapOf(
                     "video_streaming_enabled" to false,
-                    "frames_streamed" to videoFramesStreamed,
-                    "bytes_streamed" to videoBytesStreamed,
-                    "message" to "H.264 video streaming stopped"
+                    "dual_camera_streaming" to mapOf(
+                        "fpv_enabled" to false,
+                        "secondary_enabled" to false,
+                        "fpv_stats" to mapOf(
+                            "frames_streamed" to fpvFramesStreamed,
+                            "bytes_streamed" to fpvBytesStreamed,
+                            "mb_streamed" to (fpvBytesStreamed / 1024 / 1024)
+                        ),
+                        "secondary_stats" to mapOf(
+                            "frames_streamed" to secondaryFramesStreamed,
+                            "bytes_streamed" to secondaryBytesStreamed,
+                            "mb_streamed" to (secondaryBytesStreamed / 1024 / 1024)
+                        ),
+                        "total_stats" to mapOf(
+                            "frames_streamed" to totalFrames,
+                            "bytes_streamed" to totalBytes,
+                            "mb_streamed" to (totalBytes / 1024 / 1024)
+                        )
+                    ),
+                    // Legacy compatibility
+                    "frames_streamed" to totalFrames,
+                    "bytes_streamed" to totalBytes,
+                    "message" to "H.264 dual camera streaming stopped"
                 )
             )
             broadcastToClients(statusMessage)
             
         } catch (e: Exception) {
-            Log.e(TAG, "Error stopping video streaming", e)
+            Log.e(TAG, "Error stopping dual camera video streaming", e)
         }
     }
     
@@ -1166,15 +1416,39 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     }
     
     /**
-     * Get video streaming statistics
+     * Get dual camera video streaming statistics
      */
     fun getVideoStreamingStats(): Map<String, Any> {
+        val totalFrames = fpvFramesStreamed + secondaryFramesStreamed
+        val totalBytes = fpvBytesStreamed + secondaryBytesStreamed
+        
         return mapOf(
             "enabled" to isVideoStreamingEnabled,
-            "frames_streamed" to videoFramesStreamed,
-            "bytes_streamed" to videoBytesStreamed,
-            "mb_streamed" to (videoBytesStreamed / 1024 / 1024),
-            "camera_index" to cameraIndex.name,
+            "dual_camera_streaming" to mapOf(
+                "fpv_enabled" to isFpvStreamEnabled,
+                "secondary_enabled" to isSecondaryStreamEnabled,
+                "secondary_available" to isSecondaryCameraAvailable,
+                "fpv_stats" to mapOf(
+                    "frames_streamed" to fpvFramesStreamed,
+                    "bytes_streamed" to fpvBytesStreamed,
+                    "mb_streamed" to (fpvBytesStreamed / 1024 / 1024)
+                ),
+                "secondary_stats" to mapOf(
+                    "frames_streamed" to secondaryFramesStreamed,
+                    "bytes_streamed" to secondaryBytesStreamed,
+                    "mb_streamed" to (secondaryBytesStreamed / 1024 / 1024)
+                ),
+                "total_stats" to mapOf(
+                    "frames_streamed" to totalFrames,
+                    "bytes_streamed" to totalBytes,
+                    "mb_streamed" to (totalBytes / 1024 / 1024)
+                )
+            ),
+            // Legacy compatibility
+            "frames_streamed" to totalFrames,
+            "bytes_streamed" to totalBytes,
+            "mb_streamed" to (totalBytes / 1024 / 1024),
+            "camera_index" to fpvCameraIndex.name,  // For backward compatibility
             "connected_clients" to clients.size
         )
     }
