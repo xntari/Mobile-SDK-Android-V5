@@ -42,18 +42,34 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     const canvas = event.currentTarget;
     const rect = canvas.getBoundingClientRect();
     
+    // Calculate click position relative to the canvas
+    const clickX = event.clientX - rect.left;
+    const clickY = event.clientY - rect.top;
+    
+    console.log(`🎯 Click debug: canvas(${rect.width}x${rect.height}), click(${clickX.toFixed(1)}, ${clickY.toFixed(1)}), displayRect(${displayRect.left}, ${displayRect.top}, ${displayRect.width}x${displayRect.height})`);
+    
+    // If displayRect is not initialized, use full canvas
+    const effectiveDisplayRect = displayRect.width > 0 ? displayRect : { left: 0, top: 0, width: rect.width, height: rect.height };
+    
+    // Check if click is within the effective display area
+    if (clickX < effectiveDisplayRect.left || clickX > effectiveDisplayRect.left + effectiveDisplayRect.width ||
+        clickY < effectiveDisplayRect.top || clickY > effectiveDisplayRect.top + effectiveDisplayRect.height) {
+      console.log(`🎯 Click outside video area: click(${clickX.toFixed(1)}, ${clickY.toFixed(1)}) vs bounds(${effectiveDisplayRect.left}, ${effectiveDisplayRect.top}, ${effectiveDisplayRect.width}x${effectiveDisplayRect.height})`);
+      return;
+    }
+    
     // Convert to normalized coordinates (0.0-1.0)
-    const x = (event.clientX - rect.left) / rect.width;
-    const y = (event.clientY - rect.top) / rect.height;
+    const x = (clickX - effectiveDisplayRect.left) / effectiveDisplayRect.width;
+    const y = (clickY - effectiveDisplayRect.top) / effectiveDisplayRect.height;
     
     const clickId = `click-${Date.now()}`;
     console.log(`🎯 H20N Canvas clicked at normalized coordinates: (${x.toFixed(3)}, ${y.toFixed(3)}) [ID: ${clickId}]`);
     
-    // Add pending click indicator
+    // Add pending click indicator (using actual click position relative to effective video area)
     const newIndicator: ClickIndicator = {
       id: clickId,
-      x: event.clientX - rect.left,
-      y: event.clientY - rect.top,
+      x: clickX - effectiveDisplayRect.left, // Position within the effective video area
+      y: clickY - effectiveDisplayRect.top,  // Position within the effective video area
       status: 'pending',
       timestamp: Date.now()
     };
@@ -706,7 +722,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
       
       {/* Video content overlay area - matches actual video display rectangle */}
       <div 
-        className="absolute"
+        className="absolute pointer-events-none"
         style={{
           left: `${displayRect.left}px`,
           top: `${displayRect.top}px`,
@@ -720,8 +736,8 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
               key={indicator.id}
               className="absolute pointer-events-none"
               style={{
-                left: `${(indicator.x / displayRect.width) * 100}%`,
-                top: `${(indicator.y / displayRect.height) * 100}%`,
+                left: `${(indicator.x / (displayRect.width || 1)) * 100}%`,
+                top: `${(indicator.y / (displayRect.height || 1)) * 100}%`,
                 transform: 'translate(-50%, -50%)'
               }}
             >
@@ -809,7 +825,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
           )}
           
           {/* Camera settings overlay */}
-          <div className="absolute bottom-4 left-4 glass-panel p-3 text-sm">
+          {false && (<div className="absolute bottom-4 left-4 glass-panel p-3 text-sm">
             <div className="flex items-center gap-4">
               <div>
                 <span className="text-gray-400">Camera: </span>
@@ -828,7 +844,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
                 <span className="text-white">4K</span>
               </div>
             </div>
-          </div>
+          </div>)}
           
           {/* Instructions overlay when no gimbal command has been sent yet */}
           {!lastGimbalCommand && frameStats.decodedFrames > 0 && (
