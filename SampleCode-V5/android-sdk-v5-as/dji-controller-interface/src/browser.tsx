@@ -50,6 +50,14 @@ import './styles/index.css';
     videoFrameCallback = callback;
   },
   
+  onFPVVideoFrame: (callback: (frame: any) => void) => {
+    fpvVideoFrameCallback = callback;
+  },
+  
+  onSecondaryVideoFrame: (callback: (frame: any) => void) => {
+    secondaryVideoFrameCallback = callback;
+  },
+  
   onConnectionStatus: (callback: (status: string) => void) => {
     console.log('🔗 Browser: Setting connectionStatusCallback');
     connectionStatusCallback = callback;
@@ -59,6 +67,8 @@ import './styles/index.css';
   removeAllListeners: (channel: string) => {
     if (channel === 'bridge-data') bridgeDataCallback = null;
     if (channel === 'video-frame') videoFrameCallback = null;
+    if (channel === 'fpv-video-frame') fpvVideoFrameCallback = null;
+    if (channel === 'secondary-video-frame') secondaryVideoFrameCallback = null;
     if (channel === 'connection-status') connectionStatusCallback = null;
   }
 };
@@ -67,7 +77,9 @@ import './styles/index.css';
 let mockWs: WebSocket | null = null;
 let mockConnectionStatus = 'disconnected';
 let bridgeDataCallback: ((data: any) => void) | null = null;
-let videoFrameCallback: ((frame: any) => void) | null = null;
+let videoFrameCallback: ((frame: any) => void) | null = null; // Legacy compatibility
+let fpvVideoFrameCallback: ((frame: any) => void) | null = null; // FPV-specific callback
+let secondaryVideoFrameCallback: ((frame: any) => void) | null = null; // Secondary camera callback
 let connectionStatusCallback: ((status: string) => void) | null = null;
 let callbacksSetCount = 0;
 let pendingVideoFrame: any = null;
@@ -98,13 +110,25 @@ const connectToMockBridge = () => {
               if (reader.result instanceof ArrayBuffer && pendingVideoFrame) {
                 // Use Uint8Array instead of Buffer for browser compatibility
                 const uint8Array = new Uint8Array(reader.result);
-                console.log(`🎬 Browser: Received H.264 frame: ${uint8Array.length} bytes, frame #${pendingVideoFrame.frameNumber}`);
+                const cameraSource = pendingVideoFrame.camera_source || 'unknown';
+                const isPrimary = pendingVideoFrame.is_primary ? 'PRIMARY' : 'SECONDARY';
+                console.log(`🎬 Browser: Received H.264 frame [${cameraSource.toUpperCase()}|${isPrimary}]: ${uint8Array.length} bytes, frame #${pendingVideoFrame.frameNumber}`);
                 
-                // Send both metadata and binary data to video callback
-                videoFrameCallback?.({
+                // Route to appropriate callback based on camera source
+                const frameData = {
                   metadata: pendingVideoFrame,
                   data: uint8Array
-                });
+                };
+                
+                // Send to specific camera callbacks
+                if (pendingVideoFrame.camera_source === 'fpv') {
+                  fpvVideoFrameCallback?.(frameData);
+                } else if (pendingVideoFrame.camera_source === 'secondary') {
+                  secondaryVideoFrameCallback?.(frameData);
+                }
+                
+                // Also send to legacy callback for backward compatibility
+                videoFrameCallback?.(frameData);
                 
                 pendingVideoFrame = null; // Clear pending frame
               } else {
@@ -131,7 +155,9 @@ const connectToMockBridge = () => {
           if (message.type === 'video_frame') {
             // This is video metadata, expect binary data next
             pendingVideoFrame = message;
-            console.log(`🎬 Browser: Video frame metadata: ${message.frameSize} bytes, ${message.width}x${message.height}`);
+            const cameraSource = message.camera_source || 'unknown';
+            const isPrimary = message.is_primary ? 'PRIMARY' : 'SECONDARY';
+            console.log(`🎬 Browser: Video frame metadata [${cameraSource.toUpperCase()}|${isPrimary}]: ${message.frameSize} bytes, ${message.width}x${message.height}, frame #${message.frameNumber}`);
           } else {
             // Regular bridge data (controller, telemetry, etc.)
             console.log('📡 Browser: Received message:', message.type, message);

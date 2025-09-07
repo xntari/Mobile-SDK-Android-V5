@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { FPVDisplayProps } from '../types';
+import { H20NDisplayProps } from '../types';
 
-export const FPVDisplay: React.FC<FPVDisplayProps> = ({ 
+export const H20NDisplay: React.FC<H20NDisplayProps> = ({ 
   width, 
   height, 
   className = '',
@@ -130,17 +130,17 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
         });
         
         if (support.supported) {
-          console.log('✅ H.264 WebCodecs decoding supported');
+          console.log('✅ H.264 WebCodecs decoding supported for H20N');
           setDecoderSupported(true);
           return true;
         } else {
-          console.warn('❌ H.264 WebCodecs decoding not supported');
+          console.warn('❌ H.264 WebCodecs decoding not supported for H20N');
           setDecoderSupported(false);
           setVideoStatus('error');
           return false;
         }
       } catch (error) {
-        console.error('Error checking WebCodecs support:', error);
+        console.error('Error checking WebCodecs support for H20N:', error);
         setDecoderSupported(false);
         setVideoStatus('error');
         return false;
@@ -220,14 +220,14 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
               });
               
             } catch (error) {
-              console.error('Error drawing video frame:', error);
+              console.error('Error drawing video frame in H20N:', error);
               frame.close();
             }
           },
           error: (error: Error) => {
-            console.error('VideoDecoder error:', error);
-            console.error('Decoder state:', videoDecoderRef.current?.state);
-            console.error('Error details:', {
+            console.error('H20N VideoDecoder error:', error);
+            console.error('H20N Decoder state:', videoDecoderRef.current?.state);
+            console.error('H20N Error details:', {
               name: error.name,
               message: error.message,
               stack: error.stack
@@ -257,12 +257,12 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
         };
 
       } catch (error) {
-        console.error('Failed to set up video decoder:', error);
+        console.error('Failed to set up H20N video decoder:', error);
         setVideoStatus('error');
       }
     };
 
-    // Handle incoming video frames - new format with metadata + binary data
+    // Handle incoming video frames - uses onSecondaryVideoFrame for secondary camera
     const handleVideoFrame = (frameInfo: any) => {
       if (!frameInfo) return;
       
@@ -271,11 +271,11 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
       const metadata = frameInfo.metadata;
       
       if (!frameData) {
-        console.warn('FPVDisplay: Received video frame without data');
+        console.warn('H20NDisplay: Received video frame without data');
         return;
       }
       
-      console.log('🎥 FPV: Received primary camera frame:', metadata?.frameNumber || 'unknown');
+      console.log('🎥 H20N: Received secondary camera frame:', metadata?.frameNumber || 'unknown');
       
       // Update frame statistics and status
       const now = Date.now();
@@ -310,12 +310,12 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
             frameData.byteLength
           );
         } else {
-          console.error('Unsupported video data format:', typeof frameData);
+          console.error('Unsupported video data format in H20N:', typeof frameData);
           return;
         }
 
         if (h264Data.length === 0) {
-          console.warn('Empty video frame, skipping');
+          console.warn('Empty video frame in H20N, skipping');
           return;
         }
 
@@ -338,7 +338,7 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
         if (!decoderConfiguredRef.current && spsRef.current && ppsRef.current && videoDecoderRef.current) {
           // Check if decoder exists and is not closed
           if (videoDecoderRef.current.state === 'closed') {
-            console.log('Decoder is closed, skipping configuration until recreated');
+            console.log('H20N Decoder is closed, skipping configuration until recreated');
             return;
           }
           
@@ -372,7 +372,7 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
             
             decoderConfiguredRef.current = true;
           } catch (error) {
-            console.error('❌ Failed to configure decoder:', error);
+            console.error('❌ Failed to configure H20N decoder:', error);
             decoderConfiguredRef.current = false;
             setVideoStatus('error');
             return;
@@ -382,7 +382,7 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
         // Skip if decoder not configured or closed
         if (!decoderConfiguredRef.current || !videoDecoderRef.current || videoDecoderRef.current.state !== 'configured') {
           if (videoDecoderRef.current && videoDecoderRef.current.state === 'closed') {
-            console.log('Decoder closed, triggering recreation');
+            console.log('H20N Decoder closed, triggering recreation');
             decoderConfiguredRef.current = false;
             // Trigger recreation on next frame
             setTimeout(() => setupVideoDecoder(), 100);
@@ -392,17 +392,14 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
 
         // Determine if this is a keyframe
         const isKey = isKeyFrame(nalUnits);
-        //console.log(`Frame type: ${isKey ? 'KEY' : 'DELTA'} frame`);
 
         // Skip non-key frames if decoder just configured (wait for next I-frame)
         if (!isKey && videoStatus === 'decoding') {
-          //console.log('Skipping P-frame, waiting for next I-frame after configuration');
           return;
         }
 
         // Create EncodedVideoChunk for WebCodecs
         try {
-          //console.log(`Creating chunk: type=${isKey ? 'key' : 'delta'}, size=${h264Data.length}, timestamp=${now * 1000}`);
           const chunk = new EncodedVideoChunk({
             type: isKey ? 'key' : 'delta',
             timestamp: now * 1000, // Convert to microseconds
@@ -417,12 +414,10 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
             return prev;
           });
           
-          //console.log(`Decoding chunk with decoder state: ${videoDecoderRef.current.state}`);
           videoDecoderRef.current.decode(chunk);
-          //console.log('Decode call successful');
         } catch (decodeError) {
-          console.error('Decode error:', decodeError);
-          console.error('Decode error details:', {
+          console.error('H20N Decode error:', decodeError);
+          console.error('H20N Decode error details:', {
             name: decodeError.name,
             message: decodeError.message,
             decoderState: videoDecoderRef.current?.state
@@ -430,7 +425,7 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
           
           // If this was a key frame and it failed, reset the decoder
           if (isKey) {
-            console.log('Key frame decode failed, resetting decoder...');
+            console.log('H20N Key frame decode failed, resetting decoder...');
             decoderConfiguredRef.current = false;
             spsRef.current = null;
             ppsRef.current = null;
@@ -441,7 +436,7 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
                 // Close the decoder regardless of current state
                 videoDecoderRef.current.close();
               } catch (closeError) {
-                console.warn('Error closing decoder:', closeError);
+                console.warn('Error closing H20N decoder:', closeError);
               }
             }
             
@@ -451,7 +446,7 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
         }
         
       } catch (error) {
-        console.error('Failed to decode video frame:', error);
+        console.error('Failed to decode H20N video frame:', error);
         setVideoStatus('error');
         // Reset decoder state on error
         decoderConfiguredRef.current = false;
@@ -460,12 +455,12 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
 
     setupVideoDecoder();
 
-    // Listen for FPV video frames from main process
-    (window.electronAPI as any).onFPVVideoFrame(handleVideoFrame);
+    // Listen for secondary video frames from main process
+    (window.electronAPI as any).onSecondaryVideoFrame(handleVideoFrame);
 
     return () => {
       cleanup?.();
-      window.electronAPI.removeAllListeners('fpv-video-frame');
+      window.electronAPI.removeAllListeners('secondary-video-frame');
     };
   }, []);
 
@@ -476,9 +471,9 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
           <div className="absolute inset-0 bg-dji-dark bg-opacity-80 flex items-center justify-center">
             <div className="text-center">
               <div className="text-4xl mb-4">📹</div>
-              <div className="text-lg text-gray-300">Waiting for Video Stream</div>
+              <div className="text-lg text-gray-300">Waiting for H20N Stream</div>
               <div className="text-sm text-gray-500 mt-2">
-                Make sure camera is active on controller
+                Secondary camera (gimbal/H20N)
               </div>
             </div>
           </div>
@@ -489,8 +484,8 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
           <div className="absolute inset-0 bg-gray-900 flex items-center justify-center">
             <div className="text-center">
               <div className="text-4xl mb-4">📹</div>
-              <div className="text-sm text-gray-400">Video Display</div>
-              <div className="text-xs text-gray-500 mt-2">Phase 3B - H.264 streaming ready</div>
+              <div className="text-sm text-gray-400">H20N Display</div>
+              <div className="text-xs text-gray-500 mt-2">Secondary camera stream</div>
             </div>
           </div>
         );
@@ -500,12 +495,12 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
           <div className="absolute inset-0 bg-gray-900 flex items-center justify-center">
             <div className="text-center">
               <div className="text-4xl mb-4 animate-pulse">📡</div>
-              <div className="text-lg text-dji-blue">Receiving H.264 Stream</div>
+              <div className="text-lg text-dji-blue">Receiving H20N Stream</div>
               <div className="text-sm text-gray-400 mt-2">
                 {frameStats.frames} frames received
               </div>
               <div className="text-xs text-gray-500 mt-1">
-                Waiting for decoder to be ready...
+                Secondary camera decoder initializing...
               </div>
             </div>
           </div>
@@ -516,12 +511,12 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
           <div className="absolute inset-0 bg-gray-900 flex items-center justify-center">
             <div className="text-center">
               <div className="text-4xl mb-4 animate-pulse">🎬</div>
-              <div className="text-lg text-dji-blue">Decoding H.264 Stream</div>
+              <div className="text-lg text-dji-blue">Decoding H20N Stream</div>
               <div className="text-sm text-gray-400 mt-2">
                 {frameStats.frames} received • {frameStats.decodedFrames} decoded
               </div>
               <div className="text-xs text-gray-500 mt-1">
-                Using WebCodecs API for hardware acceleration
+                Secondary camera using WebCodecs
               </div>
             </div>
           </div>
@@ -530,13 +525,13 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
       case 'error':
         const errorMessage = decoderSupported === false 
           ? 'WebCodecs not supported in this browser'
-          : 'Check bridge connection and camera status';
+          : 'Check bridge connection and H20N camera status';
           
         return (
           <div className="absolute inset-0 bg-dji-dark bg-opacity-80 flex items-center justify-center">
             <div className="text-center">
               <div className="text-4xl mb-4 text-status-error">⚠️</div>
-              <div className="text-lg text-status-error">Video Stream Error</div>
+              <div className="text-lg text-status-error">H20N Stream Error</div>
               <div className="text-sm text-gray-500 mt-2">
                 {errorMessage}
               </div>
@@ -580,7 +575,7 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
             <div className="absolute top-4 right-4 glass-panel p-2 text-xs">
               <div className="flex items-center gap-2">
                 <div className="w-2 h-2 bg-status-good rounded-full animate-pulse-blue"></div>
-                <span>LIVE H.264</span>
+                <span>LIVE H20N</span>
               </div>
               <div className="text-xs text-gray-400 mt-1">
                 {frameStats.decodedFrames} frames decoded
@@ -592,20 +587,20 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
           <div className="absolute bottom-4 left-4 glass-panel p-3 text-sm">
             <div className="flex items-center gap-4">
               <div>
-                <span className="text-gray-400">Mode: </span>
-                <span className="text-white">Video</span>
+                <span className="text-gray-400">Camera: </span>
+                <span className="text-white">H20N</span>
+              </div>
+              <div>
+                <span className="text-gray-400">Source: </span>
+                <span className="text-white">Secondary</span>
               </div>
               <div>
                 <span className="text-gray-400">Lens: </span>
-                <span className="text-white">Wide</span>
-              </div>
-              <div>
-                <span className="text-gray-400">ISO: </span>
-                <span className="text-white">AUTO</span>
+                <span className="text-white">Zoom</span>
               </div>
               <div>
                 <span className="text-gray-400">Quality: </span>
-                <span className="text-white">4K/60</span>
+                <span className="text-white">4K</span>
               </div>
             </div>
           </div>

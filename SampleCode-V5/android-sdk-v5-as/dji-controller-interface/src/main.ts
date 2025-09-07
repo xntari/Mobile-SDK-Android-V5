@@ -116,15 +116,24 @@ class DJIControllerApp {
           } else {
             // Binary video frame data
             if (this.pendingVideoFrame) {
-              // Send both metadata and binary data to renderer  
-              this.mainWindow?.webContents.send('video-frame', {
+              const frameData = {
                 metadata: this.pendingVideoFrame,
                 data: Buffer.from(data as any)
-              });
+              };
+              
+              // Route to appropriate channel based on camera_source
+              if (this.pendingVideoFrame.camera_source === 'fpv') {
+                this.mainWindow?.webContents.send('fpv-video-frame', frameData);
+              } else if (this.pendingVideoFrame.camera_source === 'secondary') {
+                this.mainWindow?.webContents.send('secondary-video-frame', frameData);
+              } else {
+                // Fallback to legacy channel for backwards compatibility
+                this.mainWindow?.webContents.send('video-frame', frameData);
+              }
               
               this.pendingVideoFrame = null; // Clear pending frame
             } else {
-              // Just binary data without metadata
+              // Just binary data without metadata - send to legacy channel
               this.mainWindow?.webContents.send('video-frame', { data: Buffer.from(data as any) });
             }
           }

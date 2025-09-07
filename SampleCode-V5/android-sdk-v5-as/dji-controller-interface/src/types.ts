@@ -119,6 +119,13 @@ export interface FPVDisplayProps {
   children?: React.ReactNode;
 }
 
+export interface H20NDisplayProps {
+  width?: number;
+  height?: number;
+  className?: string;
+  children?: React.ReactNode;
+}
+
 export interface HSICompassProps {
   attitude: TelemetryData['attitude'] | null;
   heading: number;
