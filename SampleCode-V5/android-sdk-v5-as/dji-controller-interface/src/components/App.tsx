@@ -8,6 +8,7 @@ import { ReturnHomeButton } from './ReturnHomeButton';
 import { HSICompass } from './HSICompass';
 import { MapDisplay } from './MapDisplay';
 import { FlightDisplay } from './FlightDisplay';
+import { CameraDisplay } from './CameraDisplay';
 import { CameraControls } from './CameraControls';
 import { ConnectionStatus } from './ConnectionStatus';
 
@@ -102,10 +103,14 @@ export const App: React.FC = () => {
           
           {/* HUD Overlay - Center of screen */}
           <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-30">
-            <FlightDisplay 
-              telemetryData={bridgeData.telemetry}
-              size="compact"
-            />
+            {displayMode === 'fpv' ? (
+              <FlightDisplay 
+                telemetryData={bridgeData.telemetry}
+                size="compact"
+              />
+            ) : (
+              <CameraDisplay />
+            )}
           </div>
 
           {/* Controller data overlay - Top Center */}
