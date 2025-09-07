@@ -583,7 +583,7 @@ dji-controller-interface/
 
 ## 🎯 Current Working System (September 2025)
 
-**🚀 FULL END-TO-END SYSTEM NOW WORKING:**
+**🚀 FULL END-TO-END DUAL CAMERA SYSTEM NOW WORKING:**
 
 ```bash
 # 1. Deploy bridge to DJI controller
@@ -591,7 +591,7 @@ dji-controller-interface/
 adb -s 4LFCL5Q005GDF5 forward tcp:8080 tcp:8080  
 adb -s 4LFCL5Q005GDF5 shell am start -a dji.sampleV5.aircraft.action.START_BRIDGE
 
-# 2. Start DJI Controller Interface with live H.264 video
+# 2. Start DJI Controller Interface with dual camera streams
 cd dji-controller-interface/
 npm run dev:browser  # Browser dev mode: http://localhost:3000
 # OR
@@ -599,7 +599,9 @@ npm run build && npm run dev  # Electron desktop app
 ```
 
 **What You Get:**
-- ✅ **Live H.264 video stream** from DJI camera at 1920x1080 
+- ✅ **Dual H.264 video streams** - FPV camera + H20N/Secondary camera at 1920x1080 
+- ✅ **Camera stream separation** - Independent decoders prevent frame mixing
+- ✅ **Real-time camera toggle** - Switch between FPV and H20N camera views
 - ✅ **Real-time flight data** - GPS, altitude, attitude, battery
 - ✅ **Live joystick data** - All 4 axes updating at 20Hz
 - ✅ **Professional DJI UI** - Complete desktop interface
@@ -607,14 +609,17 @@ npm run build && npm run dev  # Electron desktop app
 - ✅ **Small HSI compass** - Bottom-right overlay, attitude display
 
 **Performance:**
-- Video: ~26KB per frame, smooth playback with WebCodecs hardware decoding
+- Video: Dual streams ~52KB per frame total, smooth playback with WebCodecs hardware decoding
 - Data: 20Hz controller + 5Hz telemetry + 1Hz battery = ~25 updates/second
+- Camera switching: Instant toggle between FPV and secondary cameras
 - Latency: <100ms end-to-end (controller → laptop display)
 
-## ✅ Current Status: FULLY WORKING NAVIGATION SYSTEM
+## ✅ Current Status: FULLY WORKING DUAL CAMERA NAVIGATION SYSTEM
 
 **What Works Perfectly:**
-- ✅ **Live H.264 video stream** from DJI camera at 1920x1080
+- ✅ **Dual H.264 video streams** - FPV camera + H20N/Secondary camera at 1920x1080
+- ✅ **Camera stream separation** - Independent decoders with proper `camera_source` routing
+- ✅ **Real-time camera switching** - Toggle between FPV and H20N views instantly
 - ✅ **Real-time flight data** display (GPS, altitude, battery, speed, distance)
 - ✅ **Real joystick data** transmission (20Hz from controller)
 - ✅ **Professional DJI-style desktop interface** - Complete responsive UI
@@ -660,7 +665,9 @@ npm run dev:browser
 ## 🎯 Expected Functionality 
 
 When the system is running correctly, you should see:
-- ✅ **Live video stream** - Smooth H.264 video at 1920x1080
+- ✅ **Dual live video streams** - Smooth H.264 video from FPV + H20N cameras at 1920x1080
+- ✅ **Camera toggle controls** - Top-right buttons to switch between FPV and H20N views
+- ✅ **Independent video decoders** - No frame mixing between camera streams
 - ✅ **HSI compass** - Bottom-right overlay with obstacle visualization, raw perception data toggle, distance scaling
 - ✅ **Auto-rotating minimap** - Top-left overlay, map rotates with aircraft heading
 - ✅ **Real-time telemetry** - GPS coordinates, altitude, speed, distance to home

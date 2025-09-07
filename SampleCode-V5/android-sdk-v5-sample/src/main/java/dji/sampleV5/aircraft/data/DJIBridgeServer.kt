@@ -36,6 +36,12 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import kotlin.collections.ArrayList
+import dji.sdk.keyvalue.key.CameraKey
+import dji.sdk.keyvalue.value.camera.TapZoomMode
+import dji.sdk.keyvalue.value.camera.ZoomTargetPointInfo
+import dji.sdk.keyvalue.value.common.CameraLensType
+import dji.v5.et.createCamera
+import dji.v5.et.action
 
 /**
  * DJI Bridge WebSocket Server - Extensible Implementation
@@ -75,6 +81,8 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         JOYSTICK_OVERRIDE("joystick_override"),
         WAYPOINT_COMMAND("waypoint_command"),
         CAMERA_COMMAND("camera_command"),
+        GIMBAL_TAP_TARGET("gimbal_tap_target"),
+        GIMBAL_RESPONSE("gimbal_response"),
         FLIGHT_COMMAND("flight_command"),
         SYSTEM_COMMAND("system_command");
         
@@ -508,6 +516,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 MessageType.JOYSTICK_OVERRIDE -> handleJoystickOverride(clientId, json)
                 MessageType.WAYPOINT_COMMAND -> handleWaypointCommand(clientId, json)
                 MessageType.CAMERA_COMMAND -> handleCameraCommand(clientId, json)
+                MessageType.GIMBAL_TAP_TARGET -> handleGimbalTapTarget(clientId, json)
                 MessageType.FLIGHT_COMMAND -> handleFlightCommand(clientId, json)
                 MessageType.SYSTEM_COMMAND -> handleSystemCommand(clientId, json)
                 MessageType.HEARTBEAT -> handleHeartbeat(clientId, socket)
@@ -587,6 +596,65 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     private fun handleHeartbeat(clientId: String, socket: Socket) {
         val response = createMessage(MessageType.HEARTBEAT, mapOf("status" to "alive"))
         sendWebSocketTextFrame(socket, response)
+    }
+    
+    private fun handleGimbalTapTarget(clientId: String, json: JSONObject) {
+        try {
+            Log.i(TAG, "Processing gimbal tap for client: $clientId")
+            
+            val data = json.getJSONObject("data")  // REQUIRED: get data object
+            val x = data.getDouble("x")  // 0.0 to 1.0
+            val y = data.getDouble("y")  // 0.0 to 1.0
+            
+            // Validate coordinates
+            if (x < 0.0 || x > 1.0 || y < 0.0 || y > 1.0) {
+                Log.e(TAG, "Invalid coordinates for client $clientId: x=$x, y=$y")
+                sendGimbalResponse(clientId, false, "Invalid coordinates: x=$x, y=$y", x, y)
+                return
+            }
+            
+            val cameraIndex = ComponentIndexType.LEFT_OR_MAIN  // H20N camera
+            Log.i(TAG, "Sending gimbal tap command: x=$x, y=$y, camera=$cameraIndex")
+            
+            // Use CORRECTED API (not Look At)
+            CameraKey.KeyTapZoomAtTarget.createCamera(cameraIndex, CameraLensType.CAMERA_LENS_ZOOM)
+                .action(ZoomTargetPointInfo(x, y, false, TapZoomMode.UNKNOWN), {
+                    Log.i(TAG, "✅ Gimbal tap SUCCESS for client $clientId at ($x, $y)")
+                    sendGimbalResponse(clientId, true, "Gimbal moved to target position", x, y)
+                }, { error ->
+                    Log.e(TAG, "❌ Gimbal tap ERROR for client $clientId: $error")
+                    sendGimbalResponse(clientId, false, "Gimbal error: ${error}", x, y)
+                })
+                
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception in handleGimbalTapTarget: ${e.message}", e)
+            sendGimbalResponse(clientId, false, "Processing error: ${e.message}", 0.0, 0.0)
+        }
+    }
+    
+    private fun sendGimbalResponse(clientId: String, success: Boolean, message: String, x: Double, y: Double) {
+        try {
+            val response = createMessage(MessageType.GIMBAL_RESPONSE, mapOf(
+                "success" to success,
+                "message" to message,
+                "coordinates" to mapOf(
+                    "x" to x,
+                    "y" to y
+                ),
+                "timestamp" to System.currentTimeMillis(),
+                "camera" to "H20N"
+            ))
+            
+            val socket = clients[clientId]
+            if (socket != null && !socket.isClosed) {
+                sendWebSocketTextFrame(socket, response)
+                Log.d(TAG, "Sent gimbal response to client $clientId: success=$success, message=$message")
+            } else {
+                Log.w(TAG, "Cannot send gimbal response - client $clientId socket not available")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send gimbal response to client $clientId: ${e.message}", e)
+        }
     }
     
     private fun sendErrorResponse(socket: Socket, error: String) {
