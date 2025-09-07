@@ -2,76 +2,318 @@
 
 ## 🚀 TLDR - You Are Here
 
-**CURRENT STATE**: **✅ COMPLETE NAVIGATION SYSTEM** - Advanced HSI compass with 360° obstacle visualization + auto-rotating minimap both working perfectly.
+**CURRENT STATE**: **✅ COMPLETE DUAL CAMERA SYSTEM** - Advanced HSI compass + auto-rotating minimap + dual camera streaming (FPV + H20N) all working perfectly.
 
 **IMMEDIATE NEXT STEPS:**
-1. **📷 HIGH PRIORITY: Multi-Video Decoding Implementation** - Investigate CameraStreamManager in SDK demo, modify Android bridge for dual camera streams without frame mixing
-2. **🎛️ HIGH PRIORITY: Secondary Camera Stream Support** - Add metadata for gimbal camera, maintain FPV compatibility when secondary stream absent
-3. **🔧 MEDIUM: Complete flight controls** - Take off, RTH, flight mode switching  
-4. **🗺️ LOW: Investigate DJI native map tiles** - Replace OpenStreetMap with DJI's official tiles
+1. **🎛️ HIGH PRIORITY: Gimbal Control Implementation** - Research DJI SDK gimbal control APIs and "Look At" functionality 
+2. **🎮 HIGH PRIORITY: Bidirectional Bridge Communication** - Implement client-to-controller command sending for gimbal override
+3. **📷 MEDIUM: Camera Controls** - Zoom, focus, recording controls for both cameras
+4. **🔧 MEDIUM: Complete flight controls** - Take off, RTH, flight mode switching  
+5. **🗺️ LOW: Investigate DJI native map tiles** - Replace OpenStreetMap with DJI's official tiles
 
-**CONTEXT**: Live H.264 video streaming + telemetry + **complete navigation system** works perfectly. Ready for camera controls and multi-camera support.
+**CONTEXT**: Live H.264 dual camera streaming + telemetry + **complete navigation system** works perfectly. Ready for gimbal control and bidirectional communication.
 
 ---
 
-## 📍 **CURRENT STATUS - PARTIALLY WORKING SYSTEM**
+## 📍 **CURRENT STATUS - FULLY WORKING DUAL CAMERA SYSTEM**
 
 ### ✅ **What Works Perfectly**
-- **Live H.264 video stream** from DJI camera at 1920x1080 resolution  
-- **Real-time telemetry data** - GPS, altitude, speed, distance to home, battery
-- **Live joystick data** - All 4 axes streaming at 20Hz from controller
-- **Professional desktop interface** - Electron app with DJI-style UI
-- **Responsive window behavior** - Resizable with proper aspect ratios
-- **HSI Compass with 360° obstacle visualization** - Advanced version with raw perception data toggle, scale slider, logarithmic scaling
-- **Auto-rotating minimap** - Map rotates based on aircraft heading, aircraft always points "up"
-- **Real compass data collection** - `FlightControllerKey.KeyCompassHeading` successfully integrated
-- **Obstacle avoidance data** - Raw distance arrays from radar and perception sensors
+- **✅ DUAL H.264 video streams** - FPV camera + H20N/Secondary camera at 1920x1080 resolution
+- **✅ Camera stream separation** - Independent decoders with proper `camera_source` routing prevent frame mixing
+- **✅ Real-time camera toggle** - Switch between FPV and H20N camera views instantly via UI buttons
+- **✅ Real-time telemetry data** - GPS, altitude, speed, distance to home, battery
+- **✅ Live joystick data** - All 4 axes streaming at 20Hz from controller
+- **✅ Professional desktop interface** - Electron app with DJI-style UI
+- **✅ Responsive window behavior** - Resizable with proper aspect ratios
+- **✅ HSI Compass with 360° obstacle visualization** - Advanced version with raw perception data toggle, scale slider, logarithmic scaling
+- **✅ Auto-rotating minimap** - Map rotates based on aircraft heading, aircraft always points "up"
+- **✅ Real compass data collection** - `FlightControllerKey.KeyCompassHeading` successfully integrated
+- **✅ Obstacle avoidance data** - Raw distance arrays from radar and perception sensors
 
 ### 🎯 **Ready for Implementation**
-- **Multi-camera streaming architecture** - SDK demo shows complete working implementation in `CameraStreamDetailVM.kt`
-- **Dual video stream support** - FPV + secondary camera (gimbal/H20N) with metadata routing
-- **Stream separation** - Individual camera stream management using `ICameraStreamManager`
-- **Backwards compatibility** - System functions normally with FPV-only when secondary camera absent
+- **✅ COMPLETED: Multi-camera streaming architecture** - Dual camera streaming working with proper stream separation
+- **✅ COMPLETED: Dual video stream support** - FPV + secondary camera (H20N) with metadata routing implemented
+- **✅ COMPLETED: Stream separation** - Independent decoders prevent frame mixing
+- **✅ COMPLETED: Backwards compatibility** - System functions normally with FPV-only when secondary camera absent
 
-### 📋 **Next Development Focus**
-- **Study CameraStreamDetailVM.kt and CameraStreamDetailFragment.kt** - Complete multi-camera implementation examples
-- **Implement dual-stream architecture** - Extend DJIBridgeServer.kt with ICameraStreamManager pattern
-- **Add camera metadata to video frames** - Stream identification without breaking existing functionality
+### 📋 **Next Development Focus: Gimbal Control**
+- **Research DJI SDK gimbal control APIs** - Find "Look At" functionality and gimbal positioning methods
+- **Implement bidirectional bridge communication** - Enable client-to-controller command sending
+- **Add gimbal control interface** - UI controls for gimbal movement without physical controller interaction
+- **Investigate controller override capabilities** - Determine if bridge can override physical gimbal controls
 
 ---
 
 ## 🎯 **IMMEDIATE IMPLEMENTATION PRIORITY**
 
-### **Task 1**: Multi-Video Stream Implementation (HIGH PRIORITY)
+### **✅ COMPLETED: Task 1**: Multi-Video Stream Implementation 
 
-**Goal**: Implement dual camera streaming architecture to support FPV + secondary camera (gimbal/H20N) without frame mixing.
+**✅ COMPLETED Goal**: Implement dual camera streaming architecture to support FPV + secondary camera (gimbal/H20N) without frame mixing.
 
-**Key SDK Files to Study**:
-- `CameraStreamDetailVM.kt:188-189` - `putCameraStreamSurface()` method for multi-camera management
-- `CameraStreamDetailFragment.kt:285-301` - Surface management and stream priority handling
-- `ICameraStreamManager` interface - Core multi-stream architecture
-- Lines of Interest:
-  - `CameraStreamDetailVM.kt:22` - `ICameraStreamManager` import
-  - `CameraStreamDetailVM.kt:189` - Surface assignment per camera index
-  - `CameraStreamDetailFragment.kt:295-300` - Stream surface configuration
-
-**Implementation Strategy**:
-1. **Study existing multi-camera demo** - CameraStreamDetailFragment shows complete working example
-2. **Modify DJIBridgeServer.kt** to support dual video frame callbacks:
+**✅ Implementation Results**:
+1. **✅ Modified DJIBridgeServer.kt** with dual video frame callbacks supporting:
    - FPV stream: `ComponentIndexType.FPV`  
-   - Secondary stream: `ComponentIndexType.LEFT_OR_MAIN` (H20N) or gimbal camera
-3. **Add metadata routing** - Include `camera_type` field in video frame packets
-4. **Client-side stream separation** - Process streams in separate buffers based on metadata
-5. **Backwards compatibility** - System functions normally with FPV-only when secondary absent
+   - Secondary stream: `ComponentIndexType.LEFT_OR_MAIN` (H20N)
+2. **✅ Added metadata routing** - `camera_source` field in video frame packets
+3. **✅ Client-side stream separation** - Independent decoders process streams based on metadata
+4. **✅ Backwards compatibility** - System functions normally with FPV-only when secondary absent
+5. **✅ Real-time camera toggle** - UI controls to switch between FPV and H20N views
 
-### **Task 2**: Stream Metadata Enhancement (HIGH PRIORITY)
+### **🎯 NEW Task 1**: Gimbal Control Research and Implementation (HIGH PRIORITY)
 
-**Goal**: Add camera identification metadata to video frames without breaking existing single-stream functionality.
+**✅ RESEARCH COMPLETED**: DEV has completed comprehensive gimbal API research documented in `docs/GIMBAL.md`
 
-**Implementation**:
-- Extend current H.264 frame packet format to include `camera_source` identifier
-- Client detects secondary stream presence and enables dual-video UI mode
-- FPV-only operation remains unchanged for backwards compatibility
+**MANAGER VERIFICATION STATUS**: ✅ **VERIFIED** - DEV's research is accurate with minor corrections needed
+
+**Implementation Plan**: **TAP-TO-GIMBAL FUNCTIONALITY** using DJI's TapZoom API (safer than full Look At implementation)
+
+---
+
+## 🔧 **VERIFIED IMPLEMENTATION PLAN - DEV CANNOT PROCEED WITHOUT MANAGER APPROVAL**
+
+### **CRITICAL CORRECTION TO DEV'S PLAN**
+**❌ DEV ERROR**: DEV suggested using `FlightControllerKey.KeyLookAt` but this requires GPS coordinates
+**✅ CORRECTED APPROACH**: Use `CameraKey.KeyTapZoomAtTarget` which works with screen coordinates (0.0-1.0)
+
+**Source Evidence** (`LookAtVM.kt:64-70`):
+```kotlin
+// DEV's research found this - CORRECT API to use
+CameraKey.KeyTapZoomAtTarget.createCamera(currentComponentIndexType.value!!, CameraLensType.CAMERA_LENS_ZOOM)
+    .action(ZoomTargetPointInfo(x, y, false, TapZoomMode.UNKNOWN), { success }, { error })
+```
+
+### **PHASE 1: MINIMAL TAP-TO-GIMBAL IMPLEMENTATION (MANAGER SUPERVISED)**
+
+**IMPORTANT**: DEV cannot proceed to next step without Manager verification of previous step
+
+#### **✅ Step 1.1: Add Required Imports (MANAGER PRE-APPROVED)**
+**Risk Level**: ✅ **ZERO** - imports don't execute code
+**File**: `DJIBridgeServer.kt` (top of file)
+**Change**: Add these imports after line 38:
+
+```kotlin
+// Add these imports - EXACT LINES DEV MUST USE
+import dji.sdk.keyvalue.key.CameraKey
+import dji.sdk.keyvalue.value.camera.TapZoomMode  
+import dji.sdk.keyvalue.value.camera.ZoomTargetPointInfo
+import dji.sdk.keyvalue.value.common.CameraLensType
+import dji.v5.et.createCamera
+import dji.v5.et.action
+```
+
+**Verification**: Project compiles successfully, no behavior changes
+
+#### **❌ Step 1.2: Add Message Type (PENDING MANAGER APPROVAL)**
+**DEV MUST WAIT**: Cannot proceed until Step 1.1 verified by Manager
+**File**: `DJIBridgeServer.kt` - MessageType enum (line ~79)
+**Change**: Add to enum:
+
+```kotlin
+GIMBAL_TAP_TARGET("gimbal_tap_target"),  // CORRECTED name from DEV's plan
+```
+
+**Manager Verification Required**: Enum compiles, existing messages unchanged
+
+#### **❌ Step 1.3: Add Message Routing (PENDING MANAGER APPROVAL)**  
+**DEV MUST WAIT**: Cannot proceed until Step 1.2 verified by Manager
+**File**: `DJIBridgeServer.kt` - handleIncomingCommand method (line ~507)
+**Change**: Add to switch statement:
+
+```kotlin
+MessageType.GIMBAL_TAP_TARGET -> handleGimbalTapTarget(clientId, json)
+```
+
+**Manager Verification Required**: Log appears when message sent, no functional changes yet
+
+#### **❌ Step 1.4: Add Handler Method (PENDING MANAGER APPROVAL)**
+**DEV MUST WAIT**: Cannot proceed until Step 1.3 verified by Manager
+**Critical Implementation**: Use CORRECTED API (not DEV's original suggestion)
+
+```kotlin
+// CORRECTED VERSION - DEV must use THIS implementation
+private fun handleGimbalTapTarget(clientId: String, command: JSONObject) {
+    try {
+        Log.i(TAG, "Processing gimbal tap for client: $clientId")
+        
+        val data = command.getJSONObject("data")  // REQUIRED: get data object
+        val x = data.getDouble("x")  // 0.0 to 1.0
+        val y = data.getDouble("y")  // 0.0 to 1.0
+        
+        // Validate coordinates
+        if (x < 0.0 || x > 1.0 || y < 0.0 || y > 1.0) {
+            Log.e(TAG, "Invalid coordinates for client $clientId: x=$x, y=$y")
+            return
+        }
+        
+        val cameraIndex = ComponentIndexType.LEFT_OR_MAIN  // H20N camera
+        
+        // Use CORRECTED API (not Look At)
+        CameraKey.KeyTapZoomAtTarget.createCamera(cameraIndex, CameraLensType.CAMERA_LENS_ZOOM)
+            .action(ZoomTargetPointInfo(x, y, false, TapZoomMode.UNKNOWN), {
+                Log.i(TAG, "Gimbal tap success for client $clientId at ($x, $y)")
+            }, { error ->
+                Log.e(TAG, "Gimbal tap error for client $clientId: $error")
+            })
+            
+    } catch (e: Exception) {
+        Log.e(TAG, "Exception in handleGimbalTapTarget: ${e.message}", e)
+    }
+}
+```
+
+**Manager Verification Required**: Method executes, gimbal moves when camera available
+
+### **MANAGER VERIFICATION CHECKLIST**
+
+#### **✅ After Step 1.1 (Manager must verify)**:
+- [ ] Project compiles without errors  
+- [ ] Bridge server starts normally
+- [ ] All existing functionality works (video, telemetry, etc.)
+
+#### **❌ After Step 1.2 (BLOCKED until Step 1.1 verified)**:
+- [ ] Bridge starts with new message type
+- [ ] Existing message handling works normally
+- [ ] No new functionality activated yet
+
+#### **❌ After Step 1.3 (BLOCKED until Step 1.2 verified)**:
+- [ ] Send test message → routing executes (even if handler missing)
+- [ ] No crashes or errors from message routing
+- [ ] Existing video streaming unaffected  
+
+#### **❌ After Step 1.4 (BLOCKED until Step 1.3 verified)**:
+- [ ] Handler method executes when message received
+- [ ] Invalid coordinates rejected (test with x=2.0)
+- [ ] Valid coordinates processed (test with x=0.5, y=0.5)
+- [ ] Gimbal movement observed if H20N connected
+- [ ] No errors in existing bridge functionality
+
+### **ROLLBACK PROCEDURES**
+**Every step is reversible**:
+- **Step 1.1**: Remove 6 import lines
+- **Step 1.2**: Remove 1 enum entry  
+- **Step 1.3**: Remove routing case
+- **Step 1.4**: Remove handler method
+
+---
+
+## 📋 **DEV ACCOUNTABILITY REQUIREMENTS**
+
+### **Before Each Step**:
+1. **DEV MUST**: Send exact file changes to Manager for approval
+2. **MANAGER MUST**: Test and verify before approval
+3. **DEV CANNOT**: Proceed without explicit Manager approval
+4. **BUILD REQUIREMENT**: Every step MUST compile and maintain existing functionality
+
+### **After Each Step**:  
+1. **DEV MUST**: Run bridge and verify existing functionality works
+2. **DEV MUST**: Document any unexpected behavior immediately
+3. **MANAGER MUST**: Test step independently before approving next step
+
+### **Strict Rules**:
+- **NO SHORTCUTS**: Each step must be individually verified
+- **NO BATCHING**: Cannot combine steps even if "simple"
+- **IMMEDIATE ROLLBACK**: Any step that breaks existing functionality must be reverted
+- **PROOF REQUIRED**: DEV must provide evidence (logs/screenshots) of successful step
+
+---
+
+## 📞 **DEV-MANAGER COMMUNICATION PROTOCOLS**
+
+### **Communication Method**: TMux Sessions
+**CRITICAL**: DEV and MANAGER communicate via tmux to prevent concurrent file editing conflicts.
+
+#### **TMux Session Structure**:
+- **DEV Session**: `xandroid:DEV` - DEV's working environment
+- **MANAGER Session**: `xandroid:MANAGER` - MANAGER's oversight environment
+
+#### **Communication Commands**:
+
+**MANAGER to DEV**:
+```bash
+tmux send-keys -t xandroid:DEV "MANAGER: {message}" && sleep 0.1 && tmux send-keys -t xandroid:DEV Enter
+```
+
+**DEV to MANAGER**:
+```bash
+tmux send-keys -t xandroid:MANAGER "DEV: {message}" && sleep 0.1 && tmux send-keys -t xandroid:MANAGER Enter
+```
+
+**Check DEV's activity**:
+```bash
+tmux capture-pane -t xandroid:DEV -p
+```
+
+#### **Working Rules**:
+1. **NO CONCURRENT EDITING** - Only one person works on files at a time
+2. **MANAGER OVERSIGHT** - All DEV steps require Manager approval
+3. **CLEAR HANDOFFS** - DEV must report completion before Manager takes over
+4. **DOCUMENTED COMMUNICATION** - All major decisions logged in TODO.md
+
+### **Current Session Status**: ✅ Steps 1.1, 1.2, 1.3 COMPLETED. DEV verifying Step 1.3, awaiting approval for final Step 1.4 (handler method).
+
+#### **COMMUNICATION REMINDER**: 
+- **ALWAYS use tmux**: `tmux capture-pane -t xandroid:DEV -p` to check DEV's status
+- **ALWAYS communicate via tmux**: `tmux send-keys -t xandroid:DEV "MANAGER: message" && sleep 0.1 && tmux send-keys -t xandroid:DEV Enter`
+- **DEV responds via tmux**: `tmux send-keys -t xandroid:MANAGER "DEV: message" && sleep 0.1 && tmux send-keys -t xandroid:MANAGER Enter`
+
+#### **CORRECT BUILD PROCESS** (Reference for DEV):
+```bash
+# 1. Navigate to project directory
+cd /Users/kamil/git/xMobile-SDK-Android-V5/SampleCode-V5/android-sdk-v5-as
+
+# 2. Clean build cache (if errors occur)
+./gradlew clean
+
+# 3. Build using documented approach  
+./build.sh debug
+
+# 4. Deploy to device
+./deploy.sh debug [YOUR_DEVICE_ID]
+
+# 5. Set up port forwarding
+adb -s [YOUR_DEVICE_ID] forward tcp:8080 tcp:8080
+
+# 6. Launch bridge
+adb -s [YOUR_DEVICE_ID] shell am start -a dji.sampleV5.aircraft.action.START_BRIDGE
+
+# 7. Start interface (IMPORTANT: correct directory)
+cd dji-controller-interface/
+npm run dev:browser  # Opens http://localhost:3000
+```
+
+---
+
+## 🧪 **TESTING STRATEGY**
+
+### **Step 1.4 Testing Protocol**:
+
+**Test 1: Invalid Coordinates**
+```javascript  
+// Send via browser console or test client
+websocket.send(JSON.stringify({
+    type: 'gimbal_tap_target',
+    data: { x: 2.0, y: 0.5 }  // Invalid - should be rejected
+}));
+```
+**Expected**: Error log, no gimbal movement
+
+**Test 2: Valid Center Point**
+```javascript
+websocket.send(JSON.stringify({
+    type: 'gimbal_tap_target', 
+    data: { x: 0.5, y: 0.5 }  // Center screen - should work
+}));
+```
+**Expected**: Success log, gimbal points to center if camera available
+
+**Test 3: Corner Points**
+```javascript
+websocket.send(JSON.stringify({
+    type: 'gimbal_tap_target',
+    data: { x: 0.0, y: 0.0 }  // Top-left corner
+}));
+```
+**Expected**: Success log, gimbal points to corner if camera available
 
 ---
 

@@ -1,6 +1,15 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { H20NDisplayProps } from '../types';
 
+interface ClickIndicator {
+  id: string;
+  x: number;
+  y: number;
+  status: 'pending' | 'success' | 'error';
+  timestamp: number;
+  message?: string;
+}
+
 export const H20NDisplay: React.FC<H20NDisplayProps> = ({ 
   width, 
   height, 
@@ -20,6 +29,74 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
   const spsRef = useRef<Uint8Array | null>(null);
   const ppsRef = useRef<Uint8Array | null>(null);
   const decoderConfiguredRef = useRef<boolean>(false);
+  const [clickIndicators, setClickIndicators] = useState<ClickIndicator[]>([]);
+  const [lastGimbalCommand, setLastGimbalCommand] = useState<{
+    coordinates: { x: number; y: number };
+    status: string;
+    message: string;
+    timestamp: number;
+  } | null>(null);
+
+  // Handle canvas click for gimbal tap-to-target functionality
+  const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = event.currentTarget;
+    const rect = canvas.getBoundingClientRect();
+    
+    // Convert to normalized coordinates (0.0-1.0)
+    const x = (event.clientX - rect.left) / rect.width;
+    const y = (event.clientY - rect.top) / rect.height;
+    
+    const clickId = `click-${Date.now()}`;
+    console.log(`🎯 H20N Canvas clicked at normalized coordinates: (${x.toFixed(3)}, ${y.toFixed(3)}) [ID: ${clickId}]`);
+    
+    // Add pending click indicator
+    const newIndicator: ClickIndicator = {
+      id: clickId,
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+      status: 'pending',
+      timestamp: Date.now()
+    };
+    
+    setClickIndicators(prev => [...prev.slice(-2), newIndicator]); // Keep last 3 indicators
+    
+    // Send gimbal command via existing electronAPI
+    if ((window as any).electronAPI) {
+      (window as any).electronAPI.sendBridgeCommand({
+        type: 'gimbal_tap_target',
+        data: { x, y }
+      }).then((result: any) => {
+        if (result.success) {
+          console.log('✅ Gimbal tap target command sent to bridge successfully');
+          // Response will be handled by gimbal response listener
+        } else {
+          console.error('❌ Gimbal tap target command failed:', result.error);
+          // Update indicator to error state
+          setClickIndicators(prev => prev.map(indicator =>
+            indicator.id === clickId
+              ? { ...indicator, status: 'error', message: result.error || 'Command failed' }
+              : indicator
+          ));
+        }
+      }).catch((error: any) => {
+        console.error('❌ Failed to send gimbal tap target:', error);
+        // Update indicator to error state
+        setClickIndicators(prev => prev.map(indicator =>
+          indicator.id === clickId
+            ? { ...indicator, status: 'error', message: error.message || 'Send failed' }
+            : indicator
+        ));
+      });
+    } else {
+      console.error('❌ electronAPI not available for gimbal command');
+      // Update indicator to error state
+      setClickIndicators(prev => prev.map(indicator =>
+        indicator.id === clickId
+          ? { ...indicator, status: 'error', message: 'electronAPI not available' }
+          : indicator
+      ));
+    }
+  };
 
   // Calculate actual video display rectangle with object-contain behavior
   const calculateDisplayRect = () => {
@@ -50,6 +127,74 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     
     setDisplayRect({ left, top, width: displayWidth, height: displayHeight });
   };
+
+  // Update display rect when container size or video dimensions change
+  // Handle gimbal response messages from bridge
+  useEffect(() => {
+    const handleGimbalResponse = (responseData: any) => {
+      console.log('📡 Received gimbal response:', responseData);
+      
+      if (responseData.type === 'gimbal_response') {
+        const { success, message, coordinates, timestamp } = responseData.data;
+        
+        // Update last gimbal command status
+        setLastGimbalCommand({
+          coordinates: coordinates || { x: 0, y: 0 },
+          status: success ? 'SUCCESS' : 'ERROR',
+          message: message || (success ? 'Gimbal moved successfully' : 'Gimbal command failed'),
+          timestamp: timestamp || Date.now()
+        });
+        
+        // Update most recent pending indicator
+        setClickIndicators(prev => {
+          const updated = [...prev];
+          // Find the last pending indicator (reverse search)
+          for (let i = updated.length - 1; i >= 0; i--) {
+            if (updated[i].status === 'pending') {
+              updated[i] = {
+                ...updated[i],
+                status: success ? 'success' : 'error',
+                message: message
+              };
+              break;
+            }
+          }
+          return updated;
+        });
+        
+        console.log(success ? '✅ Gimbal response: SUCCESS' : '❌ Gimbal response: ERROR', message);
+      }
+    };
+    
+    // Listen for bridge messages (including gimbal responses)
+    if ((window as any).electronAPI?.onBridgeMessage) {
+      (window as any).electronAPI.onBridgeMessage(handleGimbalResponse);
+    } else {
+      console.warn('⚠️ electronAPI.onBridgeMessage not available for gimbal response handling');
+    }
+    
+    return () => {
+      if ((window as any).electronAPI?.removeAllListeners) {
+        try {
+          (window as any).electronAPI.removeAllListeners('bridge-message');
+        } catch (e) {
+          console.warn('Could not remove bridge message listeners:', e);
+        }
+      }
+    };
+  }, []);
+  
+  // Cleanup old click indicators after 5 seconds
+  useEffect(() => {
+    const cleanup = setInterval(() => {
+      const now = Date.now();
+      setClickIndicators(prev => 
+        prev.filter(indicator => (now - indicator.timestamp) < 5000)
+      );
+    }, 1000);
+    
+    return () => clearInterval(cleanup);
+  }, []);
 
   // Update display rect when container size or video dimensions change
   useEffect(() => {
@@ -554,7 +699,9 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     <div ref={containerRef} className={`relative bg-dji-dark ${className}`}>
       <canvas
         ref={canvasRef}
+        onClick={handleCanvasClick}
         className="w-full h-full object-contain"
+        style={{ cursor: 'crosshair' }}
       />
       
       {/* Video content overlay area - matches actual video display rectangle */}
@@ -567,6 +714,47 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
           height: `${displayRect.height}px`
         }}
       >
+          {/* Click indicators for gimbal tap targets */}
+          {clickIndicators.map((indicator) => (
+            <div
+              key={indicator.id}
+              className="absolute pointer-events-none"
+              style={{
+                left: `${(indicator.x / displayRect.width) * 100}%`,
+                top: `${(indicator.y / displayRect.height) * 100}%`,
+                transform: 'translate(-50%, -50%)'
+              }}
+            >
+              {/* Crosshair indicator */}
+              <div
+                className={`
+                  w-8 h-8 border-2 rounded-full flex items-center justify-center
+                  ${indicator.status === 'pending' ? 'border-yellow-500 bg-yellow-500 bg-opacity-20' : ''}
+                  ${indicator.status === 'success' ? 'border-green-500 bg-green-500 bg-opacity-20' : ''}
+                  ${indicator.status === 'error' ? 'border-red-500 bg-red-500 bg-opacity-20' : ''}
+                  ${indicator.status === 'pending' ? 'animate-pulse' : ''}
+                `}
+              >
+                <div className="w-1 h-1 bg-current rounded-full"></div>
+              </div>
+              
+              {/* Status message */}
+              {indicator.message && (
+                <div 
+                  className={`
+                    absolute top-10 left-1/2 transform -translate-x-1/2 
+                    px-2 py-1 rounded text-xs font-mono whitespace-nowrap
+                    ${indicator.status === 'success' ? 'bg-green-900 text-green-100' : ''}
+                    ${indicator.status === 'error' ? 'bg-red-900 text-red-100' : ''}
+                    ${indicator.status === 'pending' ? 'bg-yellow-900 text-yellow-100' : ''}
+                  `}
+                >
+                  {indicator.message}
+                </div>
+              )}
+            </div>
+          ))}
+          
           {/* Only show error overlay when there's actually an error */}
           {videoStatus === 'error' && getStatusOverlay()}
           
@@ -579,6 +767,43 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
               </div>
               <div className="text-xs text-gray-400 mt-1">
                 {frameStats.decodedFrames} frames decoded
+              </div>
+            </div>
+          )}
+          
+          {/* Gimbal debug panel */}
+          {lastGimbalCommand && (
+            <div className="absolute top-4 left-4 glass-panel p-3 text-xs font-mono">
+              <div className="flex items-center gap-2 mb-2">
+                <div className={`w-2 h-2 rounded-full ${
+                  lastGimbalCommand.status === 'SUCCESS' ? 'bg-green-500' : 'bg-red-500'
+                }`}></div>
+                <span className="text-white font-semibold">GIMBAL STATUS</span>
+              </div>
+              
+              <div className="space-y-1 text-gray-300">
+                <div>
+                  <span className="text-gray-500">Status: </span>
+                  <span className={lastGimbalCommand.status === 'SUCCESS' ? 'text-green-400' : 'text-red-400'}>
+                    {lastGimbalCommand.status}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-gray-500">Target: </span>
+                  <span className="text-blue-400">
+                    ({lastGimbalCommand.coordinates.x.toFixed(3)}, {lastGimbalCommand.coordinates.y.toFixed(3)})
+                  </span>
+                </div>
+                <div>
+                  <span className="text-gray-500">Message: </span>
+                  <span className="text-white text-xs">{lastGimbalCommand.message}</span>
+                </div>
+                <div>
+                  <span className="text-gray-500">Time: </span>
+                  <span className="text-gray-400">
+                    {new Date(lastGimbalCommand.timestamp).toLocaleTimeString()}
+                  </span>
+                </div>
               </div>
             </div>
           )}
@@ -604,6 +829,17 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
               </div>
             </div>
           </div>
+          
+          {/* Instructions overlay when no gimbal command has been sent yet */}
+          {!lastGimbalCommand && frameStats.decodedFrames > 0 && (
+            <div className="absolute bottom-4 right-4 glass-panel p-3 text-sm">
+              <div className="text-center">
+                <div className="text-yellow-400 mb-1">🎯</div>
+                <div className="text-white text-xs">Click anywhere to test gimbal control</div>
+                <div className="text-gray-400 text-xs mt-1">Tap-to-target functionality</div>
+              </div>
+            </div>
+          )}
           
           {/* Custom overlays passed as children */}
           {children}
