@@ -611,26 +611,71 @@ npm run build && npm run dev  # Electron desktop app
 - Data: 20Hz controller + 5Hz telemetry + 1Hz battery = ~25 updates/second
 - Latency: <100ms end-to-end (controller → laptop display)
 
-## ⚠️ Current Status: PARTIALLY WORKING
+## ✅ Current Status: FULLY WORKING NAVIGATION SYSTEM
 
-**What Works:**
-- ✅ Live H.264 video stream from DJI camera at 1920x1080
-- ✅ Real-time flight data display (GPS, altitude, battery, speed, distance)
-- ✅ Real joystick data transmission (20Hz from controller)
-- ✅ Professional DJI-style desktop interface
-- ✅ Responsive window resizing with proper video aspect ratio
-- ✅ Real compass data collection from DJI SDK FlightControllerKey
-- ✅ Overlay positioning relative to video frame (minimap, HSI compass)
+**What Works Perfectly:**
+- ✅ **Live H.264 video stream** from DJI camera at 1920x1080
+- ✅ **Real-time flight data** display (GPS, altitude, battery, speed, distance)
+- ✅ **Real joystick data** transmission (20Hz from controller)
+- ✅ **Professional DJI-style desktop interface** - Complete responsive UI
+- ✅ **HSI Compass with 360° obstacle visualization** - Advanced version with raw perception data toggle, scale slider, logarithmic scaling
+- ✅ **Auto-rotating minimap** - Map rotates based on aircraft heading, aircraft always points "up"
+- ✅ **Real compass data collection** from DJI SDK FlightControllerKey
+- ✅ **Obstacle avoidance data** - Raw distance arrays from radar and perception sensors
+- ✅ **Responsive window behavior** - Resizable with proper aspect ratios
 
-**What's Partially Working:**
-- ⚠️ **HSI compass**: Arrow points approximately in correct direction, but full HSI functionality incomplete
-- ⚠️ **Attitude display**: Roll/pitch data collected but not fully displayed in HSI
-- ⚠️ **Minimap**: Shows aircraft/home positions but no auto-rotation based on compass heading
+## 🧪 System Testing Script
 
-**What's Missing:**
-- ❌ **DJI native map data access**: Need to investigate MapWidget integration
-- ❌ **Auto-rotating minimap**: Compass heading not driving map orientation
-- ❌ **Complete HSI functionality**: Full attitude indicator behavior needed
-- ❌ **Port forwarding persistence**: Must re-establish `adb forward tcp:8080 tcp:8080` after controller restart
+**Quick system verification:**
+```bash
+# One-command system test (recommended)
+./test_system.sh
 
-**Next Critical Steps**: See `./docs/TODO.md` for prioritized handoff documentation with immediate next actions focused on accessing DJI's native map data source.
+# This script will:
+# 1. ✅ Check device connection
+# 2. 🔄 Stop existing processes  
+# 3. 🔌 Re-establish port forwarding
+# 4. 🚀 Launch Android bridge
+# 5. 🌐 Start browser client at http://localhost:3000
+# 6. ✅ Verify all connections
+```
+
+**Manual step-by-step verification:**
+```bash
+# 1. Check device connection
+adb devices
+
+# 2. Re-establish port forwarding (critical after controller restart)
+adb forward tcp:8080 tcp:8080
+
+# 3. Launch bridge on controller
+adb shell am start -a dji.sampleV5.aircraft.action.START_BRIDGE
+
+# 4. Start browser client (recommended for development)
+cd dji-controller-interface/
+npm run dev:browser
+# Open http://localhost:3000
+```
+
+## 🎯 Expected Functionality 
+
+When the system is running correctly, you should see:
+- ✅ **Live video stream** - Smooth H.264 video at 1920x1080
+- ✅ **HSI compass** - Bottom-right overlay with obstacle visualization, raw perception data toggle, distance scaling
+- ✅ **Auto-rotating minimap** - Top-left overlay, map rotates with aircraft heading
+- ✅ **Real-time telemetry** - GPS coordinates, altitude, speed, distance to home
+- ✅ **Battery status** - Percentage, voltage, temperature in top bar
+- ✅ **Joystick data** - Controller inputs updating at 20Hz
+
+## 🚨 Troubleshooting
+
+**Connection Issues:**
+```bash
+# Port forwarding gets lost after controller restart - re-run:
+adb forward tcp:8080 tcp:8080
+
+# Or use the automated test script:
+./test_system.sh
+```
+
+**Next Development Priority**: See `./docs/TODO.md` for multi-camera streaming implementation using `CameraStreamDetailVM.kt` patterns.

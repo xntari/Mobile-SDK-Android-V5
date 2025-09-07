@@ -2,75 +2,76 @@
 
 ## 🚀 TLDR - You Are Here
 
-**CURRENT STATE**: Working system with **HSI compass** and **obstacle avoidance structure implemented**.
+**CURRENT STATE**: **✅ COMPLETE NAVIGATION SYSTEM** - Advanced HSI compass with 360° obstacle visualization + auto-rotating minimap both working perfectly.
 
 **IMMEDIATE NEXT STEPS:**
-1. **Complete PerceptionManager integration** - Add real-time obstacle data listeners using same pattern as official HSI widget
-2. **Implement auto-rotating minimap** - Use real compass heading to drive map orientation
-3. **Test obstacle detection** - Deploy updated bridge and verify obstacle sectors display in HSI
+1. **📷 HIGH PRIORITY: Multi-Video Decoding Implementation** - Investigate CameraStreamManager in SDK demo, modify Android bridge for dual camera streams without frame mixing
+2. **🎛️ HIGH PRIORITY: Secondary Camera Stream Support** - Add metadata for gimbal camera, maintain FPV compatibility when secondary stream absent
+3. **🔧 MEDIUM: Complete flight controls** - Take off, RTH, flight mode switching  
+4. **🗺️ LOW: Investigate DJI native map tiles** - Replace OpenStreetMap with DJI's official tiles
 
-**CONTEXT**: Live H.264 video streaming + telemetry works perfectly. HSI now uses same SDK keys as official DJI widget. **Obstacle avoidance pipeline ready for real data**.
+**CONTEXT**: Live H.264 video streaming + telemetry + **complete navigation system** works perfectly. Ready for camera controls and multi-camera support.
 
 ---
 
 ## 📍 **CURRENT STATUS - PARTIALLY WORKING SYSTEM**
 
 ### ✅ **What Works Perfectly**
-- **Live H.264 video stream** from DJI camera at 1920x1080 resolution
+- **Live H.264 video stream** from DJI camera at 1920x1080 resolution  
 - **Real-time telemetry data** - GPS, altitude, speed, distance to home, battery
 - **Live joystick data** - All 4 axes streaming at 20Hz from controller
 - **Professional desktop interface** - Electron app with DJI-style UI
 - **Responsive window behavior** - Resizable with proper aspect ratios
-- **Overlay positioning** - HSI compass (bottom-right), minimap (top-left) positioned relative to video frame
+- **HSI Compass with 360° obstacle visualization** - Advanced version with raw perception data toggle, scale slider, logarithmic scaling
+- **Auto-rotating minimap** - Map rotates based on aircraft heading, aircraft always points "up"
 - **Real compass data collection** - `FlightControllerKey.KeyCompassHeading` successfully integrated
+- **Obstacle avoidance data** - Raw distance arrays from radar and perception sensors
 
-### ⚠️ **What's Partially Working**
-- **HSI Compass**: Arrow points approximately in correct direction, but full HSI functionality incomplete
-  - Real compass data is collected and transmitted from Android bridge
-  - Arrow direction roughly matches actual aircraft heading  
-  - Missing: Full attitude display (roll/pitch indicators), precision calibration
-- **Attitude Data**: Roll/pitch data collected but not fully displayed
-- **Minimap**: Shows aircraft/home positions but no auto-rotation based on compass heading
+### 🎯 **Ready for Implementation**
+- **Multi-camera streaming architecture** - SDK demo shows complete working implementation in `CameraStreamDetailVM.kt`
+- **Dual video stream support** - FPV + secondary camera (gimbal/H20N) with metadata routing
+- **Stream separation** - Individual camera stream management using `ICameraStreamManager`
+- **Backwards compatibility** - System functions normally with FPV-only when secondary camera absent
 
-### ❌ **What Needs Investigation**
-- **DJI native map data source**: Can we access the same map tiles that DJI Pilot app uses?
-- **Auto-rotating minimap**: How to implement smooth map rotation driven by compass heading?
-- **Complete HSI functionality**: What's missing for full attitude indicator behavior?
+### 📋 **Next Development Focus**
+- **Study CameraStreamDetailVM.kt and CameraStreamDetailFragment.kt** - Complete multi-camera implementation examples
+- **Implement dual-stream architecture** - Extend DJIBridgeServer.kt with ICameraStreamManager pattern
+- **Add camera metadata to video frames** - Stream identification without breaking existing functionality
 
 ---
 
 ## 🎯 **IMMEDIATE IMPLEMENTATION PRIORITY**
 
-### **Task 1**: Complete PerceptionManager Integration (HIGH PRIORITY)
+### **Task 1**: Multi-Video Stream Implementation (HIGH PRIORITY)
 
-**Goal**: Add real-time obstacle data listeners to bridge server using exact same pattern as official HSI widget.
+**Goal**: Implement dual camera streaming architecture to support FPV + secondary camera (gimbal/H20N) without frame mixing.
 
-**Implementation Steps**:
-1. **Add PerceptionManager listeners in DJIBridgeServer.kt**:
-   ```kotlin
-   private val radarObstacleDataListener = ObstacleDataListener { data -> 
-       // Cache obstacle data for telemetry collection
-   }
-   private val perceptionObstacleDataListener = ObstacleDataListener { data ->
-       // Cache perception data for telemetry collection  
-   }
-   ```
-2. **Register listeners on bridge startup**:
-   ```kotlin
-   PerceptionManager.getInstance().getRadarManager().addObstacleDataListener(radarObstacleDataListener)
-   PerceptionManager.getInstance().addObstacleDataListener(perceptionObstacleDataListener)
-   ```
-3. **Transform ObstacleData to sectors format** for HSI display
-4. **Test with physical obstacles** - wave hand near drone sensors
+**Key SDK Files to Study**:
+- `CameraStreamDetailVM.kt:188-189` - `putCameraStreamSurface()` method for multi-camera management
+- `CameraStreamDetailFragment.kt:285-301` - Surface management and stream priority handling
+- `ICameraStreamManager` interface - Core multi-stream architecture
+- Lines of Interest:
+  - `CameraStreamDetailVM.kt:22` - `ICameraStreamManager` import
+  - `CameraStreamDetailVM.kt:189` - Surface assignment per camera index
+  - `CameraStreamDetailFragment.kt:295-300` - Stream surface configuration
 
-### **Task 2**: Auto-Rotating Minimap Implementation (MEDIUM PRIORITY)
+**Implementation Strategy**:
+1. **Study existing multi-camera demo** - CameraStreamDetailFragment shows complete working example
+2. **Modify DJIBridgeServer.kt** to support dual video frame callbacks:
+   - FPV stream: `ComponentIndexType.FPV`  
+   - Secondary stream: `ComponentIndexType.LEFT_OR_MAIN` (H20N) or gimbal camera
+3. **Add metadata routing** - Include `camera_type` field in video frame packets
+4. **Client-side stream separation** - Process streams in separate buffers based on metadata
+5. **Backwards compatibility** - System functions normally with FPV-only when secondary absent
 
-**Goal**: Map rotates based on aircraft heading, aircraft always points "up".
+### **Task 2**: Stream Metadata Enhancement (HIGH PRIORITY)
+
+**Goal**: Add camera identification metadata to video frames without breaking existing single-stream functionality.
 
 **Implementation**:
-- Update `MapDisplay.tsx` to apply `transform: rotate(${-compassHeading}deg)` to map container
-- Ensure smooth rotation interpolation (not jerky)
-- Add north indicator showing true north direction
+- Extend current H.264 frame packet format to include `camera_source` identifier
+- Client detects secondary stream presence and enables dual-video UI mode
+- FPV-only operation remains unchanged for backwards compatibility
 
 ---
 
@@ -117,7 +118,15 @@
 - **H.264 Video**: 30fps variable, ~26KB per frame, smooth playback
 - **Compass Data**: Real magnetometer heading collected via `FlightControllerKey.KeyCompassHeading`
 
-### **Current Implementation Files**
+### **Critical Files for Multi-Camera Implementation**
+
+**Android SDK Demo Files (STUDY THESE FIRST)**:
+- `CameraStreamDetailVM.kt` - Complete multi-camera stream management
+- `CameraStreamDetailFragment.kt` - UI for camera stream control with surface management
+- Key methods:
+  - `putCameraStreamSurface(cameraIndex, surface, width, height, scaleType)` - Assigns surface to specific camera
+  - `setCameraIndex(ComponentIndexType)` - Switches between camera sources
+  - `enableStream(cameraIndex, enable)` - Controls individual camera streams
 
 **Android Bridge** (`DJIBridgeServer.kt:742-750` + `DJIBridgeServer.kt:777-820`):
 ```kotlin
@@ -139,12 +148,18 @@
     )
 }
 
-// ⚠️ Ready for implementation - Obstacle avoidance using PerceptionManager
+// ✅ Working - Obstacle avoidance using PerceptionManager with raw distance arrays
 "obstacle_avoidance" to run {
-    // Structure ready, need to add listeners for real-time data
-    val radarManager = PerceptionManager.getInstance().radarManager
-    // TODO: Add ObstacleDataListener and RadarInformationListener
+    val radarDistances = cachedRadarObstacleData?.horizontalObstacleDistance
+    val perceptionDistances = cachedPerceptionObstacleData?.horizontalObstacleDistance
+    mapOf(
+        "enabled" to true,
+        "radar_distances" to radarDistances?.toList(),
+        "perception_distances" to perceptionDistances?.toList()
+    )
 }
+
+// 🎯 NEXT: Multi-camera stream implementation using ICameraStreamManager pattern
 ```
 
 **Desktop Interface** (`App.tsx:42-49`):
