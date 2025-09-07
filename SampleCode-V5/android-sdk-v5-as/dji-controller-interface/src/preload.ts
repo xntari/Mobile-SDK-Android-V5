@@ -20,6 +20,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onVideoFrame: (callback: (frame: Buffer) => void) => {
     ipcRenderer.on('video-frame', (event, frame) => callback(frame));
   },
+
+  onFPVVideoFrame: (callback: (frame: any) => void) => {
+    ipcRenderer.on('fpv-video-frame', (event, frame) => callback(frame));
+  },
+
+  onSecondaryVideoFrame: (callback: (frame: any) => void) => {
+    ipcRenderer.on('secondary-video-frame', (event, frame) => callback(frame));
+  },
   
   onConnectionStatus: (callback: (status: string) => void) => {
     ipcRenderer.on('connection-status', (event, status) => callback(status));
@@ -42,6 +50,8 @@ declare global {
       getConnectionStatus: () => Promise<string>;
       onBridgeData: (callback: (data: any) => void) => void;
       onVideoFrame: (callback: (frame: Buffer) => void) => void;
+      onFPVVideoFrame: (callback: (frame: any) => void) => void;
+      onSecondaryVideoFrame: (callback: (frame: any) => void) => void;
       onConnectionStatus: (callback: (status: string) => void) => void;
       removeAllListeners: (channel: string) => void;
     };
