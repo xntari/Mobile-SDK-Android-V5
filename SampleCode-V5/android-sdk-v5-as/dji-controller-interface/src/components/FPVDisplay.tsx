@@ -16,6 +16,7 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
   const [frameStats, setFrameStats] = useState({ frames: 0, totalBytes: 0, lastFrame: 0, decodedFrames: 0 });
   const [decoderSupported, setDecoderSupported] = useState<boolean | null>(null);
   const [videoDimensions, setVideoDimensions] = useState({ width: 1920, height: 1080 });
+  const [droppedFrameCount, setDroppedFrameCount] = useState<number>(0);
   const [displayRect, setDisplayRect] = useState({ left: 0, top: 0, width: 0, height: 0 });
   const spsRef = useRef<Uint8Array | null>(null);
   const ppsRef = useRef<Uint8Array | null>(null);
@@ -118,7 +119,7 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
     // Check if WebCodecs is supported
     const checkWebCodecsSupport = async () => {
       if (typeof VideoDecoder === 'undefined') {
-        console.warn('WebCodecs not supported in this environment');
+        // console.warn('WebCodecs not supported in this environment');
         setDecoderSupported(false);
         setVideoStatus('error');
         return false;
@@ -130,17 +131,17 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
         });
         
         if (support.supported) {
-          console.log('✅ H.264 WebCodecs decoding supported');
+          console.log('✅ FPV H.264 WebCodecs decoding supported'); // Essential initialization log
           setDecoderSupported(true);
           return true;
         } else {
-          console.warn('❌ H.264 WebCodecs decoding not supported');
+          // console.warn('❌ H.264 WebCodecs decoding not supported');
           setDecoderSupported(false);
           setVideoStatus('error');
           return false;
         }
       } catch (error) {
-        console.error('Error checking WebCodecs support:', error);
+        console.error('Error checking FPV WebCodecs support:', error); // Essential initialization log
         setDecoderSupported(false);
         setVideoStatus('error');
         return false;
@@ -220,18 +221,18 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
               });
               
             } catch (error) {
-              console.error('Error drawing video frame:', error);
+              // console.error('Error drawing video frame:', error);
               frame.close();
             }
           },
           error: (error: Error) => {
-            console.error('VideoDecoder error:', error);
-            console.error('Decoder state:', videoDecoderRef.current?.state);
-            console.error('Error details:', {
-              name: error.name,
-              message: error.message,
-              stack: error.stack
-            });
+            console.error('FPV VideoDecoder error:', error); // Essential error log
+            // console.error('Decoder state:', videoDecoderRef.current?.state);
+            // console.error('Error details:', {
+            //  name: error.name,
+            //  message: error.message,
+            //  stack: error.stack
+            //});
             setVideoStatus('error');
             // Reset decoder state on error
             decoderConfiguredRef.current = false;
@@ -257,25 +258,57 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
         };
 
       } catch (error) {
-        console.error('Failed to set up video decoder:', error);
+        console.error('Failed to set up FPV video decoder:', error); // Essential error log
         setVideoStatus('error');
       }
     };
 
     // Handle incoming video frames - new format with metadata + binary data
     const handleVideoFrame = (frameInfo: any) => {
-      if (!frameInfo) return;
+      // ENHANCED VALIDATION - prevent frame mixing between streams
+      if (!frameInfo) {
+        //console.warn('🎥 FPV: Received null frameInfo - keeping current frame');
+        return;
+      }
       
       // Handle new format: { metadata: {...}, data: Buffer }
       const frameData = frameInfo.data;
       const metadata = frameInfo.metadata;
       
+      // STRICT VALIDATION - reject frames without proper metadata
       if (!frameData) {
-        console.warn('FPVDisplay: Received video frame without data');
+        //console.warn('🎥 FPV: Received video frame without data - keeping current frame');
         return;
       }
       
-      console.log('🎥 FPV: Received primary camera frame:', metadata?.frameNumber || 'unknown');
+      if (!metadata) {
+        //console.warn('🎥 FPV: Received binary data without metadata - dropping frame to prevent corruption');
+        setDroppedFrameCount(prev => prev + 1);
+        return; // This prevents the mixing issue you're seeing
+      }
+      
+      // Verify this frame is actually for FPV camera
+      if (metadata.camera_source && metadata.camera_source !== 'fpv') {
+        //console.warn(`🎥 FPV: Received frame for wrong stream (${metadata.camera_source}) - dropping frame`);
+        setDroppedFrameCount(prev => prev + 1);
+        return; // Don't process frames meant for secondary camera
+      }
+      
+      // Additional metadata validation
+      if (!metadata.frameNumber && metadata.frameNumber !== 0) {
+        //console.warn('🎥 FPV: Frame metadata missing frameNumber - dropping frame');
+        setDroppedFrameCount(prev => prev + 1);
+        return;
+      }
+      
+      // Validate frame size matches expected data
+      if (metadata.frameSize && frameData.length !== metadata.frameSize) {
+        //console.warn(`🎥 FPV: Frame size mismatch - expected ${metadata.frameSize}, got ${frameData.length} - dropping frame`);
+        setDroppedFrameCount(prev => prev + 1);
+        return;
+      }
+      
+      //console.log(`🎥 FPV: Processing validated frame ${metadata.frameNumber} (${frameData.length} bytes)`);
       
       // Update frame statistics and status
       const now = Date.now();
@@ -310,12 +343,12 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
             frameData.byteLength
           );
         } else {
-          console.error('Unsupported video data format:', typeof frameData);
+          // console.error('Unsupported video data format:', typeof frameData);
           return;
         }
 
         if (h264Data.length === 0) {
-          console.warn('Empty video frame, skipping');
+          // console.warn('Empty video frame, skipping');
           return;
         }
 
@@ -338,7 +371,7 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
         if (!decoderConfiguredRef.current && spsRef.current && ppsRef.current && videoDecoderRef.current) {
           // Check if decoder exists and is not closed
           if (videoDecoderRef.current.state === 'closed') {
-            console.log('Decoder is closed, skipping configuration until recreated');
+            // console.log('Decoder is closed, skipping configuration until recreated');
             return;
           }
           
@@ -372,7 +405,7 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
             
             decoderConfiguredRef.current = true;
           } catch (error) {
-            console.error('❌ Failed to configure decoder:', error);
+            console.error('❌ Failed to configure FPV decoder:', error); // Essential error log
             decoderConfiguredRef.current = false;
             setVideoStatus('error');
             return;
@@ -382,7 +415,7 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
         // Skip if decoder not configured or closed
         if (!decoderConfiguredRef.current || !videoDecoderRef.current || videoDecoderRef.current.state !== 'configured') {
           if (videoDecoderRef.current && videoDecoderRef.current.state === 'closed') {
-            console.log('Decoder closed, triggering recreation');
+            // console.log('Decoder closed, triggering recreation');
             decoderConfiguredRef.current = false;
             // Trigger recreation on next frame
             setTimeout(() => setupVideoDecoder(), 100);
@@ -421,16 +454,16 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
           videoDecoderRef.current.decode(chunk);
           //console.log('Decode call successful');
         } catch (decodeError) {
-          console.error('Decode error:', decodeError);
-          console.error('Decode error details:', {
-            name: decodeError.name,
-            message: decodeError.message,
-            decoderState: videoDecoderRef.current?.state
-          });
+          console.error('FPV Decode error:', decodeError); // Essential error log
+          // console.error('Decode error details:', {
+          //  name: decodeError.name,
+          //  message: decodeError.message,
+          //  decoderState: videoDecoderRef.current?.state
+          //});
           
           // If this was a key frame and it failed, reset the decoder
           if (isKey) {
-            console.log('Key frame decode failed, resetting decoder...');
+            // console.log('Key frame decode failed, resetting decoder...');
             decoderConfiguredRef.current = false;
             spsRef.current = null;
             ppsRef.current = null;
@@ -441,7 +474,7 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
                 // Close the decoder regardless of current state
                 videoDecoderRef.current.close();
               } catch (closeError) {
-                console.warn('Error closing decoder:', closeError);
+                // console.warn('Error closing decoder:', closeError);
               }
             }
             
@@ -451,7 +484,7 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
         }
         
       } catch (error) {
-        console.error('Failed to decode video frame:', error);
+        console.error('Failed to decode FPV video frame:', error); // Essential error log
         setVideoStatus('error');
         // Reset decoder state on error
         decoderConfiguredRef.current = false;
@@ -579,11 +612,19 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
           {frameStats.decodedFrames > 0 && (
             <div className="absolute top-4 right-4 glass-panel p-2 text-xs">
               <div className="flex items-center gap-2">
-                <div className="w-2 h-2 bg-status-good rounded-full animate-pulse-blue"></div>
-                <span>LIVE H.264</span>
+                <div className={`w-2 h-2 rounded-full animate-pulse-blue ${
+                  droppedFrameCount < 5 ? 'bg-status-good' : 
+                  droppedFrameCount < 20 ? 'bg-yellow-500' : 'bg-red-500'
+                }`}></div>
+                <span>LIVE FPV</span>
               </div>
               <div className="text-xs text-gray-400 mt-1">
-                {frameStats.decodedFrames} frames decoded
+                {frameStats.decodedFrames}
+                {droppedFrameCount > 0 && (
+                  <div className={`${droppedFrameCount < 5 ? 'text-gray-500' : droppedFrameCount < 20 ? 'text-yellow-400' : 'text-red-400'}`}>
+                    {droppedFrameCount} dropped
+                  </div>
+                )}
               </div>
             </div>
           )}

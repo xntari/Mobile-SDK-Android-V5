@@ -633,27 +633,54 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     }
     
     private fun sendGimbalResponse(clientId: String, success: Boolean, message: String, x: Double, y: Double) {
-        try {
-            val response = createMessage(MessageType.GIMBAL_RESPONSE, mapOf(
-                "success" to success,
-                "message" to message,
-                "coordinates" to mapOf(
-                    "x" to x,
-                    "y" to y
-                ),
-                "timestamp" to System.currentTimeMillis(),
-                "camera" to "H20N"
-            ))
-            
-            val socket = clients[clientId]
-            if (socket != null && !socket.isClosed) {
-                sendWebSocketTextFrame(socket, response)
-                Log.d(TAG, "Sent gimbal response to client $clientId: success=$success, message=$message")
-            } else {
-                Log.w(TAG, "Cannot send gimbal response - client $clientId socket not available")
+        // Use executor to avoid NetworkOnMainThreadException
+        executor.submit {
+            try {
+                Log.d(TAG, "🔍 DEBUG: Creating gimbal response for client $clientId on background thread")
+                Log.d(TAG, "🔍 DEBUG: Input parameters - success=$success, message=$message, x=$x, y=$y")
+                
+                val responseData = mapOf(
+                    "success" to success,
+                    "message" to message,
+                    "coordinates" to mapOf(
+                        "x" to x,
+                        "y" to y
+                    ),
+                    "timestamp" to System.currentTimeMillis(),
+                    "camera" to "H20N"
+                )
+                
+                Log.d(TAG, "🔍 DEBUG: Response data created: $responseData")
+                
+                Log.d(TAG, "🔍 DEBUG: About to call createMessage with MessageType.GIMBAL_RESPONSE")
+                val response = try {
+                    createMessage(MessageType.GIMBAL_RESPONSE, responseData)
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Exception in createMessage for GIMBAL_RESPONSE: ${e.message}", e)
+                    null
+                }
+                
+                Log.d(TAG, "🔍 DEBUG: createMessage returned: ${if (response != null) "non-null (${response.length} chars)" else "NULL"}")
+                
+                if (response == null) {
+                    Log.e(TAG, "❌ CRITICAL: createMessage returned null for GIMBAL_RESPONSE")
+                    return@submit
+                }
+                
+                val socket = clients[clientId]
+                Log.d(TAG, "🔍 DEBUG: Socket for client $clientId: ${if (socket != null) "non-null, closed=${socket.isClosed}" else "NULL"}")
+                
+                if (socket != null && !socket.isClosed) {
+                    Log.d(TAG, "🔍 DEBUG: About to call sendWebSocketTextFrame on background thread...")
+                    sendWebSocketTextFrame(socket, response)
+                    Log.d(TAG, "✅ Sent gimbal response to client $clientId: success=$success, message=$message")
+                } else {
+                    Log.w(TAG, "Cannot send gimbal response - client $clientId socket not available or closed")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Failed to send gimbal response to client $clientId: ${e.message}", e)
+                e.printStackTrace()
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to send gimbal response to client $clientId: ${e.message}", e)
         }
     }
     
@@ -722,39 +749,65 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     
     // Message creation utilities with proper JSON serialization
     private fun createMessage(type: MessageType, data: Any, priority: Priority = Priority.NORMAL): String {
-        val message = JSONObject().apply {
-            put("type", type.value)
-            put("version", PROTOCOL_VERSION)
-            put("timestamp", System.currentTimeMillis())
-            put("priority", priority.name.lowercase())
+        try {
+            Log.d(TAG, "🔍 DEBUG createMessage: Starting with type=${type.value}, data=$data")
             
-            when (data) {
-                is Map<*, *> -> {
-                    data.forEach { (key, value) ->
-                        put(key.toString(), convertToJsonValue(value))
+            val message = JSONObject().apply {
+                Log.d(TAG, "🔍 DEBUG createMessage: Adding basic fields")
+                put("type", type.value)
+                put("version", PROTOCOL_VERSION)
+                put("timestamp", System.currentTimeMillis())
+                put("priority", priority.name.lowercase())
+                
+                Log.d(TAG, "🔍 DEBUG createMessage: Processing data - type: ${data::class.simpleName}")
+                when (data) {
+                    is Map<*, *> -> {
+                        Log.d(TAG, "🔍 DEBUG createMessage: Processing Map with ${data.size} entries")
+                        data.forEach { (key, value) ->
+                            Log.d(TAG, "🔍 DEBUG createMessage: Processing map entry: $key -> $value")
+                            put(key.toString(), convertToJsonValue(value))
+                        }
+                        Log.d(TAG, "🔍 DEBUG createMessage: Finished processing Map")
+                    }
+                    is JSONObject -> {
+                        Log.d(TAG, "🔍 DEBUG createMessage: Processing JSONObject")
+                        // Copy all fields from the JSONObject
+                        data.keys().forEach { key ->
+                            put(key, data.get(key))
+                        }
+                    }
+                    else -> {
+                        Log.d(TAG, "🔍 DEBUG createMessage: Adding data as single field")
+                        put("data", data)
                     }
                 }
-                is JSONObject -> {
-                    // Copy all fields from the JSONObject
-                    data.keys().forEach { key ->
-                        put(key, data.get(key))
-                    }
-                }
-                else -> put("data", data)
+                Log.d(TAG, "🔍 DEBUG createMessage: JSON object construction complete")
             }
+            
+            Log.d(TAG, "🔍 DEBUG createMessage: Converting to string...")
+            val result = message.toString()
+            Log.d(TAG, "🔍 DEBUG createMessage: SUCCESS - result length: ${result.length}")
+            return result
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Exception in createMessage: ${e.message}", e)
+            throw e
         }
-        return message.toString()
     }
     
     private fun convertToJsonValue(value: Any?): Any? {
-        return when (value) {
-            is Map<*, *> -> {
-                JSONObject().apply {
-                    value.forEach { (k, v) ->
-                        put(k.toString(), convertToJsonValue(v))
+        try {
+            Log.d(TAG, "🔍 DEBUG convertToJsonValue: Processing value=$value, type=${value?.let { it::class.simpleName }}")
+            return when (value) {
+                is Map<*, *> -> {
+                    Log.d(TAG, "🔍 DEBUG convertToJsonValue: Converting Map with ${value.size} entries")
+                    JSONObject().apply {
+                        value.forEach { (k, v) ->
+                            Log.d(TAG, "🔍 DEBUG convertToJsonValue: Processing map entry: $k -> $v")
+                            put(k.toString(), convertToJsonValue(v))
+                        }
                     }
                 }
-            }
             is List<*> -> {
                 JSONArray().apply {
                     value.forEach { item ->
@@ -769,7 +822,14 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                     }
                 }
             }
-            else -> value // Primitive types, strings, etc.
+                else -> {
+                    Log.d(TAG, "🔍 DEBUG convertToJsonValue: Returning primitive value: $value")
+                    value // Primitive types, strings, etc.
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Exception in convertToJsonValue: ${e.message}", e)
+            throw e
         }
     }
     
@@ -1128,7 +1188,25 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     }
     
     private fun sendWebSocketTextFrame(socket: Socket, message: String) {
-        sendWebSocketFrame(socket, message.toByteArray(StandardCharsets.UTF_8), 0x81) // Text frame
+        try {
+            Log.d(TAG, "🔍 DEBUG sendWebSocketTextFrame: socket=${if (socket != null) "non-null" else "NULL"}, message=${if (message != null) "non-null (${message.length} chars)" else "NULL"}")
+            if (socket == null) {
+                Log.e(TAG, "❌ CRITICAL: socket is null in sendWebSocketTextFrame")
+                return
+            }
+            if (message == null) {
+                Log.e(TAG, "❌ CRITICAL: message is null in sendWebSocketTextFrame")
+                return
+            }
+            Log.d(TAG, "🔍 DEBUG: About to convert message to bytes...")
+            val messageBytes = message.toByteArray(StandardCharsets.UTF_8)
+            Log.d(TAG, "🔍 DEBUG: Message converted to ${messageBytes.size} bytes, calling sendWebSocketFrame...")
+            sendWebSocketFrame(socket, messageBytes, 0x81) // Text frame
+            Log.d(TAG, "🔍 DEBUG: sendWebSocketFrame completed successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Exception in sendWebSocketTextFrame: ${e.message}", e)
+            throw e
+        }
     }
     
     private fun sendWebSocketBinaryFrame(socket: Socket, data: ByteArray) {

@@ -73,21 +73,21 @@ class BridgeManager {
         const bearingToHome = calculateBearing(message.location, message.home_location);
         
         // Debug compass data
-        console.log('🧭 Compass Data Debug:', {
-          received_compass_heading: message.compass_heading,
-          received_heading: message.heading,
-          attitude_yaw: message.attitude?.yaw,
-          converted_compass: trueCompassHeading,
-          bearing_to_home: bearingToHome
-        });
+        // console.log('🧭 Compass Data Debug:', {
+        //   received_compass_heading: message.compass_heading,
+        //   received_heading: message.heading,
+        //   attitude_yaw: message.attitude?.yaw,
+        //   converted_compass: trueCompassHeading,
+        //   bearing_to_home: bearingToHome
+        // });
 
         // Debug obstacle avoidance data
-        console.log('🚧 Obstacle Avoidance Debug:', {
-          obstacle_avoidance: message.obstacle_avoidance,
-          has_obstacle_data: !!message.obstacle_avoidance,
-          enabled: message.obstacle_avoidance?.enabled,
-          sectors_count: message.obstacle_avoidance?.sectors?.length || 0
-        });
+        // console.log('🚧 Obstacle Avoidance Debug:', {
+        //   obstacle_avoidance: message.obstacle_avoidance,
+        //   has_obstacle_data: !!message.obstacle_avoidance,
+        //   enabled: message.obstacle_avoidance?.enabled,
+        //   sectors_count: message.obstacle_avoidance?.sectors?.length || 0
+        // });
         
         const mappedTelemetry = {
           ...message,
