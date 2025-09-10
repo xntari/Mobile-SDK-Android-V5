@@ -40,11 +40,11 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     const radarDistances = obstacleData.radar_distances;
     const perceptionDistances = obstacleData.perception_distances;
     
-    console.log(`🎨 Drawing obstacle paths:`, {
-      radar_distances: radarDistances?.length || 0,
-      perception_distances: perceptionDistances?.length || 0,
-      closest_distance: obstacleData.closest_distance
-    });
+    // console.log(`🎨 Drawing obstacle paths:`, {
+    //   radar_distances: radarDistances?.length || 0,
+    //   perception_distances: perceptionDistances?.length || 0,
+    //   closest_distance: obstacleData.closest_distance
+    // });
     
     // Draw radar obstacles (like official HSI does)
     if (radarDistances && Array.isArray(radarDistances) && radarDistances.length > 0) {
@@ -58,16 +58,16 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     
     // Use toggle to decide between raw perception data and processed sectors
     if (useRawPerceptionData && perceptionDistances && Array.isArray(perceptionDistances) && perceptionDistances.length > 0) {
-      console.log('🎨 Using raw perception distances (360° array) for infrared obstacles');
+      // console.log('🎨 Using raw perception distances (360° array) for infrared obstacles');
       drawDistanceArray(ctx, centerX, centerY, radius, perceptionDistances, 'perception');
     }
     else if (!useRawPerceptionData && obstacleData.sectors && Array.isArray(obstacleData.sectors)) {
-      console.log('🎨 Using processed sectors for', obstacleData.sectors.length, 'obstacles');
+      // console.log('🎨 Using processed sectors for', obstacleData.sectors.length, 'obstacles');
       drawObstacleSectors(ctx, centerX, centerY, radius, obstacleData.sectors);
     }
     // Fallback when preferred mode data is not available
     else if (obstacleData.sectors && Array.isArray(obstacleData.sectors)) {
-      console.log('🎨 Fallback: Using processed sectors for', obstacleData.sectors.length, 'obstacles');
+      // console.log('🎨 Fallback: Using processed sectors for', obstacleData.sectors.length, 'obstacles');
       drawObstacleSectors(ctx, centerX, centerY, radius, obstacleData.sectors);
     }
   };
@@ -162,7 +162,7 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     }
     
     ctx.globalAlpha = 1.0; // Reset transparency
-    console.log(`🎨 Drew ${obstacleCount} ${source} obstacle sectors (360° data, ${scaleRange}m range)`);
+    //console.log(`🎨 Drew ${obstacleCount} ${source} obstacle sectors (360° data, ${scaleRange}m range)`);
   };
 
   // Draw scale legend rings and labels
@@ -425,25 +425,25 @@ export const HSICompass: React.FC<HSICompassProps> = ({
       : Math.min(centerX, centerY) - 20;
 
     // Debug: Log heading values to console
-    console.log('🎯 HSI Heading Debug:', {
-      prop_heading: heading,
-      telemetry_heading: telemetryData?.heading,
-      telemetry_compass_heading: telemetryData?.compass_heading,
-      attitude_yaw: telemetryData?.attitude?.yaw
-    });
+    //console.log('🎯 HSI Heading Debug:', {
+    //  prop_heading: heading,
+    //  telemetry_heading: telemetryData?.heading,
+    //  telemetry_compass_heading: telemetryData?.compass_heading,
+    //  attitude_yaw: telemetryData?.attitude?.yaw
+    //});
     
     // Use real obstacle data from DJI bridge - use raw distance arrays (like official HSI)
     const obstacleData = telemetryData?.obstacle_avoidance || undefined;
                          
     // Debug: Log obstacle data structure to understand what we're receiving
     if (telemetryData?.obstacle_avoidance) {
-      console.log('🛡️ Obstacle Data Debug:', {
-        full_obstacle_data: telemetryData.obstacle_avoidance,
-        has_sectors: !!telemetryData.obstacle_avoidance.sectors,
-        has_enabled: telemetryData.obstacle_avoidance.enabled,
-      });
+      //console.log('🛡️ Obstacle Data Debug:', {
+      //  full_obstacle_data: telemetryData.obstacle_avoidance,
+      //  has_sectors: !!telemetryData.obstacle_avoidance.sectors,
+      //  has_enabled: telemetryData.obstacle_avoidance.enabled,
+      //});
     } else {
-      console.log('🛡️ No obstacle_avoidance data in telemetryData');
+      // console.log('🛡️ No obstacle_avoidance data in telemetryData');
     }
       
     drawCompassRose(ctx, centerX, centerY, radius, heading, homeDirection, attitude || undefined, obstacleData);

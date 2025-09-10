@@ -36,6 +36,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     message: string;
     timestamp: number;
   } | null>(null);
+  const [droppedFrameCount, setDroppedFrameCount] = useState<number>(0);
 
   // Handle canvas click for gimbal tap-to-target functionality
   const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -46,7 +47,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     const clickX = event.clientX - rect.left;
     const clickY = event.clientY - rect.top;
     
-    console.log(`🎯 Click debug: canvas(${rect.width}x${rect.height}), click(${clickX.toFixed(1)}, ${clickY.toFixed(1)}), displayRect(${displayRect.left}, ${displayRect.top}, ${displayRect.width}x${displayRect.height})`);
+    // console.log(`🎯 Click debug: canvas(${rect.width}x${rect.height}), click(${clickX.toFixed(1)}, ${clickY.toFixed(1)}), displayRect(${displayRect.left}, ${displayRect.top}, ${displayRect.width}x${displayRect.height})`);
     
     // If displayRect is not initialized, use full canvas
     const effectiveDisplayRect = displayRect.width > 0 ? displayRect : { left: 0, top: 0, width: rect.width, height: rect.height };
@@ -54,7 +55,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     // Check if click is within the effective display area
     if (clickX < effectiveDisplayRect.left || clickX > effectiveDisplayRect.left + effectiveDisplayRect.width ||
         clickY < effectiveDisplayRect.top || clickY > effectiveDisplayRect.top + effectiveDisplayRect.height) {
-      console.log(`🎯 Click outside video area: click(${clickX.toFixed(1)}, ${clickY.toFixed(1)}) vs bounds(${effectiveDisplayRect.left}, ${effectiveDisplayRect.top}, ${effectiveDisplayRect.width}x${effectiveDisplayRect.height})`);
+      // console.log(`🎯 Click outside video area: click(${clickX.toFixed(1)}, ${clickY.toFixed(1)}) vs bounds(${effectiveDisplayRect.left}, ${effectiveDisplayRect.top}, ${effectiveDisplayRect.width}x${effectiveDisplayRect.height})`);
       return;
     }
     
@@ -63,7 +64,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     const y = (clickY - effectiveDisplayRect.top) / effectiveDisplayRect.height;
     
     const clickId = `click-${Date.now()}`;
-    console.log(`🎯 H20N Canvas clicked at normalized coordinates: (${x.toFixed(3)}, ${y.toFixed(3)}) [ID: ${clickId}]`);
+    console.log(`🎯 H20N Canvas clicked at normalized coordinates: (${x.toFixed(3)}, ${y.toFixed(3)}) [ID: ${clickId}]`); // Essential gimbal log
     
     // Add pending click indicator (using actual click position relative to effective video area)
     const newIndicator: ClickIndicator = {
@@ -83,10 +84,10 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
         data: { x, y }
       }).then((result: any) => {
         if (result.success) {
-          console.log('✅ Gimbal tap target command sent to bridge successfully');
+          console.log('✅ H20N Gimbal tap target command sent successfully'); // Essential gimbal log
           // Response will be handled by gimbal response listener
         } else {
-          console.error('❌ Gimbal tap target command failed:', result.error);
+          console.error('❌ H20N Gimbal tap target command failed:', result.error); // Essential gimbal log
           // Update indicator to error state
           setClickIndicators(prev => prev.map(indicator =>
             indicator.id === clickId
@@ -95,7 +96,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
           ));
         }
       }).catch((error: any) => {
-        console.error('❌ Failed to send gimbal tap target:', error);
+        console.error('❌ Failed to send H20N gimbal tap target:', error); // Essential gimbal log
         // Update indicator to error state
         setClickIndicators(prev => prev.map(indicator =>
           indicator.id === clickId
@@ -104,7 +105,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
         ));
       });
     } else {
-      console.error('❌ electronAPI not available for gimbal command');
+      console.error('❌ electronAPI not available for H20N gimbal command'); // Essential gimbal log
       // Update indicator to error state
       setClickIndicators(prev => prev.map(indicator =>
         indicator.id === clickId
@@ -148,10 +149,17 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
   // Handle gimbal response messages from bridge
   useEffect(() => {
     const handleGimbalResponse = (responseData: any) => {
-      console.log('📡 Received gimbal response:', responseData);
+      //console.log('📡 Received H20N gimbal response:', responseData);
+      //console.log('📡 DEBUG: H20N received ANY bridge message:', responseData?.type, responseData); // Debug: all bridge messages
+      
+      if (!responseData) {
+        console.warn('⚠️ H20N received null/undefined bridge message');
+        return;
+      }
       
       if (responseData.type === 'gimbal_response') {
-        const { success, message, coordinates, timestamp } = responseData.data;
+        const { success, message, coordinates, timestamp } = responseData;
+        console.log('📡 Received H20N gimbal response:', responseData);
         
         // Update last gimbal command status
         setLastGimbalCommand({
@@ -162,39 +170,39 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
         });
         
         // Update most recent pending indicator
-        setClickIndicators(prev => {
-          const updated = [...prev];
-          // Find the last pending indicator (reverse search)
-          for (let i = updated.length - 1; i >= 0; i--) {
-            if (updated[i].status === 'pending') {
-              updated[i] = {
-                ...updated[i],
-                status: success ? 'success' : 'error',
-                message: message
-              };
-              break;
-            }
-          }
-          return updated;
-        });
+        //setClickIndicators(prev => {
+        //  const updated = [...prev];
+        //  // Find the last pending indicator (reverse search)
+        //  for (let i = updated.length - 1; i >= 0; i--) {
+        //    if (updated[i].status === 'pending') {
+        //      updated[i] = {
+        //        ...updated[i],
+        //        status: success ? 'success' : 'error',
+        //        message: message
+        //      };
+        //      break;
+        //    }
+        //  }
+        //  return updated;
+        //});
         
-        console.log(success ? '✅ Gimbal response: SUCCESS' : '❌ Gimbal response: ERROR', message);
+        console.log(success ? '✅ H20N Gimbal response: SUCCESS' : '❌ H20N Gimbal response: ERROR', message); // Essential gimbal log
       }
     };
     
     // Listen for bridge messages (including gimbal responses)
-    if ((window as any).electronAPI?.onBridgeMessage) {
-      (window as any).electronAPI.onBridgeMessage(handleGimbalResponse);
+    if ((window as any).electronAPI?.onBridgeData) {
+      (window as any).electronAPI.onBridgeData(handleGimbalResponse);
     } else {
-      console.warn('⚠️ electronAPI.onBridgeMessage not available for gimbal response handling');
+      console.warn('⚠️ electronAPI.onBridgeData not available for H20N gimbal response handling'); // Essential bridge log
     }
     
     return () => {
       if ((window as any).electronAPI?.removeAllListeners) {
         try {
-          (window as any).electronAPI.removeAllListeners('bridge-message');
+          (window as any).electronAPI.removeAllListeners('bridge-data');
         } catch (e) {
-          console.warn('Could not remove bridge message listeners:', e);
+          // console.warn('Could not remove bridge data listeners:', e);
         }
       }
     };
@@ -279,7 +287,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     // Check if WebCodecs is supported
     const checkWebCodecsSupport = async () => {
       if (typeof VideoDecoder === 'undefined') {
-        console.warn('WebCodecs not supported in this environment');
+        // console.warn('WebCodecs not supported in this environment');
         setDecoderSupported(false);
         setVideoStatus('error');
         return false;
@@ -291,17 +299,17 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
         });
         
         if (support.supported) {
-          console.log('✅ H.264 WebCodecs decoding supported for H20N');
+          console.log('✅ H20N H.264 WebCodecs decoding supported'); // Essential initialization log
           setDecoderSupported(true);
           return true;
         } else {
-          console.warn('❌ H.264 WebCodecs decoding not supported for H20N');
+          // console.warn('❌ H.264 WebCodecs decoding not supported for H20N');
           setDecoderSupported(false);
           setVideoStatus('error');
           return false;
         }
       } catch (error) {
-        console.error('Error checking WebCodecs support for H20N:', error);
+        console.error('Error checking H20N WebCodecs support:', error); // Essential initialization log
         setDecoderSupported(false);
         setVideoStatus('error');
         return false;
@@ -425,18 +433,50 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
 
     // Handle incoming video frames - uses onSecondaryVideoFrame for secondary camera
     const handleVideoFrame = (frameInfo: any) => {
-      if (!frameInfo) return;
+      // ENHANCED VALIDATION - prevent frame mixing between streams
+      if (!frameInfo) {
+        //console.warn('🎥 H20N: Received null frameInfo - keeping current frame');
+        return;
+      }
       
       // Handle new format: { metadata: {...}, data: Buffer }
       const frameData = frameInfo.data;
       const metadata = frameInfo.metadata;
       
+      // STRICT VALIDATION - reject frames without proper metadata
       if (!frameData) {
-        console.warn('H20NDisplay: Received video frame without data');
+        //console.warn('🎥 H20N: Received video frame without data - keeping current frame');
         return;
       }
       
-      console.log('🎥 H20N: Received secondary camera frame:', metadata?.frameNumber || 'unknown');
+      if (!metadata) {
+        //console.warn('🎥 H20N: Received binary data without metadata - dropping frame to prevent corruption');
+        setDroppedFrameCount(prev => prev + 1);
+        return; // This prevents the mixing issue you're seeing
+      }
+      
+      // Verify this frame is actually for secondary camera (H20N)
+      if (metadata.camera_source && metadata.camera_source !== 'secondary') {
+        //console.warn(`🎥 H20N: Received frame for wrong stream (${metadata.camera_source}) - dropping frame`);
+        setDroppedFrameCount(prev => prev + 1);
+        return; // Don't process frames meant for FPV camera
+      }
+      
+      // Additional metadata validation
+      if (!metadata.frameNumber && metadata.frameNumber !== 0) {
+        //console.warn('🎥 H20N: Frame metadata missing frameNumber - dropping frame');
+        setDroppedFrameCount(prev => prev + 1);
+        return;
+      }
+      
+      // Validate frame size matches expected data
+      if (metadata.frameSize && frameData.length !== metadata.frameSize) {
+        //console.warn(`🎥 H20N: Frame size mismatch - expected ${metadata.frameSize}, got ${frameData.length} - dropping frame`);
+        setDroppedFrameCount(prev => prev + 1);
+        return;
+      }
+      
+      //console.log(`🎥 H20N: Processing validated frame ${metadata.frameNumber} (${frameData.length} bytes)`);
       
       // Update frame statistics and status
       const now = Date.now();
@@ -778,18 +818,26 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
           {frameStats.decodedFrames > 0 && (
             <div className="absolute top-4 right-4 glass-panel p-2 text-xs">
               <div className="flex items-center gap-2">
-                <div className="w-2 h-2 bg-status-good rounded-full animate-pulse-blue"></div>
+                <div className={`w-2 h-2 rounded-full animate-pulse-blue ${
+                  droppedFrameCount < 5 ? 'bg-status-good' : 
+                  droppedFrameCount < 20 ? 'bg-yellow-500' : 'bg-red-500'
+                }`}></div>
                 <span>LIVE H20N</span>
               </div>
               <div className="text-xs text-gray-400 mt-1">
-                {frameStats.decodedFrames} frames decoded
+                {frameStats.decodedFrames}
+                {droppedFrameCount > 0 && (
+                  <div className={`${droppedFrameCount < 5 ? 'text-gray-500' : droppedFrameCount < 20 ? 'text-yellow-400' : 'text-red-400'}`}>
+                    {droppedFrameCount} dropped
+                  </div>
+                )}
               </div>
             </div>
           )}
           
           {/* Gimbal debug panel */}
           {lastGimbalCommand && (
-            <div className="absolute top-4 left-4 glass-panel p-3 text-xs font-mono">
+            <div className="absolute bottom-4 right-4 glass-panel p-3 text-xs font-mono">
               <div className="flex items-center gap-2 mb-2">
                 <div className={`w-2 h-2 rounded-full ${
                   lastGimbalCommand.status === 'SUCCESS' ? 'bg-green-500' : 'bg-red-500'

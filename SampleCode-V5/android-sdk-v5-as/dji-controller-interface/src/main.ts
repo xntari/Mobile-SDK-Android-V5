@@ -79,7 +79,7 @@ class DJIControllerApp {
       this.wsClient = new WebSocket('ws://127.0.0.1:8080');
 
       this.wsClient.on('open', () => {
-        console.log('Connected to DJI Bridge');
+        console.log('✅ Connected to DJI Bridge'); // Essential bridge log
         this.connectionStatus = 'connected';
         this.sendConnectionStatus();
       });
@@ -138,12 +138,12 @@ class DJIControllerApp {
             }
           }
         } catch (error) {
-          console.error('Error processing bridge message:', error);
+          console.error('❌ Error processing DJI Bridge message:', error); // Essential bridge log
         }
       });
 
       this.wsClient.on('close', () => {
-        console.log('Disconnected from DJI Bridge');
+        console.log('❌ Disconnected from DJI Bridge'); // Essential bridge log
         this.connectionStatus = 'disconnected';
         this.sendConnectionStatus();
         
@@ -156,13 +156,13 @@ class DJIControllerApp {
       });
 
       this.wsClient.on('error', (error) => {
-        console.error('WebSocket error:', error);
+        console.error('❌ DJI Bridge WebSocket error:', error); // Essential bridge log
         this.connectionStatus = 'error';
         this.sendConnectionStatus();
       });
 
     } catch (error) {
-      console.error('Failed to create WebSocket connection:', error);
+      console.error('❌ Failed to create DJI Bridge WebSocket connection:', error); // Essential bridge log
       this.connectionStatus = 'error';
       this.sendConnectionStatus();
     }
@@ -229,7 +229,7 @@ app.on('window-all-closed', () => {
 // Security: Prevent new window creation
 app.on('web-contents-created', (event, contents) => {
   contents.setWindowOpenHandler((details) => {
-    console.log('Blocked new window creation:', details.url);
+    // console.log('Blocked new window creation:', details.url);
     return { action: 'deny' };
   });
 });

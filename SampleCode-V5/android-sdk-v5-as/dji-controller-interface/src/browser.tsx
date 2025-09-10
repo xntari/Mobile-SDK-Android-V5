@@ -112,7 +112,7 @@ const connectToMockBridge = () => {
                 const uint8Array = new Uint8Array(reader.result);
                 const cameraSource = pendingVideoFrame.camera_source || 'unknown';
                 const isPrimary = pendingVideoFrame.is_primary ? 'PRIMARY' : 'SECONDARY';
-                console.log(`🎬 Browser: Received H.264 frame [${cameraSource.toUpperCase()}|${isPrimary}]: ${uint8Array.length} bytes, frame #${pendingVideoFrame.frameNumber}`);
+                //console.log(`🎬 Browser: Received H.264 frame [${cameraSource.toUpperCase()}|${isPrimary}]: ${uint8Array.length} bytes, frame #${pendingVideoFrame.frameNumber}`);
                 
                 // Route to appropriate callback based on camera source
                 const frameData = {
@@ -132,12 +132,12 @@ const connectToMockBridge = () => {
                 
                 pendingVideoFrame = null; // Clear pending frame
               } else {
-                console.warn('🎬 Browser: Skipping dropped frame - pendingVideoFrame is null');
+                //console.warn('🎬 Browser: Skipping dropped frame - pendingVideoFrame is null');
               }
             };
             reader.readAsArrayBuffer(event.data);
           } else {
-            console.warn('🎬 Browser: Received binary data without preceding video metadata');
+            //console.warn('🎬 Browser: Received binary data without preceding video metadata');
             // Still process it as standalone binary data
             const reader = new FileReader();
             reader.onload = () => {
@@ -157,11 +157,11 @@ const connectToMockBridge = () => {
             pendingVideoFrame = message;
             const cameraSource = message.camera_source || 'unknown';
             const isPrimary = message.is_primary ? 'PRIMARY' : 'SECONDARY';
-            console.log(`🎬 Browser: Video frame metadata [${cameraSource.toUpperCase()}|${isPrimary}]: ${message.frameSize} bytes, ${message.width}x${message.height}, frame #${message.frameNumber}`);
+            //console.log(`🎬 Browser: Video frame metadata [${cameraSource.toUpperCase()}|${isPrimary}]: ${message.frameSize} bytes, ${message.width}x${message.height}, frame #${message.frameNumber}`);
           } else {
             // Regular bridge data (controller, telemetry, etc.)
-            console.log('📡 Browser: Received message:', message.type, message);
-            console.log('📡 Browser: Calling bridgeDataCallback:', !!bridgeDataCallback);
+            //console.log('📡 Browser: Received message:', message.type, message);
+            //console.log('📡 Browser: Calling bridgeDataCallback:', !!bridgeDataCallback);
             bridgeDataCallback?.(message);
           }
         }
