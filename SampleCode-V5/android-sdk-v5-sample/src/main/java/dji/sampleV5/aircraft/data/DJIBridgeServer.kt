@@ -37,10 +37,16 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import kotlin.collections.ArrayList
 import dji.sdk.keyvalue.key.CameraKey
+import dji.sdk.keyvalue.key.GimbalKey
 import dji.sdk.keyvalue.value.camera.TapZoomMode
 import dji.sdk.keyvalue.value.camera.ZoomTargetPointInfo
 import dji.sdk.keyvalue.value.common.CameraLensType
+import dji.sdk.keyvalue.value.gimbal.GimbalSpeedRotation
+import dji.sdk.keyvalue.value.gimbal.CtrlInfo
+import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotation
+import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotationMode
 import dji.v5.et.createCamera
+import dji.v5.et.create
 import dji.v5.et.action
 
 /**
@@ -110,6 +116,29 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     private var isRunning = false
     private val clients = ConcurrentHashMap<String, Socket>()
     private val executor: ScheduledExecutorService = Executors.newScheduledThreadPool(4)
+    
+    // Free Look session state management
+    @Volatile private var freeLookActive = false
+    @Volatile private var freeLookClientId: String? = null
+    @Volatile private var freeLookLastUpdate = 0L
+    @Volatile private var freeLookVx = 0.0f
+    @Volatile private var freeLookVy = 0.0f
+    @Volatile private var freeLookPrevCmdVx = 0.0f
+    @Volatile private var freeLookPrevCmdVy = 0.0f
+    private var freeLookScheduler: java.util.concurrent.ScheduledFuture<*>? = null
+    private var freeLookWatchdog: java.util.concurrent.ScheduledFuture<*>? = null
+    private var freeLookLogTick = 0
+
+    // Precise Look state
+    @Volatile private var preciseActive = false
+    private var preciseFuture: java.util.concurrent.ScheduledFuture<*>? = null
+    
+    // Free Look constants
+    private val FREELOOK_MAX_RATE = 120.0 // deg/s (tuned for responsiveness)
+    private val FREELOOK_EXPONENT = 1.0   // linear mapping for snappy feel
+    private val FREELOOK_DEAD_ZONE = 0.000f
+    private val FREELOOK_WATCHDOG_MS = 800L
+    private val FREELOOK_UPDATE_HZ = 15
     
     // Video streaming
     // ================== DUAL CAMERA STREAMING SUPPORT ==================
@@ -435,6 +464,13 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             } catch (e: IOException) {
                 Log.w(TAG, "Error closing socket for client $clientId", e)
             }
+            
+            // Clean up Free Look session if this client had one active
+            if (freeLookActive && freeLookClientId == clientId) {
+                Log.w("GIMBAL_FREE_LOOK", "🔌 Client disconnect - stopping Free Look session for $clientId")
+                stopFreeLookSession()
+            }
+            
             Log.i(TAG, "Client $clientId disconnected")
         }
     }
@@ -640,25 +676,251 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         }
     }
     
-    // No-op handlers for Step 1 - routing verification only
+    // Step 2 - Free Look Implementation
     private fun handleGimbalFreeLookStart(clientId: String, json: JSONObject) {
-        Log.i("GIMBAL_ROUTE", "📡 Free Look START received from $clientId: ${json.optJSONObject("data")}")
-        sendGimbalResponse(clientId, true, "Free Look START (no-op)", 0.0, 0.0)
+        try {
+            Log.i("GIMBAL_FREE_LOOK", "🎮 Free Look START from $clientId")
+            
+            // Stop any existing session
+            if (freeLookActive) {
+                Log.w("GIMBAL_FREE_LOOK", "⚠️ Stopping existing Free Look session from ${freeLookClientId}")
+                stopFreeLookSession()
+            }
+            
+            // Initialize session state
+            freeLookActive = true
+            freeLookClientId = clientId
+            freeLookLastUpdate = System.currentTimeMillis()
+            freeLookVx = 0.0f
+            freeLookVy = 0.0f
+            freeLookPrevCmdVx = 0.0f
+            freeLookPrevCmdVy = 0.0f
+            
+            // Start 15Hz control scheduler
+            freeLookScheduler = executor.scheduleAtFixedRate({
+                try {
+                    executeFreeLookControl()
+                } catch (e: Exception) {
+                    Log.e("GIMBAL_ERR", "Error in Free Look control loop: ${e.message}", e)
+                }
+            }, 0, 1000L / FREELOOK_UPDATE_HZ, TimeUnit.MILLISECONDS)
+            
+            // Start watchdog timer
+            scheduleFreeLookWatchdog()
+            
+            Log.i("GIMBAL_FREE_LOOK", "✅ Free Look session started for $clientId")
+            sendGimbalResponse(clientId, true, "Free Look session started", 0.0, 0.0)
+            
+        } catch (e: Exception) {
+            Log.e("GIMBAL_ERR", "Failed to start Free Look session: ${e.message}", e)
+            sendGimbalResponse(clientId, false, "Failed to start Free Look: ${e.message}", 0.0, 0.0)
+        }
     }
     
     private fun handleGimbalFreeLookUpdate(clientId: String, json: JSONObject) {
-        Log.i("GIMBAL_ROUTE", "📡 Free Look UPDATE received from $clientId: ${json.optJSONObject("data")}")
-        // No response needed for updates in no-op mode
+        try {
+            if (!freeLookActive || freeLookClientId != clientId) {
+                Log.w("GIMBAL_FREE_LOOK", "⚠️ UPDATE ignored - no active session for $clientId")
+                return
+            }
+            
+            val data = json.getJSONObject("data")
+            val vx = data.getDouble("vx").toFloat().coerceIn(-1.0f, 1.0f)
+            val vy = data.getDouble("vy").toFloat().coerceIn(-1.0f, 1.0f)
+            
+            // Update velocity and timestamp atomically
+            freeLookVx = vx
+            freeLookVy = vy
+            freeLookLastUpdate = System.currentTimeMillis()
+            
+            // Reschedule watchdog
+            scheduleFreeLookWatchdog()
+            
+            Log.d("GIMBAL_FREE_LOOK", "📊 UPDATE: vx=$vx, vy=$vy")
+            // No response needed for updates
+            
+        } catch (e: Exception) {
+            Log.e("GIMBAL_ERR", "Error processing Free Look UPDATE: ${e.message}", e)
+        }
     }
     
     private fun handleGimbalFreeLookStop(clientId: String, json: JSONObject) {
-        Log.i("GIMBAL_ROUTE", "📡 Free Look STOP received from $clientId")
-        sendGimbalResponse(clientId, true, "Free Look STOP (no-op)", 0.0, 0.0)
+        try {
+            Log.i("GIMBAL_FREE_LOOK", "🛑 Free Look STOP from $clientId")
+            
+            if (!freeLookActive || freeLookClientId != clientId) {
+                Log.w("GIMBAL_FREE_LOOK", "⚠️ STOP ignored - no active session for $clientId")
+                sendGimbalResponse(clientId, true, "No active session to stop", 0.0, 0.0)
+                return
+            }
+            
+            // Stop session and send zero velocity immediately
+            stopFreeLookSession()
+            
+            Log.i("GIMBAL_FREE_LOOK", "✅ Free Look session stopped for $clientId")
+            sendGimbalResponse(clientId, true, "Free Look session stopped", 0.0, 0.0)
+            
+        } catch (e: Exception) {
+            Log.e("GIMBAL_ERR", "Error stopping Free Look session: ${e.message}", e)
+            sendGimbalResponse(clientId, false, "Error stopping Free Look: ${e.message}", 0.0, 0.0)
+        }
     }
     
     private fun handleGimbalPreciseLook(clientId: String, json: JSONObject) {
-        Log.i("GIMBAL_ROUTE", "📡 Precise Look received from $clientId: ${json.optJSONObject("data")}")
-        sendGimbalResponse(clientId, true, "Precise Look (no-op)", 0.0, 0.0)
+        try {
+            val data = json.getJSONObject("data")
+            val x = data.getDouble("x").coerceIn(0.0, 1.0)
+            val y = data.getDouble("y").coerceIn(0.0, 1.0)
+            val durationMs = data.optLong("duration_ms", 700L).coerceIn(200L, 2500L)
+            val strength = data.optDouble("strength", 1.0).coerceIn(0.5, 3.0)
+
+            // Stop Free Look if active
+            if (freeLookActive) {
+                Log.i("GIMBAL_PRECISE", "Stopping Free Look prior to precise command")
+                stopFreeLookSession()
+            }
+
+            // Cancel any existing precise task
+            preciseFuture?.cancel(false)
+            preciseActive = true
+
+            // Compute deltas from center
+            val dx = x - 0.5
+            val dy = y - 0.5
+            val maxRate = FREELOOK_MAX_RATE * strength // reuse backend max rate
+            val start = System.currentTimeMillis()
+            val periodMs = 33L // ~30 Hz corrections
+
+            Log.i("GIMBAL_PRECISE", "🎯 Precise start: dx=${"%.3f".format(dx)}, dy=${"%.3f".format(dy)}, duration=${durationMs}ms, strength=${"%.2f".format(strength)}")
+
+            preciseFuture = executor.scheduleAtFixedRate({
+                try {
+                    if (!preciseActive) return@scheduleAtFixedRate
+                    val now = System.currentTimeMillis()
+                    val t = (now - start).toDouble()
+                    val p = (t / durationMs).coerceIn(0.0, 1.0)
+                    // Ease-out (quadratic)
+                    val ease = 1.0 - (p * p)
+
+                    // Map dx,dy to yaw/pitch rates; sign convention: +dx -> yaw right, +dy -> down
+                    val yawRate = dx * maxRate * ease
+                    val pitchRate = -dy * maxRate * ease
+
+                    // Stop when near end or rates tiny
+                    if (p >= 1.0 || (Math.abs(yawRate) < 0.5 && Math.abs(pitchRate) < 0.5)) {
+                        executeGimbalVelocityCommand(0.0, 0.0)
+                        preciseActive = false
+                        preciseFuture?.cancel(false)
+                        Log.i("GIMBAL_PRECISE", "✅ Precise complete (p=${"%.2f".format(p)})")
+                        sendGimbalResponse(clientId, true, "Precise Look completed", x, y)
+                        return@scheduleAtFixedRate
+                    }
+
+                    executeGimbalVelocityCommand(yawRate, pitchRate)
+                } catch (e: Exception) {
+                    Log.e("GIMBAL_ERR", "Precise Look loop error: ${e.message}", e)
+                }
+            }, 0, periodMs, TimeUnit.MILLISECONDS)
+
+            // Ack start
+            sendGimbalResponse(clientId, true, "Precise Look started", x, y)
+        } catch (e: Exception) {
+            Log.e("GIMBAL_ERR", "Error processing Precise Look: ${e.message}", e)
+            sendGimbalResponse(clientId, false, "Error processing Precise Look: ${e.message}", 0.0, 0.0)
+        }
+    }
+    
+    // Free Look core functions
+    private fun stopFreeLookSession() {
+        if (!freeLookActive) return
+        
+        Log.i("GIMBAL_FREE_LOOK", "🛑 Stopping Free Look session")
+        
+        // Send zero velocity command immediately
+        executeGimbalVelocityCommand(0.0, 0.0)
+        
+        // Cancel schedulers
+        freeLookScheduler?.cancel(false)
+        freeLookWatchdog?.cancel(false)
+        
+        // Clear session state
+        freeLookActive = false
+        freeLookClientId = null
+        freeLookScheduler = null
+        freeLookWatchdog = null
+        freeLookVx = 0.0f
+        freeLookVy = 0.0f
+        freeLookPrevCmdVx = 0.0f
+        freeLookPrevCmdVy = 0.0f
+        
+        Log.d("GIMBAL_FREE_LOOK", "🧹 Session cleanup complete")
+    }
+    
+    private fun scheduleFreeLookWatchdog() {
+        freeLookWatchdog?.cancel(false)
+        freeLookWatchdog = executor.schedule({
+            val now = System.currentTimeMillis()
+            if (freeLookActive && (now - freeLookLastUpdate) > FREELOOK_WATCHDOG_MS) {
+                Log.w("GIMBAL_FREE_LOOK", "⏰ Watchdog timeout - auto-stopping session")
+                stopFreeLookSession()
+            }
+        }, FREELOOK_WATCHDOG_MS + 50, TimeUnit.MILLISECONDS)
+    }
+    
+    private fun executeFreeLookControl() {
+        if (!freeLookActive) return
+        
+        // Apply dead zone
+        var vx = freeLookVx
+        var vy = freeLookVy
+        
+        if (Math.abs(vx) < FREELOOK_DEAD_ZONE) vx = 0.0f
+        if (Math.abs(vy) < FREELOOK_DEAD_ZONE) vy = 0.0f
+        
+        // Apply exponential curve: deg = sign(v) * (|v|^1.6) * MAX_RATE
+        val yawRate = if (vx == 0.0f) 0.0 else vx.toDouble() * FREELOOK_MAX_RATE
+        val pitchRate = if (vy == 0.0f) 0.0 else -vy.toDouble() * FREELOOK_MAX_RATE
+        
+        // Low-pass filter for smoothness
+        val smoothYawRate = 0.2 * freeLookPrevCmdVx + 0.8 * yawRate
+        val smoothPitchRate = 0.2 * freeLookPrevCmdVy + 0.8 * pitchRate
+        
+        // Store for next iteration
+        freeLookPrevCmdVx = smoothYawRate.toFloat()
+        freeLookPrevCmdVy = smoothPitchRate.toFloat()
+        
+        // Execute gimbal command
+        executeGimbalVelocityCommand(smoothYawRate, smoothPitchRate)
+        
+        // Log applied rates (only when non-zero to reduce spam)
+        freeLookLogTick = (freeLookLogTick + 1) % 6 // ~2.5Hz at 15Hz loop
+        if (freeLookLogTick == 0 && (Math.abs(smoothYawRate) > 0.1 || Math.abs(smoothPitchRate) > 0.1)) {
+            Log.d("GIMBAL_FREE_LOOK", "🎮 Applied: yaw=${String.format("%.1f", smoothYawRate)}°/s, pitch=${String.format("%.1f", smoothPitchRate)}°/s")
+        }
+    }
+    
+    private fun executeGimbalVelocityCommand(yawRate: Double, pitchRate: Double) {
+        try {
+            val cameraIndex = ComponentIndexType.LEFT_OR_MAIN
+            
+            // Primary control: Try DJI speed rotation
+            val speedRotation = GimbalSpeedRotation(
+                pitchRate.coerceIn(-FREELOOK_MAX_RATE, FREELOOK_MAX_RATE),
+                yawRate.coerceIn(-FREELOOK_MAX_RATE, FREELOOK_MAX_RATE),
+                0.0,
+                CtrlInfo()
+            )
+            
+            GimbalKey.KeyRotateBySpeed.create(cameraIndex).action(speedRotation, {
+                // Success - no logging needed for frequent commands
+            }, { error ->
+                Log.e("GIMBAL_ERR", "🚨 Speed rotation failed: $error")
+                // TODO: Fallback to angle steps or tap-zoom emulation
+            })
+            
+        } catch (e: Exception) {
+            Log.e("GIMBAL_ERR", "🚨 Gimbal velocity command error: ${e.message}", e)
+        }
     }
     
     private fun sendGimbalResponse(clientId: String, success: Boolean, message: String, x: Double, y: Double) {
