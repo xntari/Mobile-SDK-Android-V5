@@ -83,6 +83,10 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         CAMERA_COMMAND("camera_command"),
         GIMBAL_TAP_TARGET("gimbal_tap_target"),
         GIMBAL_RESPONSE("gimbal_response"),
+        GIMBAL_FREE_LOOK_START("gimbal_free_look_start"),
+        GIMBAL_FREE_LOOK_UPDATE("gimbal_free_look_update"),
+        GIMBAL_FREE_LOOK_STOP("gimbal_free_look_stop"),
+        GIMBAL_PRECISE_LOOK("gimbal_precise_look"),
         FLIGHT_COMMAND("flight_command"),
         SYSTEM_COMMAND("system_command");
         
@@ -517,6 +521,10 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 MessageType.WAYPOINT_COMMAND -> handleWaypointCommand(clientId, json)
                 MessageType.CAMERA_COMMAND -> handleCameraCommand(clientId, json)
                 MessageType.GIMBAL_TAP_TARGET -> handleGimbalTapTarget(clientId, json)
+                MessageType.GIMBAL_FREE_LOOK_START -> handleGimbalFreeLookStart(clientId, json)
+                MessageType.GIMBAL_FREE_LOOK_UPDATE -> handleGimbalFreeLookUpdate(clientId, json)
+                MessageType.GIMBAL_FREE_LOOK_STOP -> handleGimbalFreeLookStop(clientId, json)
+                MessageType.GIMBAL_PRECISE_LOOK -> handleGimbalPreciseLook(clientId, json)
                 MessageType.FLIGHT_COMMAND -> handleFlightCommand(clientId, json)
                 MessageType.SYSTEM_COMMAND -> handleSystemCommand(clientId, json)
                 MessageType.HEARTBEAT -> handleHeartbeat(clientId, socket)
@@ -630,6 +638,27 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             Log.e(TAG, "Exception in handleGimbalTapTarget: ${e.message}", e)
             sendGimbalResponse(clientId, false, "Processing error: ${e.message}", 0.0, 0.0)
         }
+    }
+    
+    // No-op handlers for Step 1 - routing verification only
+    private fun handleGimbalFreeLookStart(clientId: String, json: JSONObject) {
+        Log.i("GIMBAL_ROUTE", "📡 Free Look START received from $clientId: ${json.optJSONObject("data")}")
+        sendGimbalResponse(clientId, true, "Free Look START (no-op)", 0.0, 0.0)
+    }
+    
+    private fun handleGimbalFreeLookUpdate(clientId: String, json: JSONObject) {
+        Log.i("GIMBAL_ROUTE", "📡 Free Look UPDATE received from $clientId: ${json.optJSONObject("data")}")
+        // No response needed for updates in no-op mode
+    }
+    
+    private fun handleGimbalFreeLookStop(clientId: String, json: JSONObject) {
+        Log.i("GIMBAL_ROUTE", "📡 Free Look STOP received from $clientId")
+        sendGimbalResponse(clientId, true, "Free Look STOP (no-op)", 0.0, 0.0)
+    }
+    
+    private fun handleGimbalPreciseLook(clientId: String, json: JSONObject) {
+        Log.i("GIMBAL_ROUTE", "📡 Precise Look received from $clientId: ${json.optJSONObject("data")}")
+        sendGimbalResponse(clientId, true, "Precise Look (no-op)", 0.0, 0.0)
     }
     
     private fun sendGimbalResponse(clientId: String, success: Boolean, message: String, x: Double, y: Double) {

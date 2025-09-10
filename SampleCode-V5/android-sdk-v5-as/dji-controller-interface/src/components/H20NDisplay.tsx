@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { H20NDisplayProps } from '../types';
+import { GimbalModeToggle, GimbalMode } from './GimbalModeToggle';
 
 interface ClickIndicator {
   id: string;
@@ -38,8 +39,20 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
   } | null>(null);
   const [droppedFrameCount, setDroppedFrameCount] = useState<number>(0);
 
-  // Handle canvas click for gimbal tap-to-target functionality
+  // Gimbal Free Look state
+  const [gimbalMode, setGimbalMode] = useState<GimbalMode>('off');
+  const [isFreeLookActive, setIsFreeLookActive] = useState(false);
+  const freeLookUpdateInterval = useRef<NodeJS.Timeout | null>(null);
+  const lastMousePos = useRef<{ x: number; y: number } | null>(null);
+  const [freeLookVelocity, setFreeLookVelocity] = useState<{ vx: number; vy: number }>({ vx: 0, vy: 0 });
+
+  // Handle canvas click for gimbal tap-to-target or precise look functionality
   const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    // Don't handle clicks during Free Look mode
+    if (gimbalMode === 'free_look') {
+      return;
+    }
+
     const canvas = event.currentTarget;
     const rect = canvas.getBoundingClientRect();
     
@@ -47,15 +60,12 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     const clickX = event.clientX - rect.left;
     const clickY = event.clientY - rect.top;
     
-    // console.log(`🎯 Click debug: canvas(${rect.width}x${rect.height}), click(${clickX.toFixed(1)}, ${clickY.toFixed(1)}), displayRect(${displayRect.left}, ${displayRect.top}, ${displayRect.width}x${displayRect.height})`);
-    
     // If displayRect is not initialized, use full canvas
     const effectiveDisplayRect = displayRect.width > 0 ? displayRect : { left: 0, top: 0, width: rect.width, height: rect.height };
     
     // Check if click is within the effective display area
     if (clickX < effectiveDisplayRect.left || clickX > effectiveDisplayRect.left + effectiveDisplayRect.width ||
         clickY < effectiveDisplayRect.top || clickY > effectiveDisplayRect.top + effectiveDisplayRect.height) {
-      // console.log(`🎯 Click outside video area: click(${clickX.toFixed(1)}, ${clickY.toFixed(1)}) vs bounds(${effectiveDisplayRect.left}, ${effectiveDisplayRect.top}, ${effectiveDisplayRect.width}x${effectiveDisplayRect.height})`);
       return;
     }
     
@@ -64,7 +74,12 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     const y = (clickY - effectiveDisplayRect.top) / effectiveDisplayRect.height;
     
     const clickId = `click-${Date.now()}`;
-    console.log(`🎯 H20N Canvas clicked at normalized coordinates: (${x.toFixed(3)}, ${y.toFixed(3)}) [ID: ${clickId}]`); // Essential gimbal log
+    
+    // Determine command type based on gimbal mode
+    const commandType = gimbalMode === 'precise' ? 'gimbal_precise_look' : 'gimbal_tap_target';
+    const modeLabel = gimbalMode === 'precise' ? 'Precise Look' : 'Tap Target';
+    
+    console.log(`🎯 H20N ${modeLabel} at normalized coordinates: (${x.toFixed(3)}, ${y.toFixed(3)}) [ID: ${clickId}]`);
     
     // Add pending click indicator (using actual click position relative to effective video area)
     const newIndicator: ClickIndicator = {
@@ -75,20 +90,18 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
       timestamp: Date.now()
     };
     
-    setClickIndicators(prev => [...prev.slice(-2), newIndicator]); // Keep last 3 indicators
+    setClickIndicators(prev => [...prev.slice(-2), newIndicator]);
     
     // Send gimbal command via existing electronAPI
     if ((window as any).electronAPI) {
       (window as any).electronAPI.sendBridgeCommand({
-        type: 'gimbal_tap_target',
+        type: commandType,
         data: { x, y }
       }).then((result: any) => {
         if (result.success) {
-          console.log('✅ H20N Gimbal tap target command sent successfully'); // Essential gimbal log
-          // Response will be handled by gimbal response listener
+          console.log(`✅ H20N ${modeLabel} command sent successfully`);
         } else {
-          console.error('❌ H20N Gimbal tap target command failed:', result.error); // Essential gimbal log
-          // Update indicator to error state
+          console.error(`❌ H20N ${modeLabel} command failed:`, result.error);
           setClickIndicators(prev => prev.map(indicator =>
             indicator.id === clickId
               ? { ...indicator, status: 'error', message: result.error || 'Command failed' }
@@ -96,8 +109,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
           ));
         }
       }).catch((error: any) => {
-        console.error('❌ Failed to send H20N gimbal tap target:', error); // Essential gimbal log
-        // Update indicator to error state
+        console.error(`❌ Failed to send H20N ${modeLabel}:`, error);
         setClickIndicators(prev => prev.map(indicator =>
           indicator.id === clickId
             ? { ...indicator, status: 'error', message: error.message || 'Send failed' }
@@ -105,8 +117,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
         ));
       });
     } else {
-      console.error('❌ electronAPI not available for H20N gimbal command'); // Essential gimbal log
-      // Update indicator to error state
+      console.error('❌ electronAPI not available for H20N gimbal command');
       setClickIndicators(prev => prev.map(indicator =>
         indicator.id === clickId
           ? { ...indicator, status: 'error', message: 'electronAPI not available' }
@@ -114,6 +125,138 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
       ));
     }
   };
+
+  // Free Look utility functions
+  const computeFreeLookVelocity = (clientX: number, clientY: number, rect: DOMRect): { vx: number; vy: number } => {
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    
+    // Calculate offset from center, normalized to [-1, 1]
+    const offsetX = (clientX - centerX) / (rect.width / 2);
+    const offsetY = (clientY - centerY) / (rect.height / 2);
+    
+    // Apply dead zone (0.08 as specified in DEV.md)
+    const deadZone = 0.08;
+    const clampedOffsetX = Math.abs(offsetX) > deadZone ? offsetX : 0;
+    const clampedOffsetY = Math.abs(offsetY) > deadZone ? offsetY : 0;
+    
+    // Apply ease curve: v = sign(offset) * clamp((|offset|-dz)/(1-dz), 0, 1)^1.6
+    const applyEaseCurve = (offset: number): number => {
+      if (Math.abs(offset) <= deadZone) return 0;
+      const sign = Math.sign(offset);
+      const magnitude = Math.abs(offset);
+      const normalized = Math.min((magnitude - deadZone) / (1 - deadZone), 1);
+      return sign * Math.pow(normalized, 1.6);
+    };
+    
+    return {
+      vx: applyEaseCurve(clampedOffsetX),
+      vy: applyEaseCurve(clampedOffsetY)
+    };
+  };
+
+  const startFreeLook = () => {
+    if (gimbalMode !== 'free_look') return;
+    
+    console.log('🎮 Starting Free Look mode');
+    setIsFreeLookActive(true);
+    
+    // Send start command
+    if ((window as any).electronAPI) {
+      (window as any).electronAPI.sendBridgeCommand({
+        type: 'gimbal_free_look_start',
+        data: { source: 'h20n' }
+      }).then((result: any) => {
+        console.log('✅ Free Look START command sent:', result);
+      }).catch((error: any) => {
+        console.error('❌ Failed to send Free Look START:', error);
+      });
+    }
+    
+    // Start 15Hz update interval
+    freeLookUpdateInterval.current = setInterval(() => {
+      if ((window as any).electronAPI && (freeLookVelocity.vx !== 0 || freeLookVelocity.vy !== 0)) {
+        (window as any).electronAPI.sendBridgeCommand({
+          type: 'gimbal_free_look_update',
+          data: { 
+            vx: freeLookVelocity.vx, 
+            vy: freeLookVelocity.vy 
+          }
+        }).catch((error: any) => {
+          console.error('❌ Failed to send Free Look UPDATE:', error);
+        });
+      }
+    }, 1000 / 15); // 15Hz
+  };
+
+  const stopFreeLook = () => {
+    console.log('🎮 Stopping Free Look mode');
+    setIsFreeLookActive(false);
+    setFreeLookVelocity({ vx: 0, vy: 0 });
+    lastMousePos.current = null;
+    
+    // Clear update interval
+    if (freeLookUpdateInterval.current) {
+      clearInterval(freeLookUpdateInterval.current);
+      freeLookUpdateInterval.current = null;
+    }
+    
+    // Send stop command
+    if ((window as any).electronAPI) {
+      (window as any).electronAPI.sendBridgeCommand({
+        type: 'gimbal_free_look_stop'
+      }).then((result: any) => {
+        console.log('✅ Free Look STOP command sent:', result);
+      }).catch((error: any) => {
+        console.error('❌ Failed to send Free Look STOP:', error);
+      });
+    }
+  };
+
+  // Free Look mouse event handlers
+  const handleMouseDown = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    if (gimbalMode === 'free_look' && event.button === 0) { // Left mouse button
+      event.preventDefault();
+      lastMousePos.current = { x: event.clientX, y: event.clientY };
+      startFreeLook();
+    }
+  };
+
+  const handleMouseMove = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    if (gimbalMode === 'free_look' && isFreeLookActive) {
+      const canvas = event.currentTarget;
+      const rect = canvas.getBoundingClientRect();
+      const velocity = computeFreeLookVelocity(event.clientX, event.clientY, rect);
+      setFreeLookVelocity(velocity);
+    }
+  };
+
+  const handleMouseUp = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    if (gimbalMode === 'free_look' && isFreeLookActive && event.button === 0) {
+      stopFreeLook();
+    }
+  };
+
+  const handleMouseLeave = () => {
+    if (gimbalMode === 'free_look' && isFreeLookActive) {
+      stopFreeLook();
+    }
+  };
+
+  // Cleanup Free Look on mode change or unmount
+  useEffect(() => {
+    if (gimbalMode !== 'free_look' && isFreeLookActive) {
+      stopFreeLook();
+    }
+  }, [gimbalMode]);
+
+  useEffect(() => {
+    return () => {
+      if (isFreeLookActive) {
+        stopFreeLook();
+      }
+    };
+  }, []);
 
   // Calculate actual video display rectangle with object-contain behavior
   const calculateDisplayRect = () => {
@@ -756,10 +899,31 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
       <canvas
         ref={canvasRef}
         onClick={handleCanvasClick}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseLeave}
         className="w-full h-full object-contain"
-        style={{ cursor: 'crosshair' }}
+        style={{ 
+          cursor: gimbalMode === 'free_look' 
+            ? (isFreeLookActive ? 'grabbing' : 'grab')
+            : gimbalMode === 'precise'
+            ? 'crosshair'
+            : 'crosshair'
+        }}
       />
       
+      {/* Gimbal Mode Toggle - positioned at bottom left */}
+      <div className="absolute bottom-4 left-4 z-30 pointer-events-auto">
+        <GimbalModeToggle 
+          mode={gimbalMode}
+          onModeChange={setGimbalMode}
+          isFreeLookActive={isFreeLookActive}
+          freeLookVelocity={freeLookVelocity}
+        />
+      </div>
+
+
       {/* Video content overlay area - matches actual video display rectangle */}
       <div 
         className="absolute pointer-events-none"
@@ -895,12 +1059,12 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
           </div>)}
           
           {/* Instructions overlay when no gimbal command has been sent yet */}
-          {!lastGimbalCommand && frameStats.decodedFrames > 0 && (
+          {!lastGimbalCommand && frameStats.decodedFrames > 0 && gimbalMode === 'off' && (
             <div className="absolute bottom-4 right-4 glass-panel p-3 text-sm">
               <div className="text-center">
                 <div className="text-yellow-400 mb-1">🎯</div>
-                <div className="text-white text-xs">Click anywhere to test gimbal control</div>
-                <div className="text-gray-400 text-xs mt-1">Tap-to-target functionality</div>
+                <div className="text-white text-xs">Select gimbal mode to control camera</div>
+                <div className="text-gray-400 text-xs mt-1">Use toggle in top-left corner</div>
               </div>
             </div>
           )}
