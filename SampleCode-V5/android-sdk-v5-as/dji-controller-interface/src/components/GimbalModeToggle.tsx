@@ -9,6 +9,15 @@ interface GimbalModeToggleProps {
   className?: string;
   isFreeLookActive?: boolean;
   freeLookVelocity?: { vx: number; vy: number };
+  sensitivity?: number; // 0.5 - 3.0
+  smoothing?: number;   // 0.0 - 0.9 (client-side low-pass)
+  onSensitivityChange?: (v: number) => void;
+  onSmoothingChange?: (v: number) => void;
+  // Precise look controls
+  preciseDurationMs?: number; // 200 - 2500
+  preciseStrength?: number;   // 0.5 - 3.0
+  onPreciseDurationChange?: (v: number) => void;
+  onPreciseStrengthChange?: (v: number) => void;
 }
 
 export const GimbalModeToggle: React.FC<GimbalModeToggleProps> = ({
@@ -16,7 +25,15 @@ export const GimbalModeToggle: React.FC<GimbalModeToggleProps> = ({
   onModeChange,
   className = '',
   isFreeLookActive = false,
-  freeLookVelocity = { vx: 0, vy: 0 }
+  freeLookVelocity = { vx: 0, vy: 0 },
+  sensitivity = 3.0,
+  smoothing = 0.05,
+  onSensitivityChange,
+  onSmoothingChange,
+  preciseDurationMs = 700,
+  preciseStrength = 1.0,
+  onPreciseDurationChange,
+  onPreciseStrengthChange
 }) => {
   const modes: { value: GimbalMode; label: string }[] = [
     { value: 'off', label: 'Off' },
@@ -65,8 +82,79 @@ export const GimbalModeToggle: React.FC<GimbalModeToggleProps> = ({
       )}
       
       {mode === 'precise' && (
-        <div className="mt-2 text-blue-400 text-xs">
-          Click to center point precisely
+        <div className="mt-3 space-y-3">
+          <div className="text-blue-400 text-xs">Click to center point precisely</div>
+          {/* Time to target */}
+          <div>
+            <div className="flex justify-between text-xs text-gray-300 mb-1">
+              <span>Time to target</span>
+              <span className="font-mono">{preciseDurationMs} ms</span>
+            </div>
+            <input
+              type="range"
+              min={200}
+              max={2500}
+              step={50}
+              value={preciseDurationMs}
+              onChange={(e) => onPreciseDurationChange?.(parseInt(e.target.value))}
+              className="w-full"
+            />
+          </div>
+          {/* Strength */}
+          <div>
+            <div className="flex justify-between text-xs text-gray-300 mb-1">
+              <span>Strength</span>
+              <span className="font-mono">{preciseStrength.toFixed(2)}x</span>
+            </div>
+            <input
+              type="range"
+              min={0.5}
+              max={3.0}
+              step={0.05}
+              value={preciseStrength}
+              onChange={(e) => onPreciseStrengthChange?.(parseFloat(e.target.value))}
+              className="w-full"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Free Look tuning controls */}
+      {mode === 'free_look' && (
+        <div className="mt-3 space-y-3">
+          {/* Sensitivity Slider */}
+          <div>
+            <div className="flex justify-between text-xs text-gray-300 mb-1">
+              <span>Sensitivity</span>
+              <span className="font-mono">{sensitivity.toFixed(2)}x</span>
+            </div>
+            <input
+              type="range"
+              min={0.5}
+              max={5.0}
+              step={0.05}
+              value={sensitivity}
+              onChange={(e) => onSensitivityChange?.(parseFloat(e.target.value))}
+              className="w-full"
+            />
+          </div>
+          {/* Smoothing Slider */}
+          <div>
+            <div className="flex justify-between text-xs text-gray-300 mb-1">
+              <span>Smoothing</span>
+              <span className="font-mono">{smoothing.toFixed(2)}</span>
+            </div>
+            <input
+              type="range"
+              min={0.0}
+              max={0.9}
+              step={0.05}
+              value={smoothing}
+              onChange={(e) => onSmoothingChange?.(parseFloat(e.target.value))}
+              className="w-full"
+            />
+            <div className="text-[10px] text-gray-500 mt-1">0 = snappy, 0.9 = very smooth</div>
+          </div>
         </div>
       )}
     </div>

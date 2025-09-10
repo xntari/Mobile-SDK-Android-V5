@@ -13,18 +13,29 @@ Step 1 — Routing only (No‑op)
 - No SDK calls. Verify build, deploy, and that logs show new routes without side effects.
 
 Step 2 — Free Look (safe velocity control)
-- Implement handlers:
-  - START: mark session active; set lastUpdate=now; schedule watchdog (auto‑stop after 800ms without UPDATE).
-  - UPDATE: map `vx,vy` ∈ [-1,1] → clamped angular velocities with dead‑zone; throttle to 10–15Hz.
-  - STOP: send zero‑velocity and clear session state.
-- SDK: prefer speed/angle keys; if unavailable, emulate with small `TapZoomAtTarget` nudges toward center. Always clamp and catch errors.
-- Safety: auto‑stop on client disconnect; log tag `GIMBAL_FREE_LOOK`.
+- Handler design:
+  - START: mark session active; init `lastUpdate=now`; create 15Hz scheduler that reads latest `(vx,vy)` and issues control actions.
+  - UPDATE: store latest `(vx,vy)` from `data` (floats ∈ [-1,1]); set `lastUpdate=now`.
+  - STOP: send zero‑velocity; cancel scheduler; clear session state.
+- Mapping & clamps:
+  - Dead‑zone reduced to ~0.02 (front-end also has its own); values below ~0.02 are treated as zero to avoid drift.
+  - Linear mapping: `deg = v * MAX_RATE` with `MAX_RATE≈120` for snappy response; client controls sensitivity and smoothing.
+- Primary control (recommended): Use DJI V5 gimbal speed/angle keys (feature‑detect at runtime):
+  - Try speed: `GimbalKey.KeyRotateBySpeed.create(cameraIndex).action(GimbalSpeedRotation{ pitchAngularVelocity=..., yawAngularVelocity=... })`.
+  - If unavailable, try small angle steps: `GimbalKey.KeyGimbalAngleRotation` with small deltas at 15Hz.
+- Fallback (if keys unsupported): emulate with small, rate‑limited `CameraKey.KeyTapZoomAtTarget` nudges toward center (compute targetX/Y = 0.5 ± k*v).
+- Safety:
+  - Watchdog: if `now - lastUpdate > 800ms`, auto‑STOP (send zeros, cancel scheduler).
+  - On client disconnect, call STOP.
+  - Logs: `GIMBAL_FREE_LOOK` for start/step/stop; include applied deg/s.
+- Threading: use existing `executor` for scheduling; never block main/UI.
 
 Step 3 — Precise Free Look (refined center)
-- Handler `gimbal_precise_look {x,y}`:
-  - Phase A: coarse `TapZoomAtTarget(x,y)`.
-  - Phase B: read gimbal attitude; compute small deltas to center; apply limited speed/angle correction for ≤400ms.
-  - Exit on timeout, low error (< ~2°), or error event. Log `GIMBAL_PRECISE`.
+- Handler `gimbal_precise_look {x,y,duration_ms?,strength?}`:
+  - Stop Free Look if active; ack start via `gimbal_response`.
+  - Start a ~30 Hz ease-out loop for `duration_ms` (default 700 ms), mapping `dx=x-0.5`, `dy=y-0.5` to yaw/pitch rates: `yaw=dx*MAX_RATE*strength*ease`, `pitch=-dy*MAX_RATE*strength*ease`.
+  - Ease-out: quadratic `ease = 1 - (t/duration)^2`. End early if rates < ~0.5°/s; always zero at end; ack completion.
+  - Minimal logging: only start/complete/error.
 
 JSON schemas
 - Start: `{ type: 'gimbal_free_look_start', data?: { source?: 'h20n'|'fpv' } }`
@@ -39,3 +50,9 @@ Validation & logs
 Build & deploy
 - Build: `./build.sh debug`; Deploy: `./deploy.sh debug --logs`.
 - Use `deploy.sh joystick` to keep logcat sessions focused while testing.
+
+Step 2 Test Checklist
+- Send START → log `GIMBAL_FREE_LOOK start`; scheduler active.
+- Move mouse (UI updates) → UPDATEs received; applied deg/s shown in log; visible gimbal motion.
+- Stop sending UPDATEs → watchdog triggers STOP within ~0.8s.
+- Issue STOP → velocities zeroed and scheduler canceled immediately.

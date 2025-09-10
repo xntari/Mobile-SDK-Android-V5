@@ -44,7 +44,16 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
   const [isFreeLookActive, setIsFreeLookActive] = useState(false);
   const freeLookUpdateInterval = useRef<NodeJS.Timeout | null>(null);
   const lastMousePos = useRef<{ x: number; y: number } | null>(null);
+  const freeLookOriginRef = useRef<{ x: number; y: number } | null>(null);
   const [freeLookVelocity, setFreeLookVelocity] = useState<{ vx: number; vy: number }>({ vx: 0, vy: 0 });
+  const freeLookVelocityRef = useRef<{ vx: number; vy: number }>({ vx: 0, vy: 0 });
+  const isFreeLookActiveRef = useRef<boolean>(false);
+  // Free Look tuning
+  const [sensitivity, setSensitivity] = useState<number>(1.5); // 1.0 baseline
+  const [smoothing, setSmoothing] = useState<number>(0.15);    // 0..0.9 (client filter)
+  // Precise Look tuning
+  const [preciseDurationMs, setPreciseDurationMs] = useState<number>(700);
+  const [preciseStrength, setPreciseStrength] = useState<number>(1.0);
 
   // Handle canvas click for gimbal tap-to-target or precise look functionality
   const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -79,7 +88,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     const commandType = gimbalMode === 'precise' ? 'gimbal_precise_look' : 'gimbal_tap_target';
     const modeLabel = gimbalMode === 'precise' ? 'Precise Look' : 'Tap Target';
     
-    console.log(`🎯 H20N ${modeLabel} at normalized coordinates: (${x.toFixed(3)}, ${y.toFixed(3)}) [ID: ${clickId}]`);
+    console.log(`[DEV_GIMBAL] H20N ${modeLabel} at normalized coordinates: (${x.toFixed(3)}, ${y.toFixed(3)}) [ID: ${clickId}]`);
     
     // Add pending click indicator (using actual click position relative to effective video area)
     const newIndicator: ClickIndicator = {
@@ -94,9 +103,14 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     
     // Send gimbal command via existing electronAPI
     if ((window as any).electronAPI) {
+      const payload: any = { x, y };
+      if (commandType === 'gimbal_precise_look') {
+        payload.duration_ms = preciseDurationMs;
+        payload.strength = preciseStrength;
+      }
       (window as any).electronAPI.sendBridgeCommand({
         type: commandType,
-        data: { x, y }
+        data: payload
       }).then((result: any) => {
         if (result.success) {
           console.log(`✅ H20N ${modeLabel} command sent successfully`);
@@ -128,15 +142,17 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
 
   // Free Look utility functions
   const computeFreeLookVelocity = (clientX: number, clientY: number, rect: DOMRect): { vx: number; vy: number } => {
-    const centerX = rect.left + rect.width / 2;
-    const centerY = rect.top + rect.height / 2;
+    // Use drag origin (mouse-down) as the neutral point instead of screen center
+    const origin = freeLookOriginRef.current ?? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    const originX = origin.x;
+    const originY = origin.y;
     
     // Calculate offset from center, normalized to [-1, 1]
-    const offsetX = (clientX - centerX) / (rect.width / 2);
-    const offsetY = (clientY - centerY) / (rect.height / 2);
+    const offsetX = (clientX - originX) / (rect.width / 2);
+    const offsetY = (clientY - originY) / (rect.height / 2);
     
     // Apply dead zone (0.08 as specified in DEV.md)
-    const deadZone = 0.08;
+    const deadZone = 0.02;
     const clampedOffsetX = Math.abs(offsetX) > deadZone ? offsetX : 0;
     const clampedOffsetY = Math.abs(offsetY) > deadZone ? offsetY : 0;
     
@@ -149,17 +165,30 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
       return sign * Math.pow(normalized, 1.6);
     };
     
-    return {
+    // Base velocity from pointer offset
+    const base = {
       vx: applyEaseCurve(clampedOffsetX),
       vy: applyEaseCurve(clampedOffsetY)
     };
+    // Apply sensitivity scaling and clamp
+    let scaled = { vx: base.vx * sensitivity, vy: base.vy * sensitivity };
+    scaled = { vx: Math.max(-1, Math.min(1, scaled.vx)), vy: Math.max(-1, Math.min(1, scaled.vy)) };
+    // Client-side low-pass smoothing
+    const prev = freeLookVelocityRef.current;
+    const alpha = Math.max(0, Math.min(0.9, smoothing));
+    const filtered = {
+      vx: alpha * prev.vx + (1 - alpha) * scaled.vx,
+      vy: alpha * prev.vy + (1 - alpha) * scaled.vy,
+    };
+    return filtered;
   };
 
   const startFreeLook = () => {
     if (gimbalMode !== 'free_look') return;
     
-    console.log('🎮 Starting Free Look mode');
+    console.log('[DEV_GIMBAL] Starting Free Look mode');
     setIsFreeLookActive(true);
+    isFreeLookActiveRef.current = true;
     
     // Send start command
     if ((window as any).electronAPI) {
@@ -167,32 +196,32 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
         type: 'gimbal_free_look_start',
         data: { source: 'h20n' }
       }).then((result: any) => {
-        console.log('✅ Free Look START command sent:', result);
+        console.log('[DEV_GIMBAL] Free Look START command sent:', result);
       }).catch((error: any) => {
-        console.error('❌ Failed to send Free Look START:', error);
+        console.error('[DEV_GIMBAL] Failed to send Free Look START:', error);
       });
     }
     
-    // Start 15Hz update interval
+    // Start 15Hz update interval — always send updates while active to keep watchdog alive
     freeLookUpdateInterval.current = setInterval(() => {
-      if ((window as any).electronAPI && (freeLookVelocity.vx !== 0 || freeLookVelocity.vy !== 0)) {
-        (window as any).electronAPI.sendBridgeCommand({
-          type: 'gimbal_free_look_update',
-          data: { 
-            vx: freeLookVelocity.vx, 
-            vy: freeLookVelocity.vy 
-          }
-        }).catch((error: any) => {
-          console.error('❌ Failed to send Free Look UPDATE:', error);
-        });
-      }
+      if (!(window as any).electronAPI) return;
+      if (!isFreeLookActiveRef.current) return;
+      const { vx, vy } = freeLookVelocityRef.current;
+      (window as any).electronAPI.sendBridgeCommand({
+        type: 'gimbal_free_look_update',
+        data: { vx, vy }
+      }).catch((error: any) => {
+        console.error('[DEV_GIMBAL] Failed to send Free Look UPDATE:', error);
+      });
     }, 1000 / 15); // 15Hz
   };
 
   const stopFreeLook = () => {
-    console.log('🎮 Stopping Free Look mode');
+    console.log('[DEV_GIMBAL] Stopping Free Look mode');
     setIsFreeLookActive(false);
+    isFreeLookActiveRef.current = false;
     setFreeLookVelocity({ vx: 0, vy: 0 });
+    freeLookVelocityRef.current = { vx: 0, vy: 0 };
     lastMousePos.current = null;
     
     // Clear update interval
@@ -206,9 +235,9 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
       (window as any).electronAPI.sendBridgeCommand({
         type: 'gimbal_free_look_stop'
       }).then((result: any) => {
-        console.log('✅ Free Look STOP command sent:', result);
+        console.log('[DEV_GIMBAL] Free Look STOP command sent:', result);
       }).catch((error: any) => {
-        console.error('❌ Failed to send Free Look STOP:', error);
+        console.error('[DEV_GIMBAL] Failed to send Free Look STOP:', error);
       });
     }
   };
@@ -218,6 +247,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     if (gimbalMode === 'free_look' && event.button === 0) { // Left mouse button
       event.preventDefault();
       lastMousePos.current = { x: event.clientX, y: event.clientY };
+      freeLookOriginRef.current = { x: event.clientX, y: event.clientY };
       startFreeLook();
     }
   };
@@ -227,6 +257,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
       const canvas = event.currentTarget;
       const rect = canvas.getBoundingClientRect();
       const velocity = computeFreeLookVelocity(event.clientX, event.clientY, rect);
+      freeLookVelocityRef.current = velocity;
       setFreeLookVelocity(velocity);
     }
   };
@@ -301,14 +332,20 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
       }
       
       if (responseData.type === 'gimbal_response') {
-        const { success, message, coordinates, timestamp } = responseData;
+        // Support both root-level and nested data payloads
+        const payload: any = (responseData as any).data ?? responseData;
+        const successRaw = (payload as any)?.success;
+        const message = (payload as any)?.message;
+        const coordinates = (payload as any)?.coordinates;
+        const timestamp = (payload as any)?.timestamp;
+        const ok = successRaw === true || successRaw === 'true' || (!!message && /session (started|stopped)/i.test(String(message)));
         console.log('📡 Received H20N gimbal response:', responseData);
         
         // Update last gimbal command status
         setLastGimbalCommand({
-          coordinates: coordinates || { x: 0, y: 0 },
-          status: success ? 'SUCCESS' : 'ERROR',
-          message: message || (success ? 'Gimbal moved successfully' : 'Gimbal command failed'),
+          coordinates: (coordinates as any) || { x: 0, y: 0 },
+          status: ok ? 'SUCCESS' : 'ERROR',
+          message: message || (ok ? 'Gimbal moved successfully' : 'Gimbal command failed'),
           timestamp: timestamp || Date.now()
         });
         
@@ -329,7 +366,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
         //  return updated;
         //});
         
-        console.log(success ? '✅ H20N Gimbal response: SUCCESS' : '❌ H20N Gimbal response: ERROR', message); // Essential gimbal log
+        console.log(ok ? '✅ H20N Gimbal response: SUCCESS' : '❌ H20N Gimbal response: ERROR', message); // Essential gimbal log
       }
     };
     
@@ -920,6 +957,14 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
           onModeChange={setGimbalMode}
           isFreeLookActive={isFreeLookActive}
           freeLookVelocity={freeLookVelocity}
+          sensitivity={sensitivity}
+          smoothing={smoothing}
+          onSensitivityChange={setSensitivity}
+          onSmoothingChange={setSmoothing}
+          preciseDurationMs={preciseDurationMs}
+          preciseStrength={preciseStrength}
+          onPreciseDurationChange={setPreciseDurationMs}
+          onPreciseStrengthChange={setPreciseStrength}
         />
       </div>
 
@@ -974,6 +1019,19 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
               )}
             </div>
           ))}
+
+          {/* Tiny HUD overlay near crosshair for Free Look */}
+          {gimbalMode === 'free_look' && isFreeLookActive && (
+            <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
+              {/* Position slightly above center */}
+              <div className="absolute -top-12 left-1/2 transform -translate-x-1/2">
+                <div className="bg-purple-900 bg-opacity-90 px-2 py-1 rounded text-xs font-mono text-purple-100 flex items-center gap-2">
+                  <span className="text-purple-300">FL</span>
+                  <span>{freeLookVelocity.vx.toFixed(1)},{freeLookVelocity.vy.toFixed(1)}</span>
+                </div>
+              </div>
+            </div>
+          )}
           
           {/* Only show error overlay when there's actually an error */}
           {videoStatus === 'error' && getStatusOverlay()}

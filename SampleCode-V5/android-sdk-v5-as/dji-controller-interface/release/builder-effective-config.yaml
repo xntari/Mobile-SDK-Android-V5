@@ -1,0 +1,10 @@
+directories:
+  output: release
+  buildResources: build
+appId: com.dji.controller.interface
+productName: DJI Controller Interface
+files:
+  - filter:
+      - dist/**/*
+      - package.json
+electronVersion: 25.9.8
