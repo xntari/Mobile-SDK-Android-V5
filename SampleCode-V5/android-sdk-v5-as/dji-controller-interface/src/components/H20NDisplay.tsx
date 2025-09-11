@@ -42,6 +42,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
   // Gimbal Free Look state
   const [gimbalMode, setGimbalMode] = useState<GimbalMode>('look_at');
   const [selectedLens, setSelectedLens] = useState<'wide' | 'zoom' | 'infrared'>('wide');
+  const [laserOn, setLaserOn] = useState<boolean>(false);
   const [isFreeLookActive, setIsFreeLookActive] = useState(false);
   const freeLookUpdateInterval = useRef<NodeJS.Timeout | null>(null);
   const lastMousePos = useRef<{ x: number; y: number } | null>(null);
@@ -102,13 +103,11 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     
     setClickIndicators(prev => [...prev.slice(-2), newIndicator]);
     
-    // Send gimbal command via existing electronAPI
+    // Send command via existing electronAPI
     if ((window as any).electronAPI) {
       const payload: any = { x, y };
-      (window as any).electronAPI.sendBridgeCommand({
-        type: commandType,
-        data: payload
-      }).then((result: any) => {
+      const type = laserOn ? 'camera_laser_measure' : commandType;
+      (window as any).electronAPI.sendBridgeCommand({ type, data: payload }).then((result: any) => {
         if (result.success) {
           console.log(`✅ H20N ${modeLabel} command sent successfully`);
         } else {
@@ -371,9 +370,14 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
       }
     };
     
-    // Listen for bridge messages (including gimbal responses)
+    // Listen for bridge messages (including gimbal and laser responses)
     if ((window as any).electronAPI?.onBridgeData) {
-      (window as any).electronAPI.onBridgeData(handleGimbalResponse);
+      (window as any).electronAPI.onBridgeData((data: any) => {
+        handleGimbalResponse(data);
+        if (data?.type === 'camera_laser_result') {
+          console.log('[LASER] Result:', data);
+        }
+      });
     } else {
       console.warn('⚠️ electronAPI.onBridgeData not available for H20N gimbal response handling'); // Essential bridge log
     }
@@ -968,6 +972,13 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
                 type: 'camera_select',
                 data: { lens }
               }).catch(() => {});
+            }
+          }}
+          laserOn={laserOn}
+          onToggleLaser={(on) => {
+            setLaserOn(on);
+            if ((window as any).electronAPI) {
+              (window as any).electronAPI.sendBridgeCommand({ type: 'camera_laser_enable', data: { enabled: on } }).catch(()=>{});
             }
           }}
         />

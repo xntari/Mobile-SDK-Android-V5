@@ -16,6 +16,9 @@ interface GimbalModeToggleProps {
   // Camera selection
   selectedLens?: 'wide' | 'zoom' | 'infrared';
   onLensChange?: (lens: 'wide' | 'zoom' | 'infrared') => void;
+  // Laser controls
+  laserOn?: boolean;
+  onToggleLaser?: (on: boolean) => void;
 }
 
 export const GimbalModeToggle: React.FC<GimbalModeToggleProps> = ({
@@ -29,7 +32,9 @@ export const GimbalModeToggle: React.FC<GimbalModeToggleProps> = ({
   onSensitivityChange,
   onSmoothingChange,
   selectedLens = 'wide',
-  onLensChange
+  onLensChange,
+  laserOn = false,
+  onToggleLaser
 }) => {
   const modes: { value: GimbalMode; label: string }[] = [
     { value: 'look_at', label: 'Look At' },
@@ -134,6 +139,19 @@ export const GimbalModeToggle: React.FC<GimbalModeToggleProps> = ({
           </div>
         </div>
       )}
+
+      {/* Laser controls */}
+      <div className="mt-3">
+        <div className="text-xs text-gray-400 mb-2 font-semibold">LASER</div>
+        <div className="flex gap-1">
+          <button
+            onClick={() => onToggleLaser?.(!laserOn)}
+            className={`px-3 py-1 text-xs rounded ${laserOn ? 'bg-green-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+          >
+            {laserOn ? 'On' : 'Off'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 };
