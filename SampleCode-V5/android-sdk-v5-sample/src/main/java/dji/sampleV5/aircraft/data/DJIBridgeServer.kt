@@ -41,6 +41,7 @@ import dji.sdk.keyvalue.key.GimbalKey
 import dji.sdk.keyvalue.value.camera.TapZoomMode
 import dji.sdk.keyvalue.value.camera.ZoomTargetPointInfo
 import dji.sdk.keyvalue.value.common.CameraLensType
+import dji.sdk.keyvalue.value.camera.CameraVideoStreamSourceType
 import dji.sdk.keyvalue.value.gimbal.GimbalSpeedRotation
 import dji.sdk.keyvalue.value.gimbal.CtrlInfo
 import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotation
@@ -48,6 +49,7 @@ import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotationMode
 import dji.v5.et.createCamera
 import dji.v5.et.create
 import dji.v5.et.action
+import dji.v5.et.set
 
 /**
  * DJI Bridge WebSocket Server - Extensible Implementation
@@ -87,12 +89,12 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         JOYSTICK_OVERRIDE("joystick_override"),
         WAYPOINT_COMMAND("waypoint_command"),
         CAMERA_COMMAND("camera_command"),
+        CAMERA_SELECT("camera_select"),
         GIMBAL_TAP_TARGET("gimbal_tap_target"),
         GIMBAL_RESPONSE("gimbal_response"),
         GIMBAL_FREE_LOOK_START("gimbal_free_look_start"),
         GIMBAL_FREE_LOOK_UPDATE("gimbal_free_look_update"),
         GIMBAL_FREE_LOOK_STOP("gimbal_free_look_stop"),
-        GIMBAL_PRECISE_LOOK("gimbal_precise_look"),
         FLIGHT_COMMAND("flight_command"),
         SYSTEM_COMMAND("system_command");
         
@@ -556,11 +558,11 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 MessageType.JOYSTICK_OVERRIDE -> handleJoystickOverride(clientId, json)
                 MessageType.WAYPOINT_COMMAND -> handleWaypointCommand(clientId, json)
                 MessageType.CAMERA_COMMAND -> handleCameraCommand(clientId, json)
+                MessageType.CAMERA_SELECT -> handleCameraSelect(clientId, json)
                 MessageType.GIMBAL_TAP_TARGET -> handleGimbalTapTarget(clientId, json)
                 MessageType.GIMBAL_FREE_LOOK_START -> handleGimbalFreeLookStart(clientId, json)
                 MessageType.GIMBAL_FREE_LOOK_UPDATE -> handleGimbalFreeLookUpdate(clientId, json)
                 MessageType.GIMBAL_FREE_LOOK_STOP -> handleGimbalFreeLookStop(clientId, json)
-                MessageType.GIMBAL_PRECISE_LOOK -> handleGimbalPreciseLook(clientId, json)
                 MessageType.FLIGHT_COMMAND -> handleFlightCommand(clientId, json)
                 MessageType.SYSTEM_COMMAND -> handleSystemCommand(clientId, json)
                 MessageType.HEARTBEAT -> handleHeartbeat(clientId, socket)
@@ -658,10 +660,10 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             }
             
             val cameraIndex = ComponentIndexType.LEFT_OR_MAIN  // H20N camera
-            Log.i(TAG, "Sending gimbal tap command: x=$x, y=$y, camera=$cameraIndex")
-            
-            // Use CORRECTED API (not Look At)
-            CameraKey.KeyTapZoomAtTarget.createCamera(cameraIndex, CameraLensType.CAMERA_LENS_ZOOM)
+            val lens = getActiveCameraLens(cameraIndex)
+            Log.i(TAG, "Sending gimbal tap command: x=$x, y=$y, camera=$cameraIndex, lens=$lens")
+
+            CameraKey.KeyTapZoomAtTarget.createCamera(cameraIndex, lens)
                 .action(ZoomTargetPointInfo(x, y, false, TapZoomMode.UNKNOWN), {
                     Log.i(TAG, "✅ Gimbal tap SUCCESS for client $clientId at ($x, $y)")
                     sendGimbalResponse(clientId, true, "Gimbal moved to target position", x, y)
@@ -766,67 +768,46 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         }
     }
     
-    private fun handleGimbalPreciseLook(clientId: String, json: JSONObject) {
+    // Removed precise look iterative and tap variants per instruction; use tap target only via GIMBAL_TAP_TARGET
+
+    // Map current video stream source to camera lens type
+    private fun getActiveCameraLens(cameraIndex: ComponentIndexType): CameraLensType {
+        return try {
+            val src = KeyManager.getInstance().getValue(CameraKey.KeyCameraVideoStreamSource.create(cameraIndex)) as? CameraVideoStreamSourceType
+            when (src) {
+                CameraVideoStreamSourceType.WIDE_CAMERA -> CameraLensType.CAMERA_LENS_WIDE
+                CameraVideoStreamSourceType.ZOOM_CAMERA -> CameraLensType.CAMERA_LENS_ZOOM
+                CameraVideoStreamSourceType.INFRARED_CAMERA -> {
+                    // Fallback: if thermal lens type is not available in this SDK, prefer WIDE
+                    try { CameraLensType.valueOf("CAMERA_LENS_THERMAL") } catch (_: Exception) { CameraLensType.CAMERA_LENS_WIDE }
+                }
+                else -> CameraLensType.CAMERA_LENS_WIDE
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not read current video stream source: ${e.message}")
+            CameraLensType.CAMERA_LENS_WIDE
+        }
+    }
+
+    // Optional: allow client to select camera (WIDE/ZOOM/INFRARED) via bridge
+    private fun handleCameraSelect(clientId: String, json: JSONObject) {
         try {
             val data = json.getJSONObject("data")
-            val x = data.getDouble("x").coerceIn(0.0, 1.0)
-            val y = data.getDouble("y").coerceIn(0.0, 1.0)
-            val durationMs = data.optLong("duration_ms", 700L).coerceIn(200L, 2500L)
-            val strength = data.optDouble("strength", 1.0).coerceIn(0.5, 3.0)
-
-            // Stop Free Look if active
-            if (freeLookActive) {
-                Log.i("GIMBAL_PRECISE", "Stopping Free Look prior to precise command")
-                stopFreeLookSession()
+            val lensStr = data.optString("lens", "wide").lowercase()
+            val cameraIndex = ComponentIndexType.LEFT_OR_MAIN
+            val src = when (lensStr) {
+                "wide" -> CameraVideoStreamSourceType.WIDE_CAMERA
+                "zoom" -> CameraVideoStreamSourceType.ZOOM_CAMERA
+                "infrared", "ir", "thermal" -> CameraVideoStreamSourceType.INFRARED_CAMERA
+                else -> CameraVideoStreamSourceType.WIDE_CAMERA
             }
-
-            // Cancel any existing precise task
-            preciseFuture?.cancel(false)
-            preciseActive = true
-
-            // Compute deltas from center
-            val dx = x - 0.5
-            val dy = y - 0.5
-            val maxRate = FREELOOK_MAX_RATE * strength // reuse backend max rate
-            val start = System.currentTimeMillis()
-            val periodMs = 33L // ~30 Hz corrections
-
-            Log.i("GIMBAL_PRECISE", "🎯 Precise start: dx=${"%.3f".format(dx)}, dy=${"%.3f".format(dy)}, duration=${durationMs}ms, strength=${"%.2f".format(strength)}")
-
-            preciseFuture = executor.scheduleAtFixedRate({
-                try {
-                    if (!preciseActive) return@scheduleAtFixedRate
-                    val now = System.currentTimeMillis()
-                    val t = (now - start).toDouble()
-                    val p = (t / durationMs).coerceIn(0.0, 1.0)
-                    // Ease-out (quadratic)
-                    val ease = 1.0 - (p * p)
-
-                    // Map dx,dy to yaw/pitch rates; sign convention: +dx -> yaw right, +dy -> down
-                    val yawRate = dx * maxRate * ease
-                    val pitchRate = -dy * maxRate * ease
-
-                    // Stop when near end or rates tiny
-                    if (p >= 1.0 || (Math.abs(yawRate) < 0.5 && Math.abs(pitchRate) < 0.5)) {
-                        executeGimbalVelocityCommand(0.0, 0.0)
-                        preciseActive = false
-                        preciseFuture?.cancel(false)
-                        Log.i("GIMBAL_PRECISE", "✅ Precise complete (p=${"%.2f".format(p)})")
-                        sendGimbalResponse(clientId, true, "Precise Look completed", x, y)
-                        return@scheduleAtFixedRate
-                    }
-
-                    executeGimbalVelocityCommand(yawRate, pitchRate)
-                } catch (e: Exception) {
-                    Log.e("GIMBAL_ERR", "Precise Look loop error: ${e.message}", e)
-                }
-            }, 0, periodMs, TimeUnit.MILLISECONDS)
-
-            // Ack start
-            sendGimbalResponse(clientId, true, "Precise Look started", x, y)
+            CameraKey.KeyCameraVideoStreamSource.create(cameraIndex).set(src)
+            val msg = createMessage(MessageType.CAMERA_STATUS, mapOf("selected_lens" to lensStr))
+            clients[clientId]?.let { sendWebSocketTextFrame(it, msg) }
+            Log.i(TAG, "Camera lens switched to $lensStr ($src)")
         } catch (e: Exception) {
-            Log.e("GIMBAL_ERR", "Error processing Precise Look: ${e.message}", e)
-            sendGimbalResponse(clientId, false, "Error processing Precise Look: ${e.message}", 0.0, 0.0)
+            Log.e(TAG, "Camera select failed: ${e.message}", e)
+            clients[clientId]?.let { sendErrorResponse(it, "Camera select failed: ${e.message}") }
         }
     }
     

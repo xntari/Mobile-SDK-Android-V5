@@ -40,7 +40,8 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
   const [droppedFrameCount, setDroppedFrameCount] = useState<number>(0);
 
   // Gimbal Free Look state
-  const [gimbalMode, setGimbalMode] = useState<GimbalMode>('off');
+  const [gimbalMode, setGimbalMode] = useState<GimbalMode>('look_at');
+  const [selectedLens, setSelectedLens] = useState<'wide' | 'zoom' | 'infrared'>('wide');
   const [isFreeLookActive, setIsFreeLookActive] = useState(false);
   const freeLookUpdateInterval = useRef<NodeJS.Timeout | null>(null);
   const lastMousePos = useRef<{ x: number; y: number } | null>(null);
@@ -84,9 +85,9 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     
     const clickId = `click-${Date.now()}`;
     
-    // Determine command type based on gimbal mode
-    const commandType = gimbalMode === 'precise' ? 'gimbal_precise_look' : 'gimbal_tap_target';
-    const modeLabel = gimbalMode === 'precise' ? 'Precise Look' : 'Tap Target';
+    // Look At uses SDK tap target behavior (absolute normalized)
+    const commandType = 'gimbal_tap_target';
+    const modeLabel = gimbalMode === 'look_at' ? 'Look At' : 'Tap Target';
     
     console.log(`[DEV_GIMBAL] H20N ${modeLabel} at normalized coordinates: (${x.toFixed(3)}, ${y.toFixed(3)}) [ID: ${clickId}]`);
     
@@ -104,10 +105,6 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     // Send gimbal command via existing electronAPI
     if ((window as any).electronAPI) {
       const payload: any = { x, y };
-      if (commandType === 'gimbal_precise_look') {
-        payload.duration_ms = preciseDurationMs;
-        payload.strength = preciseStrength;
-      }
       (window as any).electronAPI.sendBridgeCommand({
         type: commandType,
         data: payload
@@ -150,9 +147,9 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     // Calculate offset from center, normalized to [-1, 1]
     const offsetX = (clientX - originX) / (rect.width / 2);
     const offsetY = (clientY - originY) / (rect.height / 2);
-    
+    const scaleX = rect.width / rect.height; 
     // Apply dead zone (0.08 as specified in DEV.md)
-    const deadZone = 0.02;
+    const deadZone = 0.00;
     const clampedOffsetX = Math.abs(offsetX) > deadZone ? offsetX : 0;
     const clampedOffsetY = Math.abs(offsetY) > deadZone ? offsetY : 0;
     
@@ -171,7 +168,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
       vy: applyEaseCurve(clampedOffsetY)
     };
     // Apply sensitivity scaling and clamp
-    let scaled = { vx: base.vx * sensitivity, vy: base.vy * sensitivity };
+    let scaled = { vx: scaleX * base.vx * sensitivity, vy: base.vy * sensitivity };
     scaled = { vx: Math.max(-1, Math.min(1, scaled.vx)), vy: Math.max(-1, Math.min(1, scaled.vy)) };
     // Client-side low-pass smoothing
     const prev = freeLookVelocityRef.current;
@@ -348,6 +345,10 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
           message: message || (ok ? 'Gimbal moved successfully' : 'Gimbal command failed'),
           timestamp: timestamp || Date.now()
         });
+        // On success, accelerate removal of recent click indicator (fade via cleanup)
+        if (ok) {
+          setClickIndicators(prev => prev.map((ind, idx) => idx === prev.length - 1 ? { ...ind, status: 'success', message: undefined } : ind));
+        }
         
         // Update most recent pending indicator
         //setClickIndicators(prev => {
@@ -393,9 +394,9 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     const cleanup = setInterval(() => {
       const now = Date.now();
       setClickIndicators(prev => 
-        prev.filter(indicator => (now - indicator.timestamp) < 5000)
+        prev.filter(indicator => (now - indicator.timestamp) < 50)
       );
-    }, 1000);
+    }, 200);
     
     return () => clearInterval(cleanup);
   }, []);
@@ -944,8 +945,6 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
         style={{ 
           cursor: gimbalMode === 'free_look' 
             ? (isFreeLookActive ? 'grabbing' : 'grab')
-            : gimbalMode === 'precise'
-            ? 'crosshair'
             : 'crosshair'
         }}
       />
@@ -961,10 +960,16 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
           smoothing={smoothing}
           onSensitivityChange={setSensitivity}
           onSmoothingChange={setSmoothing}
-          preciseDurationMs={preciseDurationMs}
-          preciseStrength={preciseStrength}
-          onPreciseDurationChange={setPreciseDurationMs}
-          onPreciseStrengthChange={setPreciseStrength}
+          selectedLens={selectedLens}
+          onLensChange={(lens) => {
+            setSelectedLens(lens);
+            if ((window as any).electronAPI) {
+              (window as any).electronAPI.sendBridgeCommand({
+                type: 'camera_select',
+                data: { lens }
+              }).catch(() => {});
+            }
+          }}
         />
       </div>
 
@@ -1117,7 +1122,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
           </div>)}
           
           {/* Instructions overlay when no gimbal command has been sent yet */}
-          {!lastGimbalCommand && frameStats.decodedFrames > 0 && gimbalMode === 'off' && (
+          {!lastGimbalCommand && frameStats.decodedFrames > 0 && gimbalMode === 'look_at' && (
             <div className="absolute bottom-4 right-4 glass-panel p-3 text-sm">
               <div className="text-center">
                 <div className="text-yellow-400 mb-1">🎯</div>

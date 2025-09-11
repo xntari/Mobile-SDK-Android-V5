@@ -1,6 +1,6 @@
 import React from 'react';
 
-export type GimbalMode = 'off' | 'free_look' | 'precise';
+export type GimbalMode = 'look_at' | 'free_look';
 
 
 interface GimbalModeToggleProps {
@@ -13,11 +13,9 @@ interface GimbalModeToggleProps {
   smoothing?: number;   // 0.0 - 0.9 (client-side low-pass)
   onSensitivityChange?: (v: number) => void;
   onSmoothingChange?: (v: number) => void;
-  // Precise look controls
-  preciseDurationMs?: number; // 200 - 2500
-  preciseStrength?: number;   // 0.5 - 3.0
-  onPreciseDurationChange?: (v: number) => void;
-  onPreciseStrengthChange?: (v: number) => void;
+  // Camera selection
+  selectedLens?: 'wide' | 'zoom' | 'infrared';
+  onLensChange?: (lens: 'wide' | 'zoom' | 'infrared') => void;
 }
 
 export const GimbalModeToggle: React.FC<GimbalModeToggleProps> = ({
@@ -30,15 +28,12 @@ export const GimbalModeToggle: React.FC<GimbalModeToggleProps> = ({
   smoothing = 0.05,
   onSensitivityChange,
   onSmoothingChange,
-  preciseDurationMs = 700,
-  preciseStrength = 1.0,
-  onPreciseDurationChange,
-  onPreciseStrengthChange
+  selectedLens = 'wide',
+  onLensChange
 }) => {
   const modes: { value: GimbalMode; label: string }[] = [
-    { value: 'off', label: 'Off' },
+    { value: 'look_at', label: 'Look At' },
     { value: 'free_look', label: 'Free Look' },
-    { value: 'precise', label: 'Precise' }
   ];
 
   return (
@@ -81,43 +76,25 @@ export const GimbalModeToggle: React.FC<GimbalModeToggleProps> = ({
         </div>
       )}
       
-      {mode === 'precise' && (
-        <div className="mt-3 space-y-3">
-          <div className="text-blue-400 text-xs">Click to center point precisely</div>
-          {/* Time to target */}
-          <div>
-            <div className="flex justify-between text-xs text-gray-300 mb-1">
-              <span>Time to target</span>
-              <span className="font-mono">{preciseDurationMs} ms</span>
-            </div>
-            <input
-              type="range"
-              min={200}
-              max={2500}
-              step={50}
-              value={preciseDurationMs}
-              onChange={(e) => onPreciseDurationChange?.(parseInt(e.target.value))}
-              className="w-full"
-            />
-          </div>
-          {/* Strength */}
-          <div>
-            <div className="flex justify-between text-xs text-gray-300 mb-1">
-              <span>Strength</span>
-              <span className="font-mono">{preciseStrength.toFixed(2)}x</span>
-            </div>
-            <input
-              type="range"
-              min={0.5}
-              max={3.0}
-              step={0.05}
-              value={preciseStrength}
-              onChange={(e) => onPreciseStrengthChange?.(parseFloat(e.target.value))}
-              className="w-full"
-            />
-          </div>
+      {/* Camera selection */}
+      <div className="mt-3">
+        <div className="text-xs text-gray-400 mb-2 font-semibold">CAMERA</div>
+        <div className="flex gap-1">
+          {[
+            { key: 'wide', label: 'Wide' },
+            { key: 'zoom', label: 'Zoom' },
+            { key: 'infrared', label: 'IR' }
+          ].map(opt => (
+            <button
+              key={opt.key}
+              onClick={() => onLensChange?.(opt.key as any)}
+              className={`px-3 py-1 text-xs rounded ${selectedLens === opt.key ? 'bg-dji-blue text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+            >
+              {opt.label}
+            </button>
+          ))}
         </div>
-      )}
+      </div>
 
       {/* Free Look tuning controls */}
       {mode === 'free_look' && (
