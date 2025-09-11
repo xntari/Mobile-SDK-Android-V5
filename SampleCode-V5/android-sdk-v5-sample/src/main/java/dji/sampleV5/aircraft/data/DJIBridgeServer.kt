@@ -90,6 +90,10 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         WAYPOINT_COMMAND("waypoint_command"),
         CAMERA_COMMAND("camera_command"),
         CAMERA_SELECT("camera_select"),
+        CAMERA_LASER_ENABLE("camera_laser_enable"),
+        CAMERA_LASER_GET("camera_laser_get"),
+        CAMERA_LASER_MEASURE("camera_laser_measure"),
+        CAMERA_LASER_RESULT("camera_laser_result"),
         GIMBAL_TAP_TARGET("gimbal_tap_target"),
         GIMBAL_RESPONSE("gimbal_response"),
         GIMBAL_FREE_LOOK_START("gimbal_free_look_start"),
@@ -559,6 +563,9 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 MessageType.WAYPOINT_COMMAND -> handleWaypointCommand(clientId, json)
                 MessageType.CAMERA_COMMAND -> handleCameraCommand(clientId, json)
                 MessageType.CAMERA_SELECT -> handleCameraSelect(clientId, json)
+                MessageType.CAMERA_LASER_ENABLE -> handleCameraLaserEnable(clientId, json)
+                MessageType.CAMERA_LASER_GET -> handleCameraLaserGet(clientId, json)
+                MessageType.CAMERA_LASER_MEASURE -> handleCameraLaserMeasure(clientId, json)
                 MessageType.GIMBAL_TAP_TARGET -> handleGimbalTapTarget(clientId, json)
                 MessageType.GIMBAL_FREE_LOOK_START -> handleGimbalFreeLookStart(clientId, json)
                 MessageType.GIMBAL_FREE_LOOK_UPDATE -> handleGimbalFreeLookUpdate(clientId, json)
@@ -808,6 +815,100 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         } catch (e: Exception) {
             Log.e(TAG, "Camera select failed: ${e.message}", e)
             clients[clientId]?.let { sendErrorResponse(it, "Camera select failed: ${e.message}") }
+        }
+    }
+
+    // === Laser rangefinder integration ===
+    private fun handleCameraLaserEnable(clientId: String, json: JSONObject) {
+        try {
+            val enabled = json.getJSONObject("data").getBoolean("enabled")
+            val cameraIndex = ComponentIndexType.LEFT_OR_MAIN
+            try {
+                CameraKey.KeyLaserMeasureEnabled.create(cameraIndex).set(enabled)
+                Log.i("CAMERA_LASER", "Laser enabled=$enabled")
+                val msg = createMessage(MessageType.CAMERA_STATUS, mapOf("laser_enabled" to enabled))
+                clients[clientId]?.let { sendWebSocketTextFrame(it, msg) }
+            } catch (e: Exception) {
+                Log.e(TAG, "Laser enable failed: ${e.message}", e)
+                clients[clientId]?.let { sendErrorResponse(it, "Laser enable failed: ${e.message}") }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "camera_laser_enable error: ${e.message}", e)
+        }
+    }
+
+    private fun extractLaserInfo(info: Any?): Map<String, Any> {
+        if (info == null) return emptyMap()
+        fun call(obj: Any?, name: String): Any? {
+            if (obj == null) return null
+            return try { obj.javaClass.getMethod(name).invoke(obj) } catch (e: Exception) { null }
+        }
+        val distance = (call(info, "getDistance") as? Number)?.toDouble()
+        val state = (call(info, "getLaserMeasureState") as? Number)?.toInt()
+        val loc = call(info, "getLocation3D")
+        val lat = (call(loc, "getLatitude") as? Number)?.toDouble()
+        val lon = (call(loc, "getLongitude") as? Number)?.toDouble()
+        val alt = (call(loc, "getAltitude") as? Number)?.toDouble()
+        val tp = call(info, "getTargetPoint")
+        val tx = (call(tp, "getX") as? Number)?.toDouble()
+        val ty = (call(tp, "getY") as? Number)?.toDouble()
+        val data = mutableMapOf<String, Any>()
+        distance?.let { data["distance_m"] = it }
+        if (lat != null && lon != null) {
+            data["waypoint"] = mapOf("lat" to lat, "lon" to lon, "alt_m" to (alt ?: 0.0))
+        }
+        if (tx != null && ty != null) {
+            data["target_point"] = mapOf("x" to tx, "y" to ty)
+        }
+        state?.let { data["state"] = it }
+        data["timestamp"] = System.currentTimeMillis()
+        return data
+    }
+
+    private fun handleCameraLaserGet(clientId: String, json: JSONObject) {
+        try {
+            val cameraIndex = ComponentIndexType.LEFT_OR_MAIN
+            val info = try { KeyManager.getInstance().getValue(CameraKey.KeyLaserMeasureInformation.create(cameraIndex)) } catch (e: Exception) { null }
+            Log.i("CAMERA_LASER", "Laser get -> $info")
+            val data = extractLaserInfo(info)
+            val msg = createMessage(MessageType.CAMERA_LASER_RESULT, mapOf("ok" to (data.isNotEmpty()), "data" to data))
+            clients[clientId]?.let { sendWebSocketTextFrame(it, msg) }
+        } catch (e: Exception) {
+            Log.e(TAG, "camera_laser_get error: ${e.message}", e)
+        }
+    }
+
+    private fun handleCameraLaserMeasure(clientId: String, json: JSONObject) {
+        try {
+            val data = json.getJSONObject("data")
+            val x = data.getDouble("x").coerceIn(0.0, 1.0)
+            val y = data.getDouble("y").coerceIn(0.0, 1.0)
+            val cameraIndex = ComponentIndexType.LEFT_OR_MAIN
+            val lens = getActiveCameraLens(cameraIndex)
+            // Center the target first
+            Log.i("CAMERA_LASER", "Measure tap at x=${"%.3f".format(x)}, y=${"%.3f".format(y)} lens=$lens")
+            CameraKey.KeyTapZoomAtTarget.createCamera(cameraIndex, lens)
+                .action(ZoomTargetPointInfo(x, y, false, TapZoomMode.UNKNOWN), {
+                    // After a short settle, read laser info
+                    executor.schedule({
+                        try {
+                            val info = KeyManager.getInstance().getValue(CameraKey.KeyLaserMeasureInformation.create(cameraIndex))
+                            Log.i("CAMERA_LASER", "Laser measure -> $info")
+                            val res = extractLaserInfo(info)
+                            val msg = createMessage(
+                                MessageType.CAMERA_LASER_RESULT,
+                                mapOf("ok" to (res.isNotEmpty()), "data" to res)
+                            )
+                            clients[clientId]?.let { sendWebSocketTextFrame(it, msg) }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "laser measure read error: ${e.message}")
+                        }
+                    }, 250, java.util.concurrent.TimeUnit.MILLISECONDS)
+                }, { error ->
+                    Log.e(TAG, "tap before laser failed: $error")
+                })
+        } catch (e: Exception) {
+            Log.e(TAG, "camera_laser_measure error: ${e.message}", e)
         }
     }
     
