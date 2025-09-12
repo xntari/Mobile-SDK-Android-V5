@@ -1,6 +1,8 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { H20NDisplayProps } from '../types';
 import { GimbalModeToggle, GimbalMode } from './GimbalModeToggle';
+import { AgentPanel } from './AgentPanel';
+import type { Detection } from '../agent/visionClient';
 
 interface ClickIndicator {
   id: string;
@@ -43,6 +45,9 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
   const [gimbalMode, setGimbalMode] = useState<GimbalMode>('look_at');
   const [selectedLens, setSelectedLens] = useState<'wide' | 'zoom' | 'infrared'>('wide');
   const [laserOn, setLaserOn] = useState<boolean>(false);
+  const [laserReadout, setLaserReadout] = useState<{ text: string; timestamp: number } | null>(null);
+  const [lastLaserResult, setLastLaserResult] = useState<any | null>(null);
+  const laserHideTimerRef = useRef<number | null>(null);
   const [isFreeLookActive, setIsFreeLookActive] = useState(false);
   const freeLookUpdateInterval = useRef<NodeJS.Timeout | null>(null);
   const lastMousePos = useRef<{ x: number; y: number } | null>(null);
@@ -56,6 +61,28 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
   // Precise Look tuning
   const [preciseDurationMs, setPreciseDurationMs] = useState<number>(700);
   const [preciseStrength, setPreciseStrength] = useState<number>(1.0);
+
+  // Agent overlay
+  const [agentDetections, setAgentDetections] = useState<Detection[]>([]);
+
+  // Helper: provide a snapshot of the current canvas as base64 JPEG
+  const getSnapshot = async (): Promise<string> => {
+    const canvas = canvasRef.current;
+    if (!canvas) throw new Error('Canvas not ready');
+    try {
+      // Constrain to displayed rectangle by drawing into an offscreen canvas
+      const off = document.createElement('canvas');
+      off.width = canvas.width;
+      off.height = canvas.height;
+      const ctx = off.getContext('2d');
+      if (!ctx) throw new Error('No 2D context');
+      ctx.drawImage(canvas, 0, 0);
+      return off.toDataURL('image/jpeg', 0.9);
+    } catch (e) {
+      console.error('Snapshot failed', e);
+      throw e;
+    }
+  };
 
   // Handle canvas click for gimbal tap-to-target or precise look functionality
   const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -367,6 +394,23 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
         //});
         
         console.log(ok ? '✅ H20N Gimbal response: SUCCESS' : '❌ H20N Gimbal response: ERROR', message); // Essential gimbal log
+      }
+
+      if (responseData.type === 'camera_laser_result') {
+        const p: any = (responseData as any).data ?? responseData;
+        const inner: any = (p as any).data ?? p;
+        const dist = typeof inner?.distance_m === 'number' ? inner.distance_m as number : undefined;
+        const text = dist && dist > 0 ? `LRF ${dist.toFixed(1)} m` : 'LRF min 3m';
+        setLaserReadout({ text, timestamp: Date.now() });
+        setLastLaserResult(inner);
+        if (laserHideTimerRef.current) {
+          window.clearTimeout(laserHideTimerRef.current);
+          laserHideTimerRef.current = null;
+        }
+        laserHideTimerRef.current = window.setTimeout(() => {
+          setLaserReadout(null);
+          laserHideTimerRef.current = null;
+        }, 3000);
       }
     };
     
@@ -952,8 +996,18 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
             : 'crosshair'
         }}
       />
+
+      {/* Agent Panel - bottom-right to avoid overlap with controls */}
+      <div className="absolute right-4 bottom-4 z-30 pointer-events-auto">
+        <AgentPanel 
+          getSnapshot={getSnapshot}
+          sendBridge={(msg:any)=> (window as any).electronAPI?.sendBridgeCommand(msg) ?? Promise.resolve({success:false})}
+          setDetections={setAgentDetections}
+          laserResult={lastLaserResult}
+        />
+      </div>
       
-      {/* Gimbal Mode Toggle - positioned at bottom left */}
+      {/* Gimbal Mode Toggle - default bottom-left */}
       <div className="absolute bottom-4 left-4 z-30 pointer-events-auto">
         <GimbalModeToggle 
           mode={gimbalMode}
@@ -1036,6 +1090,21 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
             </div>
           ))}
 
+          {/* Agent detections overlay */}
+          {agentDetections.map((d, idx) => {
+            const x = d.x1 * (displayRect.width || 1);
+            const y = d.y1 * (displayRect.height || 1);
+            const w = (d.x2 - d.x1) * (displayRect.width || 1);
+            const h = (d.y2 - d.y1) * (displayRect.height || 1);
+            return (
+              <div key={`det-${idx}`} className="absolute border border-emerald-400" style={{ left: x, top: y, width: w, height: h }}>
+                <div className="absolute -top-5 left-0 bg-emerald-600 text-[10px] px-1 rounded text-white">
+                  {(d.label || 'det')}{d.score ? ` ${(d.score*100).toFixed(0)}%` : ''}
+                </div>
+              </div>
+            );
+          })}
+
           {/* Tiny HUD overlay near crosshair for Free Look */}
           {gimbalMode === 'free_look' && isFreeLookActive && (
             <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
@@ -1044,6 +1113,17 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
                 <div className="bg-purple-900 bg-opacity-90 px-2 py-1 rounded text-xs font-mono text-purple-100 flex items-center gap-2">
                   <span className="text-purple-300">FL</span>
                   <span>{freeLookVelocity.vx.toFixed(1)},{freeLookVelocity.vy.toFixed(1)}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Laser readout near center crosshair */}
+          {laserReadout && (
+            <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
+              <div className="absolute -top-20 left-1/2 transform -translate-x-1/2">
+                <div className="bg-black bg-opacity-70 px-2 py-1 rounded text-xs font-mono text-white">
+                  {laserReadout.text}
                 </div>
               </div>
             </div>
