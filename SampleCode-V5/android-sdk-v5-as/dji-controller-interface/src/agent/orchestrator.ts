@@ -10,6 +10,7 @@ export interface OrchestratorOptions {
   onPlan?: (steps: any[]) => void;
   isCancelled?: () => boolean;
   onTrace?: (line: string, kind?: 'tool'|'var'|'info'|'warn'|'error') => void;
+  onPlanErrors?: (errors: Array<{ message: string; path?: string }>) => void;
 }
 
 function extractQueryFromInstruction(text: string): { query: string; intent: 'measure'|'coords'|'describe'|'detect' } {
@@ -33,6 +34,20 @@ function extractQueryFromInstruction(text: string): { query: string; intent: 'me
 
   const m5 = norm.match(/^(coords?|coordinates)\s+(?:of|for)\s+(.+)$/);
   if (m5) return { query: m5[2], intent: 'coords' };
+
+  // Track/follow/locate/center/focus patterns
+  const m7 = norm.match(/^track\s+(?:the\s+)?(.+)$/);
+  if (m7) return { query: m7[1], intent: 'detect' };
+  const m8 = norm.match(/^(?:please\s+)?follow\s+(?:the\s+)?(.+)$/);
+  if (m8) return { query: m8[1], intent: 'detect' };
+  const m9 = norm.match(/^locate\s+(?:the\s+)?(.+)$/);
+  if (m9) return { query: m9[1], intent: 'detect' };
+  const m10 = norm.match(/^keep\s+(?:the\s+)?(.+)\s+(?:center|centered)\b/);
+  if (m10) return { query: m10[1], intent: 'detect' };
+  const m11 = norm.match(/^center\s+(?:on\s+)?(?:the\s+)?(.+)$/);
+  if (m11) return { query: m11[1], intent: 'detect' };
+  const m12 = norm.match(/^focus\s+(?:on\s+)?(?:the\s+)?(.+)$/);
+  if (m12) return { query: m12[1], intent: 'detect' };
 
   const m6 = norm.match(/^find\s+(.+)$/);
   if (m6) {
@@ -173,31 +188,32 @@ export async function runInstruction(
     const resp = await fetch(plannerUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction }) });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const plan = await resp.json();
+    // Validation errors from planner
+    if (Array.isArray((plan as any)?.errors) && (plan as any).errors.length) {
+      opts.onPlanErrors?.((plan as any).errors);
+      return;
+    }
     // Prefer DSL program if provided
     if (plan?.program && plan.program?.body) {
       const body = Array.isArray(plan.program.body) ? plan.program.body : [];
-      log(`Planner: program with ${body.length} nodes`);
+      const countOps = (nodes:any[]):number => nodes.reduce((acc,n)=>{
+        if (!n) return acc; if (n.type==='while' || n.type==='if') {
+          const t = n.then||[]; const e = n.else||[]; const b = n.body||[]; return acc + 1 + countOps(t)+countOps(e)+countOps(b);
+        } else return acc+1;
+      },0);
+      log(`Planner: program with ${countOps(body)} operations`);
       try { log(`Plan: ${JSON.stringify(plan.program.body).slice(0, 300)}${body.length>0? ' …' : ''}`); } catch {}
       await runProgram(plan.program, instruction, opts, log);
       return;
     } else {
-      let steps: any[] = plan?.steps || [];
-      if (!Array.isArray(steps) || steps.length === 0) throw new Error('no steps');
-      log(`Planner: ${steps.length} steps`);
-      try { log(`Plan: ${JSON.stringify(steps).slice(0, 300)}${steps.length>0? ' …' : ''}`); } catch {}
-      // Sanitize detect query using local parser so free-form phrases still work
-      steps = sanitizePlan(steps, instruction, log);
-      opts.onPlan?.(steps);
-      for (let i = 0; i < steps.length; i++) {
-        const s = steps[i];
-        await execStep(s, opts, log);
-      }
+      log('Planner error: no "program" in response');
+      opts.onResult?.({ text: 'Planner returned no program. Please update the planner to emit DSL program only.' });
       return;
     }
   } catch (e) {
     log(`Planner unavailable, using built-in flow (${String(e)})`);
-    const { query } = extractQueryFromInstruction(instruction);
-    await runFindMeasure(query, opts);
+    opts.onResult?.({ text: 'Planner unavailable' });
+    return;
   }
 }
 
@@ -313,16 +329,6 @@ type DSLNode = any;
 
 async function runProgram(program: { type?: string; body: DSLNode[] }, instruction: string, opts: OrchestratorOptions, log: (l:string)=>void) {
   const ctx: any = { vars: {}, started: performance.now(), instruction };
-  // Sanitize detect queries in program using the original instruction
-  try {
-    for (const n of program.body||[]) {
-      if (n && n.type==='call' && n.tool==='detect' && n.args && n.args.query) {
-        const eq = extractQueryFromInstruction(String(n.args.query));
-        const ei = extractQueryFromInstruction(instruction);
-        n.args.query = (ei.query && ei.query.length <= eq.query.length) ? ei.query : eq.query;
-      }
-    }
-  } catch {}
   for (const node of program.body || []) {
     if (opts.isCancelled?.()) break;
     await execNode(node, ctx, opts, log);

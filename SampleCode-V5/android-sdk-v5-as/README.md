@@ -162,6 +162,43 @@ android-sdk-v5-as/
 ./deploy.sh debug
 ```
 
+## Agent Planner & Vision (Quick Start)
+
+- DSL language: see `docs/AGENT_DSL.md`
+- Planner prompt: see `docs/PLANNER_PROMPT.md`
+
+### Start the planner (program‑only)
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install fastapi uvicorn openai==1.51.0 httpx==0.27.2
+export OPENAI_API_KEY=sk-...
+python tools/planner_service.py
+# Health
+curl http://127.0.0.1:9002/health
+# Test
+curl -s -X POST http://127.0.0.1:9002/plan \
+  -H 'Content-Type: application/json' \
+  -d '{"instruction":"find knob"}' | jq
+```
+
+Notes:
+- Planner responds with `{ program }` or `{ errors:[...] }` (strict validation on undefined vars, unbounded loops).
+- Set `PLANNER_MODEL` if needed (defaults to `gpt-4o-mini`).
+
+### Start the detector service
+```bash
+python tools/vision_detect_server.py
+# Optionally lower threshold
+export OWL_THRESH=0.20
+```
+
+### UI features relevant to planner/vision
+- Agent panel: free‑floating, resizable, selectable text
+- Ribbon with per‑step timings; plan preview; execution trace with resolved values
+- Plan errors panel: shows planner validation errors and blocks execution
+- Detector threshold toggle (0.15/0.20/0.25/0.30)
+- Overlay timing: pre‑slew box appears, clears during slew, re‑detect draws post‑slew
+
 **Device Not Detected:**
 ```bash
 # Check ADB connection

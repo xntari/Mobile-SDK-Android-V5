@@ -14,16 +14,16 @@ Current Phase (Phase 1: Perception + Camera Tools)
 - Planner: not yet; simple orchestrator executes a fixed flow.
 
 Status Summary
-- UI: Agent panel added to H20N view (prompt + Run/Stop + logs + detection overlay).
-- Orchestrator: snapshot → detect → look_at → LRF measure → respond.
-- Vision: swappable `vision.analyze` facade; default tries HTTP `/detect` then falls back to a dummy center box.
+- UI (Agent): free‑floating panel with Run/Stop, detector threshold toggle, plan preview, execution trace (code‑like), ribbon with per‑step timings, LRF readout and raw payload logging.
+- Executor: runs a single formal program (DSL) returned by the planner; shows resolved values (e.g., look_at(0.342,0.700)).
+- Vision: HTTP `/detect` service; threshold can be adjusted in the Agent. Boxes render pre‑slew, clear on slew, re‑detect post‑slew.
 - Bridge: uses existing commands (`gimbal_tap_target`, `camera_laser_enable`, `camera_laser_measure`).
-- Build: UI compiles; no changes to existing features.
+- Planner: program‑only contract; server expands macros, validates program (undefined vars, unbounded loops). UI shows a Plan errors panel and blocks invalid plans.
 
-Planner + DSL (next evolution)
-- The planner should generate a formal plan (DSL) rather than ad-hoc steps. See `docs/AGENT_DSL.md`.
-- The DSL supports variables, if/while, and templates like `measure_object` and `track_object`.
-- The current executor already interprets a flat step list; we will extend it to a small subset of the DSL (while/if with bounds).
+Planner + DSL (program‑only)
+- The planner generates a formal program (DSL). See `docs/AGENT_DSL.md`.
+- Macros (high‑level): `measure_object`, `track_object` — expanded server‑side into primitives.
+- Strict validation: undefined variables and unbounded loops rejected up‑front.
 
 Key Files
 - UI components
@@ -108,19 +108,17 @@ Performance Notes
   - Starting with Wide lens; switch to Zoom only if bbox area < 5%.
 
 Roadmap / Next Steps
-1) Add real detector backend (OWL‑ViT) and a config toggle to enable/disable the naive fallback.
-2) Add “Describe scene” using top‑K detections → summary.
-3) Lens policy: start Wide, re‑detect on Zoom if small bbox.
-4) Planner service (cloud) producing a DSL plan with:
-   - confirm_flight gate; preflight checks (battery, GPS fix, mode).
-   - retries/fallbacks (target_not_found → re-detect or alternate phrase).
-   - measure_object and track_object templates.
-5) Mission tools integration (Phase 3): create waypoints from LRF GPS; start/monitor mission; RTL/hover/abort.
-6) Adaptation loop: on runtime events (battery low, obstacle flag, hw error) request a plan patch instead of full replan.
+1) Detector: keep OWL‑ViT service; add optional caption/ocr services as separate tools.
+2) “Describe scene”: planner emits detect + respond; or add `caption` tool later.
+3) Lens policy: planner may choose camera_select before detect.
+4) Safety gates: preflight checks and confirmations for navigation tools when added.
+5) Missions: add mission tools + macro; plan interpreter remains deterministic.
+6) Adaptation: on runtime events, re‑plan by calling planner with summarized context.
 
 Configuration
-- Vision endpoint override: set `window.__VISION_URL__` in the renderer preload or a config file to point to a different `/detect` server.
-- Planner endpoint (future): `window.__PLANNER_URL__` with `/plan` schema.
+- Vision endpoint override: set `window.__VISION_URL__` (optional). Adjust threshold in the Agent panel.
+- Planner endpoint: `window.__PLANNER_URL__` (optional; defaults to `http://127.0.0.1:9002/plan`).
+- Planner env: `OPENAI_API_KEY` (required), `PLANNER_MODEL` (defaults to `gpt-4o-mini`).
 
 Troubleshooting
 - Agent runs but no boxes: check the detector server logs or rely on fallback (center tap) to validate the tool loop.

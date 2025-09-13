@@ -77,13 +77,19 @@ Interpreter responsibilities
 - Variable store; helper functions to compute centers from boxes.
 - Timeouts for calls; interval pacing for while; Stop button breaks loops.
 - Safety hooks: before flight/mission tools, require a confirm gate.
+ - Reject execution when planner returns validation errors; show them in the UI.
 
 Planner responsibilities
 - Parse NL → DSL (JSON AST). Use few-shot prompts and a tool/grammar description.
 - Validate: emit only allowed tools, obey types, bound loops (max_iter), include confirmations for flight.
 - Handle synonyms/slots (e.g., "how far is …" → measure_object).
+ - Prefer high‑level macros (measure_object, track_object); server expands macros to primitives.
+
+Validation (strict)
+- Undefined variables referenced by { get:'name' } cause a validation error (program rejected).
+- While loops must include bounded fields: `max_iter` (1..10000) and `interval_ms` (≥0). Missing/invalid values cause a validation error.
+- Basic argument checks are enforced (e.g., detect.query must be a non‑empty string; wait.ms must be an integer).
 
 Migration path
 - v0: keep emitting the flat step list we have today. Add a small subset of while/if with explicit bounds.
 - v1: allow full DSL as above; interpreter executes; logger stores plan + results for audits and fine-tuning.
-
