@@ -89,16 +89,36 @@ def fallback_plan(instruction: str) -> Dict[str, Any]:
     query, intent = _extract_query(instruction)
     if not query:
         query = "object"
-    steps = [
-        {"tool": "snapshot", "args": {}},
-        {"tool": "detect", "args": {"query": query}},
-        {"tool": "look_at", "args": {"x": "$det.cx", "y": "$det.cy"}},
-        {"tool": "sleep", "args": {"ms": 600}},
-        {"tool": "laser_enable", "args": {"enabled": True}},
-        {"tool": "laser_measure", "args": {"x": "$det.cx", "y": "$det.cy"}},
-        {"tool": "respond", "args": {}},
-    ]
-    return {"steps": steps}
+    # detect 'track' intent heuristically
+    low = instruction.strip().lower()
+    if any(k in low for k in ["track ", "tracking", "follow ", "keep center"]):
+        program = {
+            "type": "program",
+            "body": [
+                {"type":"while","cond":{"op":"<","left":{"var":"elapsed_ms"},"right":10000},"interval_ms":500,"max_iter":40,
+                 "body":[
+                    {"type":"call","tool":"snapshot","args":{},"assign":"snap"},
+                    {"type":"call","tool":"detect","args":{"query":query},"assign":"det"},
+                    {"type":"if","cond":{"op":">","left":{"get":"det","path":["detections","length"]},"right":0},
+                      "then":[{"type":"let","name":"p","value":{"get":"det","path":["detections",0]}},
+                               {"type":"call","tool":"look_at","args":{"x":{"get":"p","path":["cx"]},"y":{"get":"p","path":["cy"]}}}]}
+                 ]}
+            ]
+        }
+        # Provide steps fallback
+        steps = [{"tool":"snapshot","args":{}},{"tool":"detect","args":{"query":query}},{"tool":"look_at","args":{"x":"$det.cx","y":"$det.cy"}}]
+        return {"steps": steps, "program": program}
+    else:
+        steps = [
+            {"tool": "snapshot", "args": {}},
+            {"tool": "detect", "args": {"query": query}},
+            {"tool": "look_at", "args": {"x": "$det.cx", "y": "$det.cy"}},
+            {"tool": "sleep", "args": {"ms": 600}},
+            {"tool": "laser_enable", "args": {"enabled": True}},
+            {"tool": "laser_measure", "args": {"x": "$det.cx", "y": "$det.cy"}},
+            {"tool": "respond", "args": {}},
+        ]
+        return {"steps": steps}
 
 
 def openai_plan(instruction: str) -> Dict[str, Any]:
@@ -135,13 +155,45 @@ def openai_plan(instruction: str) -> Dict[str, Any]:
         return fallback_plan(instruction)
 
 
+def _convert_steps_to_program(steps: List[Dict[str, Any]]) -> Dict[str, Any]:
+    import re
+    def conv_arg(v):
+        if isinstance(v, str):
+            m = re.match(r"^\$(\w+)\.(\w+)$", v)
+            if m:
+                return {"get": m.group(1), "path": [m.group(2)]}
+        return v
+    body: List[Dict[str, Any]] = []
+    need_p = False
+    for s in steps:
+        tool = s.get('tool')
+        args = s.get('args', {})
+        # Normalize args: $det.cx → {get:'det',path:['cx']}
+        n_args = { k: conv_arg(v) for k,v in args.items() }
+        assign = None
+        if tool == 'detect':
+            assign = 'det'
+            # We will emit a let p = det.detections[0] after detect
+        elif tool == 'laser_measure':
+            assign = 'm'
+        body.append({"type":"call","tool":tool,"args":n_args,"assign":assign})
+        if tool == 'detect':
+            body.append({"type":"let","name":"p","value":{"get":"det","path":["detections",0]}})
+    return {"type":"program","body":body}
+
+
 @app.post("/plan")
 def plan(req: PlanRequest):
     api_key = os.environ.get("OPENAI_API_KEY")
     print(f"[planner] instruction: {req.instruction!r} | openai={'yes' if api_key else 'no'}")
-    plan = openai_plan(req.instruction) if api_key else fallback_plan(req.instruction)
-    print(f"[planner] → {len(plan.get('steps', []))} steps")
-    return plan
+    # Produce both a backward-compatible steps list and a DSL program
+    basic = openai_plan(req.instruction) if api_key else fallback_plan(req.instruction)
+    steps = basic.get('steps', [])
+    # Convert steps to a simple but well-formed program (with assigns + exprs)
+    program = basic.get('program') or _convert_steps_to_program(steps)
+    out = {"steps": steps, "program": program}
+    print(f"[planner] → {len(steps)} steps, program nodes: {len(program['body'])}")
+    return out
 
 
 if __name__ == "__main__":
