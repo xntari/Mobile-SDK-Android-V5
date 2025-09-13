@@ -18,6 +18,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
   const [status, setStatus] = useState<{ detector?: string; planner?: string }>(() => ({}));
   const [ribbon, setRibbon] = useState<Record<string, { state: 'running'|'done'|'error'; ms?: number }>>({});
   const [planSteps, setPlanSteps] = useState<any[] | null>(null);
+  const [planErrors, setPlanErrors] = useState<Array<{ message: string; path?: string }>>([]);
   const [thr, setThr] = useState<number>(() => getActiveThreshold());
   const [pos, setPos] = useState<{ x: number; y: number }>(() => ({ x: window.innerWidth - 360 - 24, y: window.innerHeight - 320 - 24 }));
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 360, h: 240 });
@@ -44,6 +45,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
       // Try planner first, fallback to built-in flow
       setRibbon({});
       setPlanSteps(null);
+      setPlanErrors([]);
       cancelRef.current.cancelled = false;
       await runInstruction(prompt.trim(), {
         getSnapshot,
@@ -54,7 +56,8 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
         onStep,
         onPlan: (steps) => setPlanSteps(steps),
         isCancelled: () => cancelRef.current.cancelled,
-        onTrace: (line, kind='info') => setTrace(prev => [...prev, { text: line, kind }])
+        onTrace: (line, kind='info') => setTrace(prev => [...prev, { text: line, kind }]),
+        onPlanErrors: (errs) => setPlanErrors(errs)
       });
     } finally {
       setRunning(false);
@@ -156,6 +159,15 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
         ))}
         <span className="text-gray-500">active {thr.toFixed(2)}</span>
       </div>
+
+      {planErrors.length > 0 && (
+        <div className="mb-2 bg-red-950/70 rounded p-2 text-[10px] text-red-200 select-text" style={{ maxHeight: 120, overflowY: 'auto' }}>
+          <div className="text-red-300 mb-1">Plan errors</div>
+          {planErrors.map((e, i) => (
+            <div key={i}>• {e.message}{e.path ? ` (${e.path})` : ''}</div>
+          ))}
+        </div>
+      )}
 
       {planSteps && planSteps.length > 0 && (
         <div className="mb-2 bg-gray-900/50 rounded p-1 text-[10px] text-gray-200 select-text" style={{ maxHeight: 80, overflowY: 'auto' }}>
