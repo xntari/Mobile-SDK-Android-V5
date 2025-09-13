@@ -19,9 +19,11 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
   const [ribbon, setRibbon] = useState<Record<string, { state: 'running'|'done'|'error'; ms?: number }>>({});
   const [planSteps, setPlanSteps] = useState<any[] | null>(null);
   const [thr, setThr] = useState<number>(() => getActiveThreshold());
-  const [pos, setPos] = useState<{ x: number; y: number }>(() => ({ x: window.innerWidth - 360 - 24, y: window.innerHeight - 280 - 24 }));
+  const [pos, setPos] = useState<{ x: number; y: number }>(() => ({ x: window.innerWidth - 360 - 24, y: window.innerHeight - 320 - 24 }));
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 360, h: 240 });
   const dragRef = React.useRef<{ dx: number; dy: number; resizing: boolean } | null>(null);
+  const cancelRef = React.useRef<{ cancelled: boolean }>({ cancelled: false });
+  const [trace, setTrace] = useState<Array<{ text: string; kind: 'tool'|'var'|'info'|'warn'|'error' }>>([]);
 
   const log = useCallback((line: string) => {
     setLogLines(prev => [...prev.slice(-40), line]);
@@ -42,6 +44,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
       // Try planner first, fallback to built-in flow
       setRibbon({});
       setPlanSteps(null);
+      cancelRef.current.cancelled = false;
       await runInstruction(prompt.trim(), {
         getSnapshot,
         sendBridge,
@@ -49,7 +52,9 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
         showDetections: setDetections,
         onResult: ({ text }) => setResult(text),
         onStep,
-        onPlan: (steps) => setPlanSteps(steps)
+        onPlan: (steps) => setPlanSteps(steps),
+        isCancelled: () => cancelRef.current.cancelled,
+        onTrace: (line, kind='info') => setTrace(prev => [...prev, { text: line, kind }])
       });
     } finally {
       setRunning(false);
@@ -57,6 +62,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
   }, [prompt, running, getSnapshot, sendBridge, log, setDetections]);
 
   const onStop = useCallback(() => {
+    cancelRef.current.cancelled = true;
     setRunning(false);
   }, []);
 
@@ -157,6 +163,18 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
           {planSteps.map((s, i) => (
             <div key={i} className="whitespace-nowrap overflow-ellipsis overflow-hidden">
               {i+1}. {String(s.tool)} {formatArgs(s.args)}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Execution trace */}
+      {trace.length > 0 && (
+        <div className="mb-2 bg-gray-900/60 rounded p-1 text-[10px] select-text" style={{ maxHeight: 120, overflowY: 'auto' }}>
+          <div className="text-gray-400 mb-1">Execution</div>
+          {trace.map((t, i) => (
+            <div key={i} className={t.kind==='tool'? 'text-blue-300' : t.kind==='var'? 'text-yellow-300' : t.kind==='error'? 'text-red-300' : t.kind==='warn'? 'text-orange-300' : 'text-gray-300'}>
+              {t.text}
             </div>
           ))}
         </div>

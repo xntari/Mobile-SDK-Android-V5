@@ -20,6 +20,11 @@ Status Summary
 - Bridge: uses existing commands (`gimbal_tap_target`, `camera_laser_enable`, `camera_laser_measure`).
 - Build: UI compiles; no changes to existing features.
 
+Planner + DSL (next evolution)
+- The planner should generate a formal plan (DSL) rather than ad-hoc steps. See `docs/AGENT_DSL.md`.
+- The DSL supports variables, if/while, and templates like `measure_object` and `track_object`.
+- The current executor already interprets a flat step list; we will extend it to a small subset of the DSL (while/if with bounds).
+
 Key Files
 - UI components
   - `dji-controller-interface/src/components/AgentPanel.tsx`
@@ -106,9 +111,10 @@ Roadmap / Next Steps
 1) Add real detector backend (OWL‑ViT) and a config toggle to enable/disable the naive fallback.
 2) Add “Describe scene” using top‑K detections → summary.
 3) Lens policy: start Wide, re‑detect on Zoom if small bbox.
-4) Planner service (cloud) producing plan JSON with:
+4) Planner service (cloud) producing a DSL plan with:
    - confirm_flight gate; preflight checks (battery, GPS fix, mode).
    - retries/fallbacks (target_not_found → re-detect or alternate phrase).
+   - measure_object and track_object templates.
 5) Mission tools integration (Phase 3): create waypoints from LRF GPS; start/monitor mission; RTL/hover/abort.
 6) Adaptation loop: on runtime events (battery low, obstacle flag, hw error) request a plan patch instead of full replan.
 

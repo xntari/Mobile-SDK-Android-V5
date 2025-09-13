@@ -8,6 +8,8 @@ export interface OrchestratorOptions {
   onResult?: (result: { text: string }) => void;
   onStep?: (info: { id: string; state: 'running' | 'done' | 'error'; ms?: number; note?: string }) => void;
   onPlan?: (steps: any[]) => void;
+  isCancelled?: () => boolean;
+  onTrace?: (line: string, kind?: 'tool'|'var'|'info'|'warn'|'error') => void;
 }
 
 function extractQueryFromInstruction(text: string): { query: string; intent: 'measure'|'coords'|'describe'|'detect' } {
@@ -58,11 +60,13 @@ export async function runFindMeasure(
   const img = await getSnapshot();
   onStep?.({ id: 'snapshot', state: 'done', ms: performance.now() - tSnap });
   log('Snapshot captured');
+  opts.onTrace?.('snapshot();', 'tool');
 
   // Detect
   onStep?.({ id: 'detect', state: 'running' });
   const tDet = performance.now();
   const { detections, meta } = await analyzeDetect({ imageBase64: img, query: phrase });
+  opts.onTrace?.(`det = detect("${phrase}"); // ${detections.length} boxes`, 'tool');
   onStep?.({ id: 'detect', state: 'done', ms: performance.now() - tDet, note: `${(meta?.backend)||''}` });
   const httpInfo = meta?.httpBoxes !== undefined ? ` (http boxes=${meta?.httpBoxes})` : '';
   if (meta?.backend === 'fallback' && (meta?.httpBoxes ?? 0) === 0) {
@@ -85,15 +89,19 @@ export async function runFindMeasure(
   const cy = clamp01((best.y1 + best.y2) / 2);
   const scorePct = best.score ? `${Math.round((best.score || 0) * 100)}%` : 'n/a';
   log(`Chosen box score=${scorePct} center=(${cx.toFixed(3)}, ${cy.toFixed(3)})`);
+  opts.onTrace?.(`p = det[0]; p.cx=${cx.toFixed(3)}, p.cy=${cy.toFixed(3)}, p.score=${scorePct}`, 'var');
 
   // Center camera on target
   onStep?.({ id: 'look_at', state: 'running' });
   const tLook = performance.now();
-  // Clear overlay prior to slewing for easier visual debug
+  // Let the pre-slew box render at least one frame, then clear
+  await flushUI();
   try { showDetections?.([]); } catch {}
+  await flushUI();
   await sendBridge({ type: 'gimbal_tap_target', data: { x: cx, y: cy } });
   await sleep(600);
   onStep?.({ id: 'look_at', state: 'done', ms: performance.now() - tLook });
+  opts.onTrace?.('look_at(p.cx, p.cy);', 'tool');
 
   // Optional: re-detect after settle to update overlay (helps visual alignment)
   try {
@@ -103,6 +111,12 @@ export async function runFindMeasure(
     if (post?.detections?.length) {
       showDetections?.(post.detections);
       log(`post-detect → ${post.detections.length}`);
+      const b = pickBest(post.detections);
+      opts.onTrace?.(`post = detect("${phrase}"); // ${post.detections.length} boxes`, 'tool');
+      if (b) {
+        const pcx = clamp01((b.x1 + b.x2)/2); const pcy = clamp01((b.y1 + b.y2)/2);
+        opts.onTrace?.(`post_best: cx=${pcx.toFixed(3)}, cy=${pcy.toFixed(3)}`, 'var');
+      }
     }
     onStep?.({ id: 'post_detect', state: 'done', ms: performance.now() - tPost });
   } catch {}
@@ -121,6 +135,7 @@ export async function runFindMeasure(
   // Result will arrive asynchronously via bridge; we still compose a textual ack here
   log(`measure @ center (0.500, 0.500) → sent`);
   onStep?.({ id: 'laser_measure', state: 'done', ms: performance.now() - tMeas });
+  opts.onTrace?.('sleep(150); laser_enable(true); laser_measure(0.5,0.5);', 'tool');
 
   const took = Date.now() - start;
   onResult?.({ text: `Locked target and measuring. (${took} ms)` });
@@ -139,6 +154,13 @@ function pickBest(dets: Detection[]): Detection {
 
 function clamp01(n: number) { return Math.max(0.02, Math.min(0.98, n)); }
 function sleep(ms: number) { return new Promise(res => setTimeout(res, ms)); }
+async function flushUI() {
+  try {
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+  } catch {
+    await sleep(0);
+  }
+}
 
 // Optional: plan executor. Tries to fetch a JSON plan and execute a subset of tools.
 export async function runInstruction(
@@ -151,18 +173,27 @@ export async function runInstruction(
     const resp = await fetch(plannerUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction }) });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const plan = await resp.json();
-    let steps: any[] = plan?.steps || [];
-    if (!Array.isArray(steps) || steps.length === 0) throw new Error('no steps');
-    log(`Planner: ${steps.length} steps`);
-    try { log(`Plan: ${JSON.stringify(steps).slice(0, 300)}${steps.length>0? ' …' : ''}`); } catch {}
-    // Sanitize detect query using local parser so free-form phrases still work
-    steps = sanitizePlan(steps, instruction, log);
-    opts.onPlan?.(steps);
-    for (let i = 0; i < steps.length; i++) {
-      const s = steps[i];
-      await execStep(s, opts, log);
+    // Prefer DSL program if provided
+    if (plan?.program && plan.program?.body) {
+      const body = Array.isArray(plan.program.body) ? plan.program.body : [];
+      log(`Planner: program with ${body.length} nodes`);
+      try { log(`Plan: ${JSON.stringify(plan.program.body).slice(0, 300)}${body.length>0? ' …' : ''}`); } catch {}
+      await runProgram(plan.program, instruction, opts, log);
+      return;
+    } else {
+      let steps: any[] = plan?.steps || [];
+      if (!Array.isArray(steps) || steps.length === 0) throw new Error('no steps');
+      log(`Planner: ${steps.length} steps`);
+      try { log(`Plan: ${JSON.stringify(steps).slice(0, 300)}${steps.length>0? ' …' : ''}`); } catch {}
+      // Sanitize detect query using local parser so free-form phrases still work
+      steps = sanitizePlan(steps, instruction, log);
+      opts.onPlan?.(steps);
+      for (let i = 0; i < steps.length; i++) {
+        const s = steps[i];
+        await execStep(s, opts, log);
+      }
+      return;
     }
-    return;
   } catch (e) {
     log(`Planner unavailable, using built-in flow (${String(e)})`);
     const { query } = extractQueryFromInstruction(instruction);
@@ -190,6 +221,11 @@ async function execStep(step: any, opts: OrchestratorOptions, log: (l: string) =
       showDetections?.(detections);
       log(`detect("${q}") → ${detections.length} [${meta?.backend || 'n/a'}]`);
       (execStep as any)._lastDetections = detections;
+      if (detections[0]) {
+        const cx = clamp01((detections[0].x1 + detections[0].x2)/2);
+        const cy = clamp01((detections[0].y1 + detections[0].y2)/2);
+        opts.onTrace?.(`det_best: cx=${cx.toFixed(3)}, cy=${cy.toFixed(3)}, score=${Math.round((detections[0].score||0)*100)}%`, 'var');
+      }
       onStep?.({ id: tool, state: 'done', ms: performance.now() - t0 });
       return;
     }
@@ -204,7 +240,10 @@ async function execStep(step: any, opts: OrchestratorOptions, log: (l: string) =
           x = cx; y = cy;
         } else { x = 0.5; y = 0.5; }
       }
+      // Allow pre-slew overlay to be visible once, then clear
+      await flushUI();
       try { showDetections?.([]); } catch {}
+      await flushUI();
       await sendBridge({ type: 'gimbal_tap_target', data: { x, y } });
       log(`look_at (${x.toFixed(3)}, ${y.toFixed(3)}) ✓`);
       onStep?.({ id: tool, state: 'done', ms: performance.now() - t0 });
@@ -267,3 +306,155 @@ function sanitizePlan(steps: any[], instruction: string, log: (l: string)=>void)
     return steps;
   }
 }
+
+// --------- DSL interpreter (v0) ---------
+type DSLExpr = any;
+type DSLNode = any;
+
+async function runProgram(program: { type?: string; body: DSLNode[] }, instruction: string, opts: OrchestratorOptions, log: (l:string)=>void) {
+  const ctx: any = { vars: {}, started: performance.now(), instruction };
+  // Sanitize detect queries in program using the original instruction
+  try {
+    for (const n of program.body||[]) {
+      if (n && n.type==='call' && n.tool==='detect' && n.args && n.args.query) {
+        const eq = extractQueryFromInstruction(String(n.args.query));
+        const ei = extractQueryFromInstruction(instruction);
+        n.args.query = (ei.query && ei.query.length <= eq.query.length) ? ei.query : eq.query;
+      }
+    }
+  } catch {}
+  for (const node of program.body || []) {
+    if (opts.isCancelled?.()) break;
+    await execNode(node, ctx, opts, log);
+  }
+}
+
+async function execNode(node: DSLNode, ctx: any, opts: OrchestratorOptions, log: (l:string)=>void) {
+  if (!node || typeof node !== 'object') return;
+  const t = String(node.type||'');
+  switch (t) {
+    case 'call': {
+      const tool = String(node.tool||'');
+      opts.onStep?.({ id: tool, state: 'running' });
+      opts.onTrace?.(`${tool}(${safeFmtArgs(node.args||{})});`, 'tool');
+      const t0 = performance.now();
+      const res = await callTool(tool, node.args||{}, ctx, opts, log);
+      opts.onStep?.({ id: tool, state: 'done', ms: performance.now()-t0 });
+      if (node.assign) { ctx.vars[node.assign] = res; opts.onTrace?.(`${String(node.assign)} = ${safeFmtVal(res)}`, 'var'); }
+      return;
+    }
+    case 'let': {
+      ctx.vars[String(node.name)] = evalExpr(node.value, ctx);
+      opts.onTrace?.(`${String(node.name)} = ${safeFmtVal(ctx.vars[String(node.name)])}`, 'var');
+      return;
+    }
+    case 'if': {
+      const cond = !!evalExpr(node.cond, ctx);
+      const run = async (arr:any[])=>{ for (const n of arr||[]) { if (opts.isCancelled?.()) break; await execNode(n, ctx, opts, log);} };
+      if (cond) { await run(node.then||[]); } else { await run(node.else||[]); }
+      return;
+    }
+    case 'while': {
+      const maxIter = Number(node.max_iter ?? 50);
+      const interval = Number(node.interval_ms ?? 500);
+      let i=0;
+      while (!opts.isCancelled?.() && i<maxIter && !!evalExpr(node.cond, {...ctx, vars:{...ctx.vars, elapsed_ms: performance.now()-ctx.started}})) {
+        for (const n of (node.body||[])) { if (opts.isCancelled?.()) break; await execNode(n, ctx, opts, log); }
+        i++;
+        if (interval>0) await sleep(interval);
+      }
+      return;
+    }
+    case 'wait': {
+      if (node.ms) { await sleep(Number(node.ms)); opts.onTrace?.(`sleep(${Number(node.ms)});`, 'tool'); }
+      return;
+    }
+    case 'respond': {
+      if (node.text) opts.onResult?.({ text: String(node.text) });
+      return;
+    }
+    default: return;
+  }
+}
+
+function evalExpr(expr: DSLExpr, ctx: any): any {
+  if (expr==null) return null;
+  if (typeof expr !== 'object') return expr;
+  if (typeof expr.var === 'string') return ctx.vars[expr.var];
+  if (typeof expr.get === 'string') {
+    let v = ctx.vars[expr.get];
+    for (const k of (expr.path||[])) v = v?.[k];
+    return v;
+  }
+  const op = expr.op;
+  if (op) {
+    const l = evalExpr(expr.left, ctx); const r = evalExpr(expr.right, ctx);
+    switch (op) {
+      case '>': return l>r; case '>=': return l>=r; case '<': return l<r; case '<=': return l<=r; case '==': return l==r; case '!=': return l!=r;
+      case 'and': return (!!l)&& (!!evalExpr(expr.right, ctx));
+      case 'or': return (!!l)|| (!!evalExpr(expr.right, ctx));
+      case 'not': return !evalExpr(expr.left, ctx);
+    }
+  }
+  return null;
+}
+
+async function callTool(tool: string, args: any, ctx: any, opts: OrchestratorOptions, log: (l:string)=>void) {
+  switch (tool) {
+    case 'snapshot': {
+      const img = await opts.getSnapshot();
+      return { image: img };
+    }
+    case 'detect': {
+      const query = String(args?.query||'object');
+      const img = await opts.getSnapshot();
+      const { detections, meta } = await analyzeDetect({ imageBase64: img, query });
+      // augment with centers for convenience
+      const aug = detections.map(d=>({ ...d, cx: clamp01((d.x1+d.x2)/2), cy: clamp01((d.y1+d.y2)/2) }));
+      opts.showDetections?.(aug);
+      log(`detect("${query}") → ${aug.length} [${meta?.backend||'n/a'}]`);
+      // expose latest detection for subsequent calls even without assignment
+      ctx.vars.det = { detections: aug };
+      if (aug[0]) ctx.vars.p = aug[0];
+      if (aug[0]) opts.onTrace?.(`det_best: cx=${aug[0].cx.toFixed(3)}, cy=${aug[0].cy.toFixed(3)}, score=${Math.round((aug[0].score||0)*100)}%`, 'var');
+      return { detections: aug };
+    }
+    case 'look_at': {
+      let x = Number(args?.x); let y = Number(args?.y);
+      if (!isFinite(x) || !isFinite(y)) {
+        // try var p
+        const p = ctx.vars.p || ctx.vars.det?.detections?.[0];
+        x = clamp01(p?.cx ?? 0.5); y = clamp01(p?.cy ?? 0.5);
+      }
+      await flushUI(); opts.showDetections?.([]); await flushUI();
+      await opts.sendBridge({ type: 'gimbal_tap_target', data: { x, y } });
+      opts.onTrace?.(`→ look_at(${x.toFixed(3)}, ${y.toFixed(3)});`, 'tool');
+      return { ok: true };
+    }
+    case 'laser_enable': {
+      await opts.sendBridge({ type: 'camera_laser_enable', data: { enabled: !!args?.enabled } });
+      return { ok: true };
+    }
+    case 'laser_measure': {
+      const x = isFinite(Number(args?.x)) ? Number(args.x) : 0.5;
+      const y = isFinite(Number(args?.y)) ? Number(args.y) : 0.5;
+      await opts.sendBridge({ type: 'camera_laser_measure', data: { x, y } });
+      return { ok: true };
+    }
+    case 'sleep': {
+      const ms = Number(args?.ms || 0);
+      if (ms > 0) await sleep(ms);
+      return { ok: true };
+    }
+    case 'respond': {
+      opts.onResult?.({ text: String(args?.text||'') });
+      return { ok: true };
+    }
+    default:
+      log(`unknown tool: ${tool}`);
+      return null;
+  }
+}
+
+function safeFmtArgs(a:any){ try{ return JSON.stringify(a)||'' }catch{ return ''}}
+function safeFmtVal(v:any){ try{ const s=JSON.stringify(v); return s && s.length>120? s.slice(0,120)+'…': s }catch{ return String(v) }}
