@@ -7,153 +7,13 @@ export interface OrchestratorOptions {
   showDetections?: (boxes: Detection[]) => void;
   onResult?: (result: { text: string }) => void;
   onStep?: (info: { id: string; state: 'running' | 'done' | 'error'; ms?: number; note?: string }) => void;
+  // Optional previews: legacy steps preview or full program
   onPlan?: (steps: any[]) => void;
+  onProgram?: (program: any) => void;
+  onHighLevelProgram?: (program: any) => void;
   isCancelled?: () => boolean;
   onTrace?: (line: string, kind?: 'tool'|'var'|'info'|'warn'|'error') => void;
   onPlanErrors?: (errors: Array<{ message: string; path?: string }>) => void;
-}
-
-function extractQueryFromInstruction(text: string): { query: string; intent: 'measure'|'coords'|'describe'|'detect' } {
-  const s = String(text || '').trim();
-  const low = s.toLowerCase();
-  // Normalize whitespace
-  const norm = low.replace(/\s+/g, ' ').trim();
-
-  // Common patterns
-  const m1 = norm.match(/^(find|look\s+for)\s+(?:the\s+)?(.+?)\s+(distance|dist|coords?|coordinates)\b/);
-  if (m1) return { query: m1[2], intent: (m1[3].startsWith('coord')? 'coords':'measure') };
-
-  const m2 = norm.match(/^(find|look\s+for)\s+(?:the\s+)?(coords?|coordinates)\s+(?:of|for|to)\s+(?:the\s+)?(.+)$/);
-  if (m2) return { query: m2[3], intent: 'coords' };
-
-  const m3 = norm.match(/^find\s+(?:the\s+)?distance\s+(?:to|of)\s+(?:the\s+)?(.+)$/);
-  if (m3) return { query: m3[1], intent: 'measure' };
-
-  const m4 = norm.match(/^measure\s+(?:the\s+)?distance\s*(?:to|of)?\s*(?:the\s+)?(.+)$/);
-  if (m4) return { query: m4[1], intent: 'measure' };
-
-  const m5 = norm.match(/^(coords?|coordinates)\s+(?:of|for)\s+(.+)$/);
-  if (m5) return { query: m5[2], intent: 'coords' };
-
-  // Track/follow/locate/center/focus patterns
-  const m7 = norm.match(/^track\s+(?:the\s+)?(.+)$/);
-  if (m7) return { query: m7[1], intent: 'detect' };
-  const m8 = norm.match(/^(?:please\s+)?follow\s+(?:the\s+)?(.+)$/);
-  if (m8) return { query: m8[1], intent: 'detect' };
-  const m9 = norm.match(/^locate\s+(?:the\s+)?(.+)$/);
-  if (m9) return { query: m9[1], intent: 'detect' };
-  const m10 = norm.match(/^keep\s+(?:the\s+)?(.+)\s+(?:center|centered)\b/);
-  if (m10) return { query: m10[1], intent: 'detect' };
-  const m11 = norm.match(/^center\s+(?:on\s+)?(?:the\s+)?(.+)$/);
-  if (m11) return { query: m11[1], intent: 'detect' };
-  const m12 = norm.match(/^focus\s+(?:on\s+)?(?:the\s+)?(.+)$/);
-  if (m12) return { query: m12[1], intent: 'detect' };
-
-  const m6 = norm.match(/^find\s+(.+)$/);
-  if (m6) {
-    // Remove leading determiners and trailing intent words
-    let q = m6[1].replace(/^(the|a|an)\s+/,'');
-    q = q.replace(/\b(distance|dist|coords?|coordinates)\b$/,'').trim();
-    return { query: q, intent: 'detect' };
-  }
-
-  // Fallback: treat full text as query
-  return { query: norm, intent: 'detect' };
-}
-
-export async function runFindMeasure(
-  phrase: string,
-  opts: OrchestratorOptions
-) {
-  const { getSnapshot, sendBridge, log, showDetections, onResult, onStep } = opts;
-  const start = Date.now();
-  log(`Instruction: find "${phrase}" and measure distance`);
-
-  // Snapshot
-  onStep?.({ id: 'snapshot', state: 'running' });
-  const tSnap = performance.now();
-  const img = await getSnapshot();
-  onStep?.({ id: 'snapshot', state: 'done', ms: performance.now() - tSnap });
-  log('Snapshot captured');
-  opts.onTrace?.('snapshot();', 'tool');
-
-  // Detect
-  onStep?.({ id: 'detect', state: 'running' });
-  const tDet = performance.now();
-  const { detections, meta } = await analyzeDetect({ imageBase64: img, query: phrase });
-  opts.onTrace?.(`det = detect("${phrase}"); // ${detections.length} boxes`, 'tool');
-  onStep?.({ id: 'detect', state: 'done', ms: performance.now() - tDet, note: `${(meta?.backend)||''}` });
-  const httpInfo = meta?.httpBoxes !== undefined ? ` (http boxes=${meta?.httpBoxes})` : '';
-  if (meta?.backend === 'fallback' && (meta?.httpBoxes ?? 0) === 0) {
-    log(`Detector: http @ ${meta?.url || ''} returned 0 boxes; using fallback`);
-  } else {
-    log(`Detector: ${(meta?.backend || 'unknown')}${meta?.url ? ` @ ${meta.url}` : ''}${httpInfo}`);
-  }
-  if (!detections || detections.length === 0) {
-    const text = `I couldn’t find "${phrase}".`;
-    log(text);
-    onResult?.({ text });
-    return;
-  }
-  // If fallback used, annotate labels to make it visible on overlay
-  const boxes = (meta?.backend === 'fallback') ? detections.map(d => ({ ...d, label: (d.label || phrase) })) : detections;
-  showDetections?.(boxes);
-  log(`Detections: ${boxes.length}`);
-  const best = pickBest(boxes);
-  const cx = clamp01((best.x1 + best.x2) / 2);
-  const cy = clamp01((best.y1 + best.y2) / 2);
-  const scorePct = best.score ? `${Math.round((best.score || 0) * 100)}%` : 'n/a';
-  log(`Chosen box score=${scorePct} center=(${cx.toFixed(3)}, ${cy.toFixed(3)})`);
-  opts.onTrace?.(`p = det[0]; p.cx=${cx.toFixed(3)}, p.cy=${cy.toFixed(3)}, p.score=${scorePct}`, 'var');
-
-  // Center camera on target
-  onStep?.({ id: 'look_at', state: 'running' });
-  const tLook = performance.now();
-  // Let the pre-slew box render at least one frame, then clear
-  await flushUI();
-  try { showDetections?.([]); } catch {}
-  await flushUI();
-  await sendBridge({ type: 'gimbal_tap_target', data: { x: cx, y: cy } });
-  await sleep(600);
-  onStep?.({ id: 'look_at', state: 'done', ms: performance.now() - tLook });
-  opts.onTrace?.('look_at(p.cx, p.cy);', 'tool');
-
-  // Optional: re-detect after settle to update overlay (helps visual alignment)
-  try {
-    onStep?.({ id: 'post_detect', state: 'running' });
-    const tPost = performance.now();
-    const post = await analyzeDetect({ imageBase64: await getSnapshot(), query: phrase });
-    if (post?.detections?.length) {
-      showDetections?.(post.detections);
-      log(`post-detect → ${post.detections.length}`);
-      const b = pickBest(post.detections);
-      opts.onTrace?.(`post = detect("${phrase}"); // ${post.detections.length} boxes`, 'tool');
-      if (b) {
-        const pcx = clamp01((b.x1 + b.x2)/2); const pcy = clamp01((b.y1 + b.y2)/2);
-        opts.onTrace?.(`post_best: cx=${pcx.toFixed(3)}, cy=${pcy.toFixed(3)}`, 'var');
-      }
-    }
-    onStep?.({ id: 'post_detect', state: 'done', ms: performance.now() - tPost });
-  } catch {}
-
-  // Measure with LRF at center (more reliable after Look At)
-  onStep?.({ id: 'laser_enable', state: 'running' });
-  const tEn = performance.now();
-  await sendBridge({ type: 'camera_laser_enable', data: { enabled: true } });
-  onStep?.({ id: 'laser_enable', state: 'done', ms: performance.now() - tEn });
-  await sleep(150);
-
-  const mx = 0.5, my = 0.5;
-  onStep?.({ id: 'laser_measure', state: 'running' });
-  const tMeas = performance.now();
-  const res: any = await sendBridge({ type: 'camera_laser_measure', data: { x: mx, y: my } });
-  // Result will arrive asynchronously via bridge; we still compose a textual ack here
-  log(`measure @ center (0.500, 0.500) → sent`);
-  onStep?.({ id: 'laser_measure', state: 'done', ms: performance.now() - tMeas });
-  opts.onTrace?.('sleep(150); laser_enable(true); laser_measure(0.5,0.5);', 'tool');
-
-  const took = Date.now() - start;
-  onResult?.({ text: `Locked target and measuring. (${took} ms)` });
 }
 
 function pickBest(dets: Detection[]): Detection {
@@ -188,21 +48,26 @@ export async function runInstruction(
     const resp = await fetch(plannerUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction }) });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const plan = await resp.json();
+    if (plan?.high_level_program) { try { opts.onHighLevelProgram?.(plan.high_level_program); } catch {} }
     // Validation errors from planner
     if (Array.isArray((plan as any)?.errors) && (plan as any).errors.length) {
+      if (plan?.program) { try { opts.onProgram?.(plan.program); } catch {} }
       opts.onPlanErrors?.((plan as any).errors);
       return;
     }
     // Prefer DSL program if provided
     if (plan?.program && plan.program?.body) {
+      // Surface full JSON program to UI for pretty rendering
+      try { opts.onProgram?.(plan.program); } catch {}
       const body = Array.isArray(plan.program.body) ? plan.program.body : [];
       const countOps = (nodes:any[]):number => nodes.reduce((acc,n)=>{
-        if (!n) return acc; if (n.type==='while' || n.type==='if') {
+        if (!n) return acc; if (n.type==='while' || n.type==='if' || n.type==='repeat') {
           const t = n.then||[]; const e = n.else||[]; const b = n.body||[]; return acc + 1 + countOps(t)+countOps(e)+countOps(b);
         } else return acc+1;
       },0);
       log(`Planner: program with ${countOps(body)} operations`);
-      try { log(`Plan: ${JSON.stringify(plan.program.body).slice(0, 300)}${body.length>0? ' …' : ''}`); } catch {}
+      // Keep log concise; detailed pretty view handled by UI using onProgram
+      try { log(`Plan tools: ${body.map((b:any)=>b?.tool||b?.type).filter(Boolean).join(', ')}`); } catch {}
       await runProgram(plan.program, instruction, opts, log);
       return;
     } else {
@@ -304,24 +169,7 @@ async function execStep(step: any, opts: OrchestratorOptions, log: (l: string) =
   }
 }
 
-function sanitizePlan(steps: any[], instruction: string, log: (l: string)=>void): any[] {
-  try {
-    const out = steps.map(s => ({ ...s, args: { ...(s.args || {}) } }));
-    // If there is a detect step, clean its query using the instruction and its own query
-    const idx = out.findIndex(s => String(s.tool) === 'detect');
-    if (idx >= 0) {
-      const given = String(out[idx].args?.query || instruction || '').trim();
-      const eq = extractQueryFromInstruction(given);
-      const ei = extractQueryFromInstruction(instruction);
-      const chosen = (ei.query && ei.query.length <= given.length) ? ei.query : eq.query;
-      out[idx].args.query = chosen;
-      log(`sanitized query → "${chosen}"`);
-    }
-    return out;
-  } catch {
-    return steps;
-  }
-}
+// Legacy NL parsing & sanitization removed — planner is authoritative.
 
 // --------- DSL interpreter (v0) ---------
 type DSLExpr = any;
@@ -360,14 +208,24 @@ async function execNode(node: DSLNode, ctx: any, opts: OrchestratorOptions, log:
       if (cond) { await run(node.then||[]); } else { await run(node.else||[]); }
       return;
     }
+    case 'repeat': {
+      const times = Math.max(0, Number(node.times||0));
+      for (let i=0;i<times;i++) {
+        for (const n of (node.body||[])) { if (opts.isCancelled?.()) break; await execNode(n, ctx, opts, log); }
+        if (opts.isCancelled?.()) break;
+      }
+      return;
+    }
     case 'while': {
       const maxIter = Number(node.max_iter ?? 50);
       const interval = Number(node.interval_ms ?? 500);
-      let i=0;
-      while (!opts.isCancelled?.() && i<maxIter && !!evalExpr(node.cond, {...ctx, vars:{...ctx.vars, elapsed_ms: performance.now()-ctx.started}})) {
-        for (const n of (node.body||[])) { if (opts.isCancelled?.()) break; await execNode(n, ctx, opts, log); }
+      const loopStart = performance.now();
+      const mkLoopCtx = () => ({ ...ctx, vars: { ...ctx.vars, elapsed_ms: performance.now() - loopStart } });
+      let i = 0;
+      while (!opts.isCancelled?.() && i < maxIter && !!evalExpr(node.cond, mkLoopCtx())) {
+        for (const n of (node.body || [])) { if (opts.isCancelled?.()) break; await execNode(n, ctx, opts, log); }
         i++;
-        if (interval>0) await sleep(interval);
+        if (interval > 0) await sleep(interval);
       }
       return;
     }
@@ -413,13 +271,18 @@ async function callTool(tool: string, args: any, ctx: any, opts: OrchestratorOpt
     }
     case 'detect': {
       const query = String(args?.query||'object');
-      const img = await opts.getSnapshot();
-      const { detections, meta } = await analyzeDetect({ imageBase64: img, query });
-      // augment with centers for convenience
-      const aug = detections.map(d=>({ ...d, cx: clamp01((d.x1+d.x2)/2), cy: clamp01((d.y1+d.y2)/2) }));
+      const maxTries = Math.max(1, Math.min(3, Number(args?.retries ?? 2)));
+      let lastMeta: any = null; let out: Detection[] = [];
+      for (let i=0;i<maxTries;i++) {
+        const img = await opts.getSnapshot();
+        const { detections, meta } = await analyzeDetect({ imageBase64: img, query });
+        lastMeta = meta; out = detections;
+        if (detections.length > 0) break;
+        if (i < maxTries-1) await sleep(200);
+      }
+      const aug = out.map(d=>({ ...d, cx: clamp01((d.x1+d.x2)/2), cy: clamp01((d.y1+d.y2)/2) }));
       opts.showDetections?.(aug);
-      log(`detect("${query}") → ${aug.length} [${meta?.backend||'n/a'}]`);
-      // expose latest detection for subsequent calls even without assignment
+      log(`detect("${query}") → ${aug.length} [${lastMeta?.backend||'n/a'}]`);
       ctx.vars.det = { detections: aug };
       if (aug[0]) ctx.vars.p = aug[0];
       if (aug[0]) opts.onTrace?.(`det_best: cx=${aug[0].cx.toFixed(3)}, cy=${aug[0].cy.toFixed(3)}, score=${Math.round((aug[0].score||0)*100)}%`, 'var');
@@ -432,8 +295,15 @@ async function callTool(tool: string, args: any, ctx: any, opts: OrchestratorOpt
         const p = ctx.vars.p || ctx.vars.det?.detections?.[0];
         x = clamp01(p?.cx ?? 0.5); y = clamp01(p?.cy ?? 0.5);
       }
+      // Enforce SDK cooldown (~500ms) between look_at commands
+      const now = performance.now();
+      const last = (ctx.__lastLookAtTs ?? 0) as number;
+      const minCooldown = 500;
+      const waitMs = Math.max(0, minCooldown - (now - last));
+      if (waitMs > 0) await sleep(waitMs);
       await flushUI(); opts.showDetections?.([]); await flushUI();
       await opts.sendBridge({ type: 'gimbal_tap_target', data: { x, y } });
+      ctx.__lastLookAtTs = performance.now();
       opts.onTrace?.(`→ look_at(${x.toFixed(3)}, ${y.toFixed(3)});`, 'tool');
       return { ok: true };
     }

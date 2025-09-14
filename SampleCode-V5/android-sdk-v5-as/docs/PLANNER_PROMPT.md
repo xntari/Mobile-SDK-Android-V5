@@ -16,7 +16,8 @@ DSL (JSON only)
   - Call: {"type":"call","tool":<str>,"args":{…},"assign"?:<var>}
   - Let:  {"type":"let","name":<var>,"value":Expr}
   - If:   {"type":"if","cond":Expr,"then":[Stmt,…],"else"?:[Stmt,…]}
-  - While:{"type":"while","cond":Expr,"body":[Stmt,…],"max_iter"?:<int>,"interval_ms"?:<int>}
+- While:{"type":"while","cond":Expr,"body":[Stmt,…],"max_iter"?:<int>,"interval_ms"?:<int>}
+  - Repeat:{"type":"repeat","times":<int>,"body":[Stmt,…]}
   - Wait: {"type":"wait","ms":<int>}
   - Respond:{"type":"respond","text"?:<str>}
 - Expr: literal | {"var":<name>} | {"get":<var>,"path":[…]} |
@@ -44,26 +45,49 @@ Formatting rules
 - Keep variables explicit when needed via let or assign.
 
 Few-shot examples
-Example 1
-Instruction: find knob
+Example 1 – measure distance to an object
+Instruction: measure the distance to OBJECT_A
 Response:
 {"program": {"type":"program","body":[
-  {"type":"macro","name":"measure_object","args":{"query":"knob"}}
+  {"type":"macro","name":"measure_object","args":{"query":"OBJECT_A"}}
 ]}}
 
-Example 2
-Instruction: track picture for 5 seconds
+Example 2 – track an object for N seconds
+Instruction: track OBJECT_A for 5 seconds
 Response:
 {"program": {"type":"program","body":[
-  {"type":"macro","name":"track_object","args":{"query":"picture","seconds":5}}
+  {"type":"macro","name":"track_object","args":{"query":"OBJECT_A","seconds":5}}
 ]}}
 
-Example 3
-Instruction: find car and track it for 3 seconds then find license plate
+Example 3 – compose multiple actions
+Instruction: find OBJECT_A and track it for 3 seconds then find OBJECT_B
 Response:
 {"program": {"type":"program","body":[
-  {"type":"macro","name":"measure_object","args":{"query":"car"}},
-  {"type":"macro","name":"track_object","args":{"query":"car","seconds":3}},
-  {"type":"macro","name":"measure_object","args":{"query":"license plate"}}
+  {"type":"macro","name":"measure_object","args":{"query":"OBJECT_A"}},
+  {"type":"macro","name":"track_object","args":{"query":"OBJECT_A","seconds":3}},
+  {"type":"macro","name":"measure_object","args":{"query":"OBJECT_B"}}
 ]}}
 
+Example 4 – repeat a block of steps
+Instruction: find OBJECT_A and track it for 3 seconds, then find OBJECT_B. wait one second. Repeat these steps three times.
+Response:
+{"program": {"type":"program","body":[
+  {"type":"repeat","times":3,"body":[
+    {"type":"macro","name":"measure_object","args":{"query":"OBJECT_A"}},
+    {"type":"macro","name":"track_object","args":{"query":"OBJECT_A","seconds":3}},
+    {"type":"macro","name":"measure_object","args":{"query":"OBJECT_B"}},
+    {"type":"wait","ms":1000}
+  ]}
+]}}
+
+Example 4
+Instruction: find toothpaste and track it for 3 seconds, then find door knob. wait one second. Repeat these steps three times.
+Response:
+{"program": {"type":"program","body":[
+  {"type":"repeat","times":3,"body":[
+    {"type":"macro","name":"measure_object","args":{"query":"toothpaste"}},
+    {"type":"macro","name":"track_object","args":{"query":"toothpaste","seconds":3}},
+    {"type":"macro","name":"measure_object","args":{"query":"door knob"}},
+    {"type":"wait","ms":1000}
+  ]}
+]}}
