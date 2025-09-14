@@ -8,37 +8,38 @@ Final Goal (Phase 3+)
 - Fully autonomous, tool‑using agent that plans and executes missions from natural language, adapts to conditions (target not found, obstacles, HW issues), and keeps a human‑override controller in the loop.
 - High‑level only: plan/mission APIs (no direct stick micromanagement), with confirmations and safety checks.
 
-Current Phase (Phase 1: Perception + Camera Tools)
-- Scope: Single‑step tasks on the H20N camera via existing bridge tools.
-- Capabilities: “find X, center camera, measure distance/GPS, respond”. Optional “describe scene”.
-- Planner: not yet; simple orchestrator executes a fixed flow.
+Current Phase (Program + Camera Tools)
+- Scope: Execute a formal program (DSL) from a planner via existing bridge tools (H20N/FPV).
+- Capabilities: find/center/measure/track; repeatable blocks; debug “describe” shows all objects with labels and confidences.
+- Planner: program‑only service returns both the high‑level macro program and the fully expanded program; server expands macros recursively and validates strictly.
 
 Status Summary
-- UI (Agent): free‑floating panel with Run/Stop, detector threshold toggle, plan preview, execution trace (code‑like), ribbon with per‑step timings, LRF readout and raw payload logging.
-- Executor: runs a single formal program (DSL) returned by the planner; shows resolved values (e.g., look_at(0.342,0.700)).
-- Vision: HTTP `/detect` service; threshold can be adjusted in the Agent. Boxes render pre‑slew, clear on slew, re‑detect post‑slew.
-- Bridge: uses existing commands (`gimbal_tap_target`, `camera_laser_enable`, `camera_laser_measure`).
-- Planner: program‑only contract; server expands macros, validates program (undefined vars, unbounded loops). UI shows a Plan errors panel and blocks invalid plans.
+- UI (Agent): free‑floating, movable, resizable; Run/Stop; detector threshold toggle; ribbon timings; Plan errors panel; Program viewer (toggle: High‑level/Final); execution trace with auto‑scroll. Pane sizes persist in localStorage.
+- Executor: deterministic interpreter (no NL parsing). Handles execution‑time realities only: detect retries; look_at cooldown. While loop timing is measured per loop.
+- Vision: HTTP `/detect` (open‑vocabulary) and `/describe` (multi‑label) services. Threshold adjustable in UI. Overlays render pre‑slew and post‑slew.
+- Bridge: `gimbal_tap_target`, `camera_laser_enable`, `camera_laser_measure`.
+- Planner: program‑only; returns `{ program, high_level_program }` or `{ errors }`. Server expands macros until only primitive/structural nodes remain and validates strictly.
 
 Planner + DSL (program‑only)
 - The planner generates a formal program (DSL). See `docs/AGENT_DSL.md`.
-- Macros (high‑level): `measure_object`, `track_object` — expanded server‑side into primitives.
-- Strict validation: undefined variables and unbounded loops rejected up‑front.
+- Macros (high‑level): `measure_object` and `track_object` (expands to `repeat`). Macros expanded recursively server‑side; planner returns both high‑level and final programs.
+- Strict validation: undefined variables; while requires `max_iter` and `interval_ms`; repeat requires positive `times`; unexpanded macros rejected.
 
 Key Files
 - UI components
   - `dji-controller-interface/src/components/AgentPanel.tsx`
   - `dji-controller-interface/src/components/H20NDisplay.tsx` (mounts Agent panel, snapshot, overlays)
+  - `dji-controller-interface/src/components/FPVDisplay.tsx` (FPV canvas + describe debug)
 - Orchestrator and Vision
   - `dji-controller-interface/src/agent/orchestrator.ts`
-  - `dji-controller-interface/src/agent/visionClient.ts` (HTTP `/detect` facade + fallback)
+  - `dji-controller-interface/src/agent/visionClient.ts` (HTTP `/detect` + `/describe` facades)
 - Optional servers (local)
-  - `tools/vision_detect_server.py` (FastAPI, OWL‑ViT if available, otherwise dummy center box)
-  - `tools/planner_service.py` (FastAPI, uses OpenAI if `OPENAI_API_KEY` is set, otherwise returns a heuristic plan)
+  - `tools/vision_detect_server.py` (FastAPI; OWL‑ViT if available; `/detect` and `/describe`)
+  - `tools/planner_service.py` (FastAPI; OpenAI via `OPENAI_API_KEY`)
 
-User‑Visible Behavior (Phase 1)
-- Open the Agent panel on the H20N view, type “find car”, click Run.
-- The agent snapshots the frame, calls `/detect`, centers the best box, waits ~0.6s, enables laser, measures at the target, and returns a short confirmation. The standard LRF overlay displays distance.
+User‑Visible Behavior
+- H20N/FPV: click “Describe” → boxes with labels/confidences overlay the video (debug only).
+- Agent on H20N: “find person” → Run. Program (High‑level/Final) is shown; the view recenters, laser rangefinder measures; execution trace shows resolved values.
 
 Tool / API Contracts
 - Bridge (already implemented)
@@ -46,8 +47,9 @@ Tool / API Contracts
   - `camera_laser_enable { enabled }`
   - `camera_laser_measure { x, y }` → async `camera_laser_result { distance_m, lat, lon, alt_m, ... }`
 - Vision facade
-  - HTTP: `POST http://127.0.0.1:9001/detect { image, query }` → `{ boxes: [{x1,y1,x2,y2,score,label?}] }`
-  - Coordinates normalized to [0,1]; server can return 0 boxes.
+  - Detect: `POST http://127.0.0.1:9001/detect { image, query, threshold? }` → `{ boxes: [{x1,y1,x2,y2,score,label?}] }`
+  - Describe: `POST http://127.0.0.1:9001/describe { image, labels?, threshold?, top_k? }` → `{ boxes: [{x1,y1,x2,y2,score,label?}] }`
+  - Coordinates normalized to [0,1].
 
 Setup: Mac (MacBook Air)
 1) UI + Bridge
@@ -74,31 +76,15 @@ Models (Phase 1)
 - Detector: OWL‑ViT (open vocabulary) recommended for local. It’s small, works on CPU, and supports free‑text queries.
 - Captioning/OCR: not needed yet. Add BLIP2 or PaddleOCR later if “describe”/text is required.
 
-Planner Service (Phase 2)
-- Goal: Convert instructions into a short JSON plan of tool calls with guardrails (confirm flight, preflight checks, retries).
-- Cloud path (fastest/reliable):
-  - Create a tiny Node/TS or Python service that exposes `POST /plan { instruction, status }` and calls your LLM (e.g., GPT‑4o‑mini / function‑calling) to return JSON steps using your tool schema.
-  - Env: `OPENAI_API_KEY`.
-  - Output example:
-    ```json
-    {"steps":[
-      {"tool":"snapshot","args":{}},
-      {"tool":"detect","args":{"query":"truck"}},
-      {"tool":"look_at","args":{"x":"$det.cx","y":"$det.cy"}},
-      {"tool":"sleep","args":{"ms":600}},
-      {"tool":"laser_enable","args":{"enabled":true}},
-      {"tool":"laser_measure","args":{"x":"$det.cx","y":"$det.cy"}},
-      {"tool":"respond","args":{}}
-    ]}
-    ```
-- Local path (later):
-  - Swap the cloud LLM with a local instruct model (e.g., Llama‑3.1/3.2‑8B‑Instruct) and a small LoRA on “instruction → plan JSON”.
-  - Keep the same `/plan` schema so the UI doesn’t change.
+Planner Service (program‑only)
+- Endpoint: `POST /plan { instruction }` → `{ program, high_level_program }` or `{ errors, program?, high_level_program? }`
+- Server responsibilities: prompt LLM → receive high‑level macro program → recursively expand macros → validate strictly (undefined vars, bounded while/interval_ms, positive repeat.times) → reject unexpanded macros.
+- Prompt examples are semantic (OBJECT_A/OBJECT_B) rather than specific nouns; track maps to a repeat loop.
 
 Planner service quickstart (this repo)
 - `pip install fastapi uvicorn pydantic openai`
 - `OPENAI_API_KEY=sk-... python tools/planner_service.py`
-- Endpoint: `http://127.0.0.1:9002/plan` with body `{ "instruction": "find car and measure" }`
+- Endpoint: `http://127.0.0.1:9002/plan` with body `{ "instruction": "find OBJECT_A and track it" }`
 
 Performance Notes
 - MacBook Air (CPU): OWL‑ViT base runs in ~0.6–2.0 s per image depending on size; acceptable for POC. Keep queries short and run at 1280×720 or similar.
@@ -116,7 +102,7 @@ Roadmap / Next Steps
 6) Adaptation: on runtime events, re‑plan by calling planner with summarized context.
 
 Configuration
-- Vision endpoint override: set `window.__VISION_URL__` (optional). Adjust threshold in the Agent panel.
+- Vision endpoints: set `window.__VISION_URL__` for `/detect` and `window.__DESCRIBE_URL__` for `/describe` (optional). Adjust threshold in UI.
 - Planner endpoint: `window.__PLANNER_URL__` (optional; defaults to `http://127.0.0.1:9002/plan`).
 - Planner env: `OPENAI_API_KEY` (required), `PLANNER_MODEL` (defaults to `gpt-4o-mini`).
 

@@ -54,6 +54,7 @@ DSL (JSON only)
   - While:{"type":"while","cond":Expr,"body":[Stmt,…],"max_iter"?:<int>,"interval_ms"?:<int>}
   - Wait: {"type":"wait","ms":<int>}
   - Respond:{"type":"respond","text"?:<str>}
+  - Repeat:{"type":"repeat","times":<int>,"body":[Stmt,…]}  // exact N iterations, no condition
 - Expr: literal | {"var":<name>} | {"get":<var>,"path":[…]} |
         {"op":"<|<=|>|>=|==|!=|and|or|not","left"?:Expr,"right"?:Expr}
 
@@ -66,18 +67,21 @@ Core tools (primitives)
 - laser_measure { x, y }
 - respond { text }
 
-Macros (expand to primitives)
+Macros (expanded server-side until no macros remain)
 - measure_object { query }
   => snapshot; detect{query}->det; let p=det.detections[0]; look_at{p.cx,p.cy}; sleep{600};
      laser_enable{true}; laser_measure{0.5,0.5}; respond{"Done"}
-- track_object { query, seconds, interval_ms=500 }
-  => while elapsed_ms < seconds*1000 { snapshot; detect{query}->det; if det.detections.length>0 { let p=det.detections[0]; look_at{p.cx,p.cy} } wait{interval_ms} }
+ - track_object { query, seconds, interval_ms=500 }
+  => repeat ceil(seconds*1000/interval_ms) times { snapshot; detect{query}->det; if det.detections.length>0 { let p=det.detections[0]; look_at{p.cx,p.cy} } wait{interval_ms} }
 
 Output strictly: {"program": { … }} (JSON only)
 """
 
 
 def _expand_macros(program: Dict[str, Any]) -> Dict[str, Any]:
+    """Expand macros recursively until no macros remain.
+    Keeps structural nodes (if/while/repeat) but ensures no {type:'macro'} remain.
+    """
     def expand_node(n: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not isinstance(n, dict):
             return [n]
@@ -89,7 +93,7 @@ def _expand_macros(program: Dict[str, Any]) -> Dict[str, Any]:
         name = n.get('name'); args = n.get('args', {})
         if name == 'measure_object':
             q = args.get('query','')
-            return [
+            out = [
                 {"type":"call","tool":"snapshot","args":{},"assign":"snap"},
                 {"type":"call","tool":"detect","args":{"query":q},"assign":"det"},
                 {"type":"let","name":"p","value":{"get":"det","path":["detections",0]}},
@@ -99,21 +103,22 @@ def _expand_macros(program: Dict[str, Any]) -> Dict[str, Any]:
                 {"type":"call","tool":"laser_measure","args":{"x":0.5,"y":0.5},"assign":"m"},
                 {"type":"call","tool":"respond","args":{"text":"Done"}}
             ]
+            return [m for node in out for m in expand_node(node)]
         if name == 'track_object':
             q = args.get('query',''); seconds = int(args.get('seconds',10)); interval = int(args.get('interval_ms',500))
-            return [{
-                "type":"while",
-                "cond":{"op":"<","left":{"var":"elapsed_ms"},"right":seconds*1000},
-                "interval_ms": interval,
-                "max_iter": max(1, (seconds*1000)//max(1,interval)),
+            times = max(1, (seconds*1000 + max(1,interval)-1)//max(1,interval))
+            out = [{
+                "type":"repeat","times": times,
                 "body":[
                     {"type":"call","tool":"snapshot","args":{},"assign":"snap"},
                     {"type":"call","tool":"detect","args":{"query":q},"assign":"det"},
                     {"type":"if","cond":{"op":">","left":{"get":"det","path":["detections","length"]},"right":0},
                      "then":[{"type":"let","name":"p","value":{"get":"det","path":["detections",0]}},
-                              {"type":"call","tool":"look_at","args":{"x":{"get":"p","path":["cx"]},"y":{"get":"p","path":["cy"]}}}]}
+                              {"type":"call","tool":"look_at","args":{"x":{"get":"p","path":["cx"]},"y":{"get":"p","path":["cy"]}}}]},
+                    {"type":"wait","ms": interval}
                 ]
             }]
+            return [m for node in out for m in expand_node(node)]
         return [{"type":"call","tool":"respond","args":{"text":f"Unknown macro: {name}"}}]
     body = program.get('body', [])
     program['body'] = [m for node in body for m in expand_node(node)]
@@ -133,27 +138,39 @@ def openai_program(instruction: str) -> Dict[str, Any]:
     )
 
     PROMPT_EXAMPLES = """
-Example 1
-Instruction: find knob
+Example 1 – find/measure distance to an object
+Instruction: measure the distance to OBJECT_A
 Response:
 {"program": {"type":"program","body":[
-  {"type":"macro","name":"measure_object","args":{"query":"knob"}}
+  {"type":"macro","name":"measure_object","args":{"query":"OBJECT_A"}}
 ]}}
 
-Example 2
-Instruction: track picture for 5 seconds
+Example 2 – track an object for N seconds
+Instruction: track OBJECT_A for 5 seconds
 Response:
 {"program": {"type":"program","body":[
-  {"type":"macro","name":"track_object","args":{"query":"picture","seconds":5}}
+  {"type":"macro","name":"track_object","args":{"query":"OBJECT_A","seconds":5}}
 ]}}
 
-Example 3
-Instruction: find car and track it for 3 seconds then find license plate
+Example 3 – compose multiple actions
+Instruction: find OBJECT_A, track it for 3 seconds, then find OBJECT_B
 Response:
 {"program": {"type":"program","body":[
-  {"type":"macro","name":"measure_object","args":{"query":"car"}},
-  {"type":"macro","name":"track_object","args":{"query":"car","seconds":3}},
-  {"type":"macro","name":"measure_object","args":{"query":"license plate"}}
+  {"type":"macro","name":"measure_object","args":{"query":"OBJECT_A"}},
+  {"type":"macro","name":"track_object","args":{"query":"OBJECT_A","seconds":3}},
+  {"type":"macro","name":"measure_object","args":{"query":"OBJECT_B"}}
+]}}
+
+Example 4 – repeat a block of steps
+Instruction: find OBJECT_A and track it for 3 seconds, then find OBJECT_B. wait one second. Repeat these steps three times.
+Response:
+{"program": {"type":"program","body":[
+  {"type":"repeat","times":3,"body":[
+    {"type":"macro","name":"measure_object","args":{"query":"OBJECT_A"}},
+    {"type":"macro","name":"track_object","args":{"query":"OBJECT_A","seconds":3}},
+    {"type":"macro","name":"measure_object","args":{"query":"OBJECT_B"}},
+    {"type":"wait","ms":1000}
+  ]}
 ]}}
 """
 
@@ -209,6 +226,9 @@ def validate_program(program: Dict[str, Any]) -> List[Dict[str, Any]]:
             if not isinstance(n, dict):
                 errors.append({"message":"Invalid node type","path":p}); continue
             t = n.get('type')
+            if t == 'macro':
+                errors.append({"message":"Unexpanded macro present; planner must expand macros server-side","path":p})
+                continue
             if t == 'call':
                 tool = n.get('tool')
                 args = n.get('args', {}) or {}
@@ -247,6 +267,11 @@ def validate_program(program: Dict[str, Any]) -> List[Dict[str, Any]]:
                     errors.append({"message":"while.interval_ms must be a non-negative int","path":p+".interval_ms"})
                 check_expr(n.get('cond'), defined, p+".cond")
                 walk(n.get('body', []), set(defined), p+".body")
+            elif t == 'repeat':
+                times = n.get('times')
+                if not isinstance(times, int) or times <= 0 or times > 1000:
+                    errors.append({"message":"repeat.times must be a positive int ≤ 1000","path":p+".times"})
+                walk(n.get('body', []), set(defined), p+".body")
             elif t == 'wait':
                 if not isinstance(n.get('ms'), int):
                     errors.append({"message":"wait.ms must be int","path":p+".ms"})
@@ -268,14 +293,27 @@ def validate_program(program: Dict[str, Any]) -> List[Dict[str, Any]]:
 def plan(req: PlanRequest):
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-      return {"program": {"type":"program","body":[{"type":"call","tool":"respond","args":{"text":"Planner unavailable"}}]}}
-    program = openai_program(req.instruction)
+        # Return explicit validation-style error so UI can surface it
+        return {"errors": [{"message": "Planner unavailable: OPENAI_API_KEY not set"}]}
+
+    # Ask LLM for a high-level program (may contain macros)
+    high_level = openai_program(req.instruction)
+    print("----high_level-----------")
+    print(f"{high_level=}")
+    print("-------------------------")
+    # Expand macros server-side
+    program = _expand_macros(json.loads(json.dumps(high_level)))  # deep copy
+    print("---expanded   -----------")
     print(f"{program=}")
-    program = _expand_macros(program)
-    print(f"{program=}")
+    print("-------------------------")
+
+    # Validate strictly; if errors exist, surface them to the UI
     errors = validate_program(program)
     print(f"{errors=}")
-    return {"program": program}
+    if errors:
+        return {"errors": errors, "program": program, "high_level_program": high_level}
+
+    return {"program": program, "high_level_program": high_level}
 
 
 if __name__ == "__main__":

@@ -41,6 +41,12 @@ class DetectRequest(BaseModel):
     query: str
     threshold: float | None = None
 
+class DescribeRequest(BaseModel):
+    image: str
+    labels: list[str] | None = None  # optional label set; if None, server default is used
+    threshold: float | None = None
+    top_k: int | None = None
+
 
 def decode_image_to_pil(image_b64_or_dataurl: str) -> Image.Image:
     data = image_b64_or_dataurl
@@ -110,6 +116,48 @@ def _detect_with_owlvit(img: Image.Image, query: str, threshold: float = 0.15) -
     return boxes
 
 
+def _describe_with_owlvit(img: Image.Image, labels: List[str], threshold: float = 0.25, top_k: int = 50) -> List[Dict[str, Any]]:
+    from transformers import OwlViTProcessor  # type: ignore
+    import torch  # type: ignore
+    assert _owl_processor is not None and _owl_model is not None
+
+    # Downscale for speed if needed
+    max_side = 1280
+    if max(img.size) > max_side:
+        scale = max_side / max(img.size)
+        new_size = (int(img.width * scale), int(img.height * scale))
+        img = img.resize(new_size)
+
+    # OWL-ViT supports multiple labels via a list within a batch
+    text = [labels]  # shape: [batch=1, num_labels]
+    inputs = _owl_processor(text=text, images=img, return_tensors="pt")
+    with torch.no_grad():
+        outputs = _owl_model(**inputs)
+    target_sizes = torch.tensor([img.size[::-1]])
+    results = _owl_processor.post_process_object_detection(outputs, target_sizes=target_sizes, threshold=threshold)[0]
+    boxes_px = results.get("boxes", [])
+    scores = results.get("scores", [])
+    lab_idx = results.get("labels", [])
+    W, H = img.size
+    boxes: List[Dict[str, Any]] = []
+    for i in range(len(boxes_px)):
+        x1, y1, x2, y2 = boxes_px[i].tolist()
+        li = int(lab_idx[i].item()) if len(lab_idx) > i else -1
+        lbl = labels[li] if 0 <= li < len(labels) else None
+        boxes.append({
+            "x1": max(0.0, min(1.0, x1 / W)),
+            "y1": max(0.0, min(1.0, y1 / H)),
+            "x2": max(0.0, min(1.0, x2 / W)),
+            "y2": max(0.0, min(1.0, y2 / H)),
+            "score": float(scores[i].item()),
+            "label": lbl,
+        })
+    boxes.sort(key=lambda b: b.get("score", 0), reverse=True)
+    if isinstance(top_k, int) and top_k > 0:
+        boxes = boxes[:top_k]
+    return boxes
+
+
 def _detect_fallback(img: Image.Image, query: str) -> List[Dict[str, Any]]:
     # Return a small center box
     cx, cy, w, h = 0.5, 0.5, 0.2, 0.2
@@ -164,6 +212,48 @@ def detect(req: DetectRequest):
         boxes = _detect_fallback(img, req.query)
 
     print(f"[detect_server] → {len(boxes)} boxes")
+    return {"boxes": boxes}
+
+
+def _default_describe_labels() -> List[str]:
+    # Allow override via env var (comma-separated). Otherwise, a compact set of common objects.
+    s = os.environ.get("DESCRIBE_LABELS")
+    if s:
+        return [p.strip() for p in s.split(',') if p.strip()]
+    return [
+        "person","car","truck","bus","bicycle","motorcycle","traffic light","stop sign",
+        "chair","couch","bed","table","tv","laptop","cell phone","remote","keyboard",
+        "book","bottle","cup","wine glass","fork","knife","spoon","bowl","backpack",
+        "umbrella","handbag","suitcase","tie","dog","cat","bird","horse","sheep","cow",
+        "towel", "brush", "toothpaste", "toothbrush"
+    ]
+
+
+@app.post("/describe")
+def describe(req: DescribeRequest):
+    try:
+        img = decode_image_to_pil(req.image)
+    except Exception:
+        print("[detect_server] bad image payload for describe")
+        return {"boxes": []}
+
+    if not _HAVE_OWL:
+        _lazy_load_owlvit()
+
+    labels = req.labels or _default_describe_labels()
+    th = float(req.threshold) if req.threshold is not None else float(os.environ.get("OWL_THRESH", "0.25"))
+    top_k = int(req.top_k) if req.top_k else 50
+    try:
+        if _HAVE_OWL:
+            print(f"[detect_server] describe: {len(labels)} labels size={img.width}x{img.height} thr={th}")
+            boxes = _describe_with_owlvit(img, labels, threshold=th, top_k=top_k)
+        else:
+            print("[detect_server] describe fallback (no model)")
+            boxes = []
+    except Exception as e:
+        print("[detect_server] describe error:", e)
+        boxes = []
+    print(f"[detect_server] describe → {len(boxes)} boxes")
     return {"boxes": boxes}
 
 

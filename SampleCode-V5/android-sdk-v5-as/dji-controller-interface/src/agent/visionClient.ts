@@ -24,6 +24,7 @@ export interface AnalyzeResponse {
 // Configurable endpoint via env or default localhost. Renderer may not have process.env;
 // allow override via global.
 const DEFAULT_ENDPOINT = (globalThis as any).__VISION_URL__ || 'http://127.0.0.1:9001/detect';
+const DESCRIBE_ENDPOINT = (globalThis as any).__DESCRIBE_URL__ || 'http://127.0.0.1:9001/describe';
 
 function getThreshold(): number {
   const v = (globalThis as any).__VISION_THRESHOLD__;
@@ -59,6 +60,32 @@ async function callHttpDetector(req: AnalyzeRequest): Promise<AnalyzeResponse> {
     // Fallback to empty result; caller may switch strategy
     console.warn('[visionClient] detector call failed, returning empty:', e);
     return { detections: [], meta: { backend: 'http', url: DEFAULT_ENDPOINT, httpBoxes: 0 } };
+  }
+}
+
+export interface DescribeRequest {
+  imageBase64: string;
+  labels?: string[];
+}
+
+export async function analyzeDescribe(req: DescribeRequest): Promise<AnalyzeResponse> {
+  try {
+    const res = await fetch(DESCRIBE_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: req.imageBase64, labels: req.labels, threshold: getThreshold(), top_k: 50 })
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const boxes = Array.isArray(data?.boxes) ? data.boxes : [];
+    const detections: Detection[] = boxes.map((b: any) => ({
+      x1: clamp01(b.x1), y1: clamp01(b.y1), x2: clamp01(b.x2), y2: clamp01(b.y2),
+      score: Number(b.score ?? 0), label: String(b.label || '')
+    }));
+    return { detections, meta: { backend: 'http', url: DESCRIBE_ENDPOINT, httpBoxes: boxes.length } };
+  } catch (e) {
+    console.warn('[visionClient] describe call failed:', e);
+    return { detections: [], meta: { backend: 'http', url: DESCRIBE_ENDPOINT, httpBoxes: 0 } };
   }
 }
 

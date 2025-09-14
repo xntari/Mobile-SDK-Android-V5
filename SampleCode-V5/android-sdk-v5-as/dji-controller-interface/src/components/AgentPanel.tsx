@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState } from 'react';
-import { runFindMeasure, runInstruction } from '../agent/orchestrator';
+import { runInstruction } from '../agent/orchestrator';
 import type { Detection } from '../agent/visionClient';
 import { getActiveThreshold, setActiveThreshold } from '../agent/visionClient';
 
@@ -18,13 +18,37 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
   const [status, setStatus] = useState<{ detector?: string; planner?: string }>(() => ({}));
   const [ribbon, setRibbon] = useState<Record<string, { state: 'running'|'done'|'error'; ms?: number }>>({});
   const [planSteps, setPlanSteps] = useState<any[] | null>(null);
+  const [planProgram, setPlanProgram] = useState<any | null>(null);
+  const [planProgramHigh, setPlanProgramHigh] = useState<any | null>(null);
+  const [programView, setProgramView] = useState<'final'|'high'>('final');
   const [planErrors, setPlanErrors] = useState<Array<{ message: string; path?: string }>>([]);
   const [thr, setThr] = useState<number>(() => getActiveThreshold());
-  const [pos, setPos] = useState<{ x: number; y: number }>(() => ({ x: window.innerWidth - 360 - 24, y: window.innerHeight - 320 - 24 }));
-  const [size, setSize] = useState<{ w: number; h: number }>({ w: 360, h: 240 });
+  const [pos, setPos] = useState<{ x: number; y: number }>(() => {
+    try {
+      const raw = localStorage.getItem('agent.panel.pos');
+      if (raw) return JSON.parse(raw);
+    } catch {}
+    return { x: window.innerWidth - 460 - 24, y: window.innerHeight - 420 - 24 };
+  });
+  const [size, setSize] = useState<{ w: number; h: number }>(() => {
+    try {
+      const raw = localStorage.getItem('agent.panel.size');
+      if (raw) return JSON.parse(raw);
+    } catch {}
+    return { w: 460, h: 420 };
+  });
   const dragRef = React.useRef<{ dx: number; dy: number; resizing: boolean } | null>(null);
   const cancelRef = React.useRef<{ cancelled: boolean }>({ cancelled: false });
   const [trace, setTrace] = useState<Array<{ text: string; kind: 'tool'|'var'|'info'|'warn'|'error' }>>([]);
+  const panelRef = React.useRef<HTMLDivElement | null>(null);
+  // Persist panel size across restarts
+  usePersistPanelSize(panelRef, (s) => setSize(s));
+  const programRef = React.useRef<HTMLDivElement | null>(null);
+  const execRef = React.useRef<HTMLDivElement | null>(null);
+  usePersistElementHeight(programRef, 'agent.h.program', 180);
+  usePersistElementHeight(execRef, 'agent.h.exec', 220);
+  const planRef = React.useRef<HTMLDivElement | null>(null);
+  usePersistElementHeight(planRef, 'agent.h.plan', 120);
 
   const log = useCallback((line: string) => {
     setLogLines(prev => [...prev.slice(-40), line]);
@@ -45,6 +69,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
       // Try planner first, fallback to built-in flow
       setRibbon({});
       setPlanSteps(null);
+      setPlanProgram(null);
       setPlanErrors([]);
       cancelRef.current.cancelled = false;
       await runInstruction(prompt.trim(), {
@@ -55,6 +80,8 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
         onResult: ({ text }) => setResult(text),
         onStep,
         onPlan: (steps) => setPlanSteps(steps),
+        onProgram: (program) => setPlanProgram(program),
+        onHighLevelProgram: (hp) => setPlanProgramHigh(hp),
         isCancelled: () => cancelRef.current.cancelled,
         onTrace: (line, kind='info') => setTrace(prev => [...prev, { text: line, kind }]),
         onPlanErrors: (errs) => setPlanErrors(errs)
@@ -68,6 +95,11 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
     cancelRef.current.cancelled = true;
     setRunning(false);
   }, []);
+
+  // Persist position when it changes
+  React.useEffect(() => {
+    try { localStorage.setItem('agent.panel.pos', JSON.stringify(pos)); } catch {}
+  }, [pos]);
 
   // Log LRF results as they arrive
   React.useEffect(() => {
@@ -88,6 +120,12 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
     } catch {}
   }, [laserResult]);
 
+  // Auto-scroll execution trace while running
+  React.useEffect(() => {
+    if (!execRef.current) return;
+    execRef.current.scrollTop = execRef.current.scrollHeight;
+  }, [trace.length]);
+
   const header = useMemo(() => (
     <div className="flex items-center justify-between mb-2 cursor-move select-text" onMouseDown={(e)=>{
       dragRef.current = { dx: e.clientX - pos.x, dy: e.clientY - pos.y, resizing: false };
@@ -95,16 +133,21 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
         if (!dragRef.current) return;
         setPos({ x: ev.clientX - dragRef.current.dx, y: ev.clientY - dragRef.current.dy });
       };
-      const onUp = () => { dragRef.current = null; window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+      const onUp = () => { 
+        dragRef.current = null; 
+        window.removeEventListener('mousemove', onMove); 
+        window.removeEventListener('mouseup', onUp);
+        try { localStorage.setItem('agent.panel.pos', JSON.stringify(pos)); } catch {}
+      };
       window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
     }}>
       <div className="text-xs text-gray-400 font-semibold">AGENT</div>
       <div className={`text-[10px] ${running ? 'text-green-400' : 'text-gray-500'}`}>{running ? 'running' : 'idle'}</div>
     </div>
-  ), [running]);
+  ), [running, pos]);
 
   return (
-    <div className="glass-panel p-2" style={{ position: 'fixed', left: pos.x, top: pos.y, width: size.w, height: size.h, resize: 'both' as any, overflow: 'hidden' }}>
+    <div ref={panelRef} className="glass-panel p-2" style={{ position: 'fixed', left: pos.x, top: pos.y, width: size.w, height: size.h, minWidth: 320, minHeight: 260, resize: 'both' as any, overflow: 'hidden' }}>
       {header}
       {/* Status chips */}
       <div className="flex gap-1 mb-1 select-text">
@@ -169,8 +212,22 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
         </div>
       )}
 
+      {/* Pretty JSON program preview w/ toggle */}
+      {(planProgram || planProgramHigh) && (
+        <div ref={programRef} className="mb-2 bg-gray-900/60 rounded p-1 text-[10px] text-gray-200 select-text font-mono" style={{ height: 180, overflowY: 'auto', resize: 'vertical' as any }}>
+          <div className="flex items-center justify-between text-gray-400 mb-1">
+            <div>Program</div>
+            <div className="flex gap-1">
+              <button className={`px-1 py-[1px] rounded ${programView==='final'?'bg-dji-blue text-white':'bg-gray-700 text-gray-200'}`} onClick={()=>setProgramView('final')}>Final</button>
+              <button className={`px-1 py-[1px] rounded ${programView==='high'?'bg-dji-blue text-white':'bg-gray-700 text-gray-200'}`} onClick={()=>setProgramView('high')}>High-level</button>
+            </div>
+          </div>
+          <pre className="whitespace-pre-wrap leading-tight">{safeStringify(programView==='final'? planProgram : planProgramHigh)}</pre>
+        </div>
+      )}
+
       {planSteps && planSteps.length > 0 && (
-        <div className="mb-2 bg-gray-900/50 rounded p-1 text-[10px] text-gray-200 select-text" style={{ maxHeight: 80, overflowY: 'auto' }}>
+        <div ref={planRef} className="mb-2 bg-gray-900/50 rounded p-1 text-[10px] text-gray-200 select-text" style={{ height: 120, overflowY: 'auto', resize: 'vertical' as any }}>
           <div className="text-gray-400 mb-1">Plan Preview</div>
           {planSteps.map((s, i) => (
             <div key={i} className="whitespace-nowrap overflow-ellipsis overflow-hidden">
@@ -182,7 +239,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
 
       {/* Execution trace */}
       {trace.length > 0 && (
-        <div className="mb-2 bg-gray-900/60 rounded p-1 text-[10px] select-text" style={{ maxHeight: 120, overflowY: 'auto' }}>
+        <div ref={execRef} className="mb-2 bg-gray-900/60 rounded p-1 text-[10px] select-text" style={{ height: 220, overflowY: 'auto', resize: 'vertical' as any }}>
           <div className="text-gray-400 mb-1">Execution</div>
           {trace.map((t, i) => (
             <div key={i} className={t.kind==='tool'? 'text-blue-300' : t.kind==='var'? 'text-yellow-300' : t.kind==='error'? 'text-red-300' : t.kind==='warn'? 'text-orange-300' : 'text-gray-300'}>
@@ -216,4 +273,48 @@ function formatArgs(args: any): string {
   } catch {
     try { return JSON.stringify(args); } catch { return ''; }
   }
+}
+
+function safeStringify(obj: any): string {
+  try { return JSON.stringify(obj, null, 2); } catch { return String(obj); }
+}
+
+// Persist size whenever user resizes the panel
+export function usePersistPanelSize(ref: React.RefObject<HTMLDivElement>, setSize: (s:{w:number;h:number})=>void) {
+  React.useEffect(() => {
+    if (!ref.current) return;
+    const el = ref.current;
+    const ro = new ResizeObserver(() => {
+      const rect = el.getBoundingClientRect();
+      const s = { w: Math.round(rect.width), h: Math.round(rect.height) };
+      setSize(s);
+      try { localStorage.setItem('agent.panel.size', JSON.stringify(s)); } catch {}
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref]);
+}
+
+// Persist child panel height via ResizeObserver; set initial height if available
+function usePersistElementHeight(ref: React.RefObject<HTMLDivElement>, storageKey: string, defaultHeight: number) {
+  React.useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (raw) {
+        const h = Math.max(80, Math.min(800, Number(JSON.parse(raw)) || defaultHeight));
+        el.style.height = `${h}px`;
+      } else {
+        el.style.height = `${defaultHeight}px`;
+      }
+    } catch {
+      el.style.height = `${defaultHeight}px`;
+    }
+    const ro = new ResizeObserver(() => {
+      try { localStorage.setItem(storageKey, JSON.stringify(Math.round(el.clientHeight))); } catch {}
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref, storageKey, defaultHeight]);
 }

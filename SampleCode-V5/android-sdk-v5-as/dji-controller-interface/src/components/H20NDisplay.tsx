@@ -3,6 +3,7 @@ import { H20NDisplayProps } from '../types';
 import { GimbalModeToggle, GimbalMode } from './GimbalModeToggle';
 import { AgentPanel } from './AgentPanel';
 import type { Detection } from '../agent/visionClient';
+import { analyzeDescribe, getActiveThreshold, setActiveThreshold } from '../agent/visionClient';
 
 interface ClickIndicator {
   id: string;
@@ -64,6 +65,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
 
   // Agent overlay
   const [agentDetections, setAgentDetections] = useState<Detection[]>([]);
+  const [detThr, setDetThr] = useState<number>(() => getActiveThreshold());
 
   // Helper: provide a snapshot of the current canvas as base64 JPEG
   const getSnapshot = async (): Promise<string> => {
@@ -81,6 +83,17 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     } catch (e) {
       console.error('Snapshot failed', e);
       throw e;
+    }
+  };
+
+  // Debug describe: run detection across a label set and overlay boxes
+  const runDescribe = async () => {
+    try {
+      const img = await getSnapshot();
+      const { detections } = await analyzeDescribe({ imageBase64: img });
+      setAgentDetections(detections);
+    } catch (e) {
+      console.warn('[H20N] describe failed:', e);
     }
   };
 
@@ -1104,6 +1117,17 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
               </div>
             );
           })}
+
+          {/* Debug controls: Describe + threshold */}
+          <div className="absolute top-2 left-2 glass-panel p-1 text-[10px] flex items-center gap-2 z-30">
+            <button className="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600" onClick={runDescribe}>Describe</button>
+            <span className="text-gray-300">thr</span>
+            {[0.15,0.20,0.25,0.30].map(v => (
+              <button key={v} className={`px-1.5 py-[2px] rounded ${Math.abs(detThr-v)<1e-6?'bg-dji-blue text-white':'bg-gray-700 text-gray-200 hover:bg-gray-600'}`} onClick={()=>{ setDetThr(v); setActiveThreshold(v); }}>
+                {v.toFixed(2)}
+              </button>
+            ))}
+          </div>
 
           {/* Tiny HUD overlay near crosshair for Free Look */}
           {gimbalMode === 'free_look' && isFreeLookActive && (

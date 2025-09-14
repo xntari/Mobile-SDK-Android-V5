@@ -1,5 +1,7 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { FPVDisplayProps } from '../types';
+import type { Detection } from '../agent/visionClient';
+import { analyzeDescribe, getActiveThreshold, setActiveThreshold } from '../agent/visionClient';
 
 export const FPVDisplay: React.FC<FPVDisplayProps> = ({ 
   width, 
@@ -21,6 +23,8 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
   const spsRef = useRef<Uint8Array | null>(null);
   const ppsRef = useRef<Uint8Array | null>(null);
   const decoderConfiguredRef = useRef<boolean>(false);
+  const [debugDetections, setDebugDetections] = useState<Detection[]>([]);
+  const [detThr, setDetThr] = useState<number>(() => getActiveThreshold());
 
   // Calculate actual video display rectangle with object-contain behavior
   const calculateDisplayRect = () => {
@@ -111,6 +115,29 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
     const sps = nalUnits.find(nal => nal.type === 7)?.data;
     const pps = nalUnits.find(nal => nal.type === 8)?.data;
     return { sps, pps };
+  };
+
+  // Provide a snapshot of the current canvas as base64 JPEG
+  const getSnapshot = async (): Promise<string> => {
+    const canvas = canvasRef.current;
+    if (!canvas) throw new Error('Canvas not ready');
+    const off = document.createElement('canvas');
+    off.width = canvas.width;
+    off.height = canvas.height;
+    const ctx = off.getContext('2d');
+    if (!ctx) throw new Error('No 2D context');
+    ctx.drawImage(canvas, 0, 0);
+    return off.toDataURL('image/jpeg', 0.9);
+  };
+
+  const runDescribe = async () => {
+    try {
+      const img = await getSnapshot();
+      const { detections } = await analyzeDescribe({ imageBase64: img });
+      setDebugDetections(detections);
+    } catch (e) {
+      console.warn('[FPV] describe failed:', e);
+    }
   };
 
   useEffect(() => {
@@ -605,6 +632,31 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
           height: `${displayRect.height}px`
         }}
       >
+          {/* Debug controls: Describe + threshold */}
+          <div className="absolute top-2 left-2 glass-panel p-1 text-[10px] flex items-center gap-2 z-30">
+            <button className="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600" onClick={runDescribe}>Describe</button>
+            <span className="text-gray-300">thr</span>
+            {[0.15,0.20,0.25,0.30].map(v => (
+              <button key={v} className={`px-1.5 py-[2px] rounded ${Math.abs(detThr-v)<1e-6?'bg-dji-blue text-white':'bg-gray-700 text-gray-200 hover:bg-gray-600'}`} onClick={()=>{ setDetThr(v); setActiveThreshold(v); }}>
+                {v.toFixed(2)}
+              </button>
+            ))}
+          </div>
+
+          {/* Debug detections overlay */}
+          {debugDetections.map((d, idx) => {
+            const x = d.x1 * (displayRect.width || 1);
+            const y = d.y1 * (displayRect.height || 1);
+            const w = (d.x2 - d.x1) * (displayRect.width || 1);
+            const h = (d.y2 - d.y1) * (displayRect.height || 1);
+            return (
+              <div key={`dd-${idx}`} className="absolute border border-emerald-400" style={{ left: x, top: y, width: w, height: h }}>
+                <div className="absolute -top-5 left-0 bg-emerald-600 text-[10px] px-1 rounded text-white">
+                  {(d.label || 'obj')}{d.score ? ` ${(d.score*100).toFixed(0)}%` : ''}
+                </div>
+              </div>
+            );
+          })}
           {/* Only show error overlay when there's actually an error */}
           {videoStatus === 'error' && getStatusOverlay()}
           

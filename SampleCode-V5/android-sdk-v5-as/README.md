@@ -182,22 +182,26 @@ curl -s -X POST http://127.0.0.1:9002/plan \
 ```
 
 Notes:
-- Planner responds with `{ program }` or `{ errors:[...] }` (strict validation on undefined vars, unbounded loops).
+- Planner responds with `{ program, high_level_program }` or `{ errors:[...], program?, high_level_program? }`.
+- Validation is strict: undefined variables, bounded while loops (max_iter + interval_ms), positive repeat.times; no unexpanded macros.
 - Set `PLANNER_MODEL` if needed (defaults to `gpt-4o-mini`).
 
-### Start the detector service
+### Start the detector/describe service
 ```bash
 python tools/vision_detect_server.py
 # Optionally lower threshold
 export OWL_THRESH=0.20
+# Optional: override describe labels
+export DESCRIBE_LABELS="person,car,truck,door,knob"
 ```
 
 ### UI features relevant to planner/vision
-- Agent panel: free‑floating, resizable, selectable text
-- Ribbon with per‑step timings; plan preview; execution trace with resolved values
+- Agent panel: free‑floating, resizable, selectable text; panes persist sizes (Program/Execution/Plan)
+- Program viewer: toggle between High‑level (macros) and Final (expanded)
+- Execution trace: auto‑scroll during execution; shows resolved values
 - Plan errors panel: shows planner validation errors and blocks execution
 - Detector threshold toggle (0.15/0.20/0.25/0.30)
-- Overlay timing: pre‑slew box appears, clears during slew, re‑detect draws post‑slew
+- FPV and H20N have a debug “Describe” button (overlay all objects with labels/confidences)
 
 **Device Not Detected:**
 ```bash
