@@ -14,7 +14,7 @@ Run:
   pip install fastapi uvicorn pillow
   # optional for real detection: pip install transformers torch torchvision
   python tools/vision_detect_server.py
-  # Server on http://127.0.0.1:9001
+  # Server on http://0.0.0.0:9001
 """
 from typing import List, Dict, Any
 import base64
@@ -260,4 +260,4 @@ def describe(req: DescribeRequest):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("VISION_PORT", "9001"))
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)

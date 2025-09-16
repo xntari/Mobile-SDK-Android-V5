@@ -195,6 +195,12 @@ export OWL_THRESH=0.20
 export DESCRIBE_LABELS="person,car,truck,door,knob"
 ```
 
+### Start the vision model
+```
+pip install fastapi uvicorn pillow ultralytics
+python tools/vision_general_server.py
+```
+
 ### UI features relevant to planner/vision
 - Agent panel: free‑floating, resizable, selectable text; panes persist sizes (Program/Execution/Plan)
 - Program viewer: toggle between High‑level (macros) and Final (expanded)
@@ -727,3 +733,22 @@ adb forward tcp:8080 tcp:8080
 ```
 
 **Next Development Priority**: See `./docs/TODO.md` for multi-camera streaming implementation using `CameraStreamDetailVM.kt` patterns.
+## Vision Panel (Prototype)
+
+The Vision window is a separate floating, resizable panel available in FPV and H20N views. It does not affect the Agent.
+
+- Find objects: Uses a general purpose vision model to produce a conservative object list and fills an editable text area.
+- Boxes: Toggles drawing OWL‑ViT boxes for the labels in the editable list. Boxes are always green, cleared automatically when the camera moves, and are rendered underneath UI panels.
+- Describe: Short 1‑paragraph scene description (main objects, layout, unusual elements).
+- Query: One‑paragraph answer to a question grounded in the image.
+
+Run the general model (local example):
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install fastapi uvicorn pillow transformers accelerate
+# Install torch/torchvision for your platform (CPU or MPS)
+QWEN_MODEL=Qwen/Qwen2-VL-2B-Instruct python tools/vision_general_server.py
+# Endpoint: http://127.0.0.1:9003/general/analyze
+```
+
+The Agent still uses OWL‑ViT for detection boxes; the Vision panel is for debugging/perception prototyping only.

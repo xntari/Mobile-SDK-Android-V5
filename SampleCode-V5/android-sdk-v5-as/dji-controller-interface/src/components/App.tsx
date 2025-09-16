@@ -18,7 +18,7 @@ export const App: React.FC = () => {
 
   // Show connection screen while not connected or no data at all
   const hasAnyData = bridgeData.controller || bridgeData.telemetry || bridgeData.battery;
-  const shouldShowUI = connectionStatus === 'connected' && hasAnyData;
+  const shouldShowUI = (connectionStatus === 'connected' || connectionStatus === 'connecting' || connectionStatus === 'reconnecting') && hasAnyData;
   
   if (!shouldShowUI) {
     return (

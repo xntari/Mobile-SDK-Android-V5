@@ -59,6 +59,7 @@ Setup: Mac (MacBook Air)
    - A) No install: use built‑in fallback. The agent will still run by sending a center tap; useful to validate the loop.
    - B) Lightweight local OWL‑ViT (CPU or MPS)
      - Install Python 3.10+ and create a venv.
+     - `python -m venv .venv && source .venv/bin/activate`
      - `pip install fastapi uvicorn pillow transformers torch torchvision`
        - Apple Silicon: `pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu` (or use nightly MPS if desired).
      - Run: `python tools/vision_detect_server.py`
@@ -110,3 +111,27 @@ Troubleshooting
 - Agent runs but no boxes: check the detector server logs or rely on fallback (center tap) to validate the tool loop.
 - LRF returns 0 m: too close or no return; try one retry after a longer settle; UI already reports “LRF min 3 m”.
 - Performance slow: reduce snapshot resolution; ensure you run OWL‑ViT base; avoid patch14 large.
+- Vision panel (prototype)
+  - A separate floating “Vision” window (FPV + H20N) powered by a general purpose vision model (local prototype: Qwen2‑VL‑2B).
+  - Tools:
+    - Find objects: generates a conservative list of objects and fills an editable list.
+    - Boxes: toggles OWL‑ViT boxes for labels in the editable list. Boxes disappear on camera movement and sit below UI panels.
+    - Describe: one short paragraph describing the scene (main objects, layout, unusual elements).
+    - Query: one‑paragraph answer to a custom question grounded in the image.
+  - This panel does not affect AGENT execution; it’s for debugging and perception prototyping only.
+
+### General Vision Model (prototype)
+
+- Endpoint: `POST http://127.0.0.1:9003/general/analyze`
+- Request: `{ image, task: 'objects'|'describe'|'query', question?, threshold?, top_k? }`
+- Response: `{ objects:[{label,count?,score?}], caption, answer }`
+- Local run (example):
+  ```bash
+  python -m venv .venv && source .venv/bin/activate
+  pip install fastapi uvicorn pillow transformers accelerate
+  # Install torch/torchvision wheels for your platform (CPU or MPS)
+  QWEN_MODEL=Qwen/Qwen2-VL-2B-Instruct python tools/vision_general_server.py
+  ```
+- Notes:
+  - The model receives a downscaled frame (≤1024 px) for stability/latency. OWL‑ViT input size remains unchanged.
+  - The server never returns boxes; OWL‑ViT remains the source of bounding boxes.

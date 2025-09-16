@@ -2,8 +2,8 @@ import React, { useRef, useEffect, useState } from 'react';
 import { H20NDisplayProps } from '../types';
 import { GimbalModeToggle, GimbalMode } from './GimbalModeToggle';
 import { AgentPanel } from './AgentPanel';
+import { VisionPanel } from './VisionPanel';
 import type { Detection } from '../agent/visionClient';
-import { analyzeDescribe, getActiveThreshold, setActiveThreshold } from '../agent/visionClient';
 
 interface ClickIndicator {
   id: string;
@@ -65,7 +65,9 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
 
   // Agent overlay
   const [agentDetections, setAgentDetections] = useState<Detection[]>([]);
-  const [detThr, setDetThr] = useState<number>(() => getActiveThreshold());
+  const [visionDetections, setVisionDetections] = useState<Detection[]>([]);
+  // Clear vision boxes when camera moves (any gimbal command updates)
+  useEffect(()=>{ try{ setVisionDetections([]); }catch{} }, [lastGimbalCommand]);
 
   // Helper: provide a snapshot of the current canvas as base64 JPEG
   const getSnapshot = async (): Promise<string> => {
@@ -86,16 +88,7 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     }
   };
 
-  // Debug describe: run detection across a label set and overlay boxes
-  const runDescribe = async () => {
-    try {
-      const img = await getSnapshot();
-      const { detections } = await analyzeDescribe({ imageBase64: img });
-      setAgentDetections(detections);
-    } catch (e) {
-      console.warn('[H20N] describe failed:', e);
-    }
-  };
+  
 
   // Handle canvas click for gimbal tap-to-target or precise look functionality
   const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1019,6 +1012,12 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
           laserResult={lastLaserResult}
         />
       </div>
+
+      {/* Vision Panel - top-left; visible in H20N */}
+      <VisionPanel
+        getSnapshot={getSnapshot}
+        setBoxes={setVisionDetections}
+      />
       
       {/* Gimbal Mode Toggle - default bottom-left */}
       <div className="absolute bottom-4 left-4 z-30 pointer-events-auto">
@@ -1118,16 +1117,22 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
             );
           })}
 
-          {/* Debug controls: Describe + threshold */}
-          <div className="absolute top-2 left-2 glass-panel p-1 text-[10px] flex items-center gap-2 z-30">
-            <button className="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600" onClick={runDescribe}>Describe</button>
-            <span className="text-gray-300">thr</span>
-            {[0.15,0.20,0.25,0.30].map(v => (
-              <button key={v} className={`px-1.5 py-[2px] rounded ${Math.abs(detThr-v)<1e-6?'bg-dji-blue text-white':'bg-gray-700 text-gray-200 hover:bg-gray-600'}`} onClick={()=>{ setDetThr(v); setActiveThreshold(v); }}>
-                {v.toFixed(2)}
-              </button>
-            ))}
-          </div>
+          {/* Vision detections overlay */}
+          {visionDetections.map((d, idx) => {
+            const x = d.x1 * (displayRect.width || 1);
+            const y = d.y1 * (displayRect.height || 1);
+            const w = (d.x2 - d.x1) * (displayRect.width || 1);
+            const h = (d.y2 - d.y1) * (displayRect.height || 1);
+            return (
+              <div key={`vdet-${idx}`} className="absolute border border-green-400 z-10" style={{ left: x, top: y, width: w, height: h }}>
+                <div className="absolute -top-5 left-0 bg-green-600 text-[10px] px-1 rounded text-white">
+                  {(d.label || 'obj')}{d.score ? ` ${(d.score*100).toFixed(0)}%` : ''}
+                </div>
+              </div>
+            );
+          })}
+
+          
 
           {/* Tiny HUD overlay near crosshair for Free Look */}
           {gimbalMode === 'free_look' && isFreeLookActive && (

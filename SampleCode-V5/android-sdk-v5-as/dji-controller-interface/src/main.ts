@@ -13,7 +13,10 @@ interface BridgeMessage {
 class DJIControllerApp {
   private mainWindow: BrowserWindow | null = null;
   private wsClient: WebSocket | null = null;
-  private connectionStatus: 'disconnected' | 'connecting' | 'connected' | 'error' = 'disconnected';
+  private connectionStatus: 'disconnected' | 'connecting' | 'connected' | 'error' | 'reconnecting' = 'disconnected';
+  private suppressNextCloseLog = false;
+  private suppressNextCloseStatus = false;
+  private quickRestartPending = false;
   private pendingVideoFrame: any = null; // Store video metadata when expecting binary data
 
   constructor() {
@@ -76,10 +79,16 @@ class DJIControllerApp {
     this.sendConnectionStatus();
 
     try {
-      this.wsClient = new WebSocket('ws://127.0.0.1:8080');
+      // Enable perMessageDeflate explicitly and relax payload to avoid spurious framing errors
+      this.wsClient = new WebSocket('ws://127.0.0.1:8080', undefined, {
+        // Disable per-message compression negotiation; the bridge frames may set RSV bits inconsistently.
+        perMessageDeflate: false,
+        maxPayload: 100 * 1024 * 1024, // 100MB to be safe for frames with metadata
+      });
 
       this.wsClient.on('open', () => {
         console.log('✅ Connected to DJI Bridge'); // Essential bridge log
+        this.quickRestartPending = false;
         this.connectionStatus = 'connected';
         this.sendConnectionStatus();
       });
@@ -143,10 +152,17 @@ class DJIControllerApp {
       });
 
       this.wsClient.on('close', () => {
-        console.log('❌ Disconnected from DJI Bridge'); // Essential bridge log
+        if (!this.suppressNextCloseLog) {
+          console.log('❌ Disconnected from DJI Bridge'); // Essential bridge log
+        }
+        this.suppressNextCloseLog = false;
+        if (this.suppressNextCloseStatus || this.quickRestartPending) {
+          // Skip UI churn when we're doing a quick restart
+          this.suppressNextCloseStatus = false;
+          return;
+        }
         this.connectionStatus = 'disconnected';
         this.sendConnectionStatus();
-        
         // Attempt to reconnect after 3 seconds
         setTimeout(() => {
           if (!this.wsClient || this.wsClient.readyState === WebSocket.CLOSED) {
@@ -155,7 +171,22 @@ class DJIControllerApp {
         }, 3000);
       });
 
-      this.wsClient.on('error', (error) => {
+      this.wsClient.on('error', (error: any) => {
+        const code = (error && (error as any).code) || '';
+        const msg = String(error && (error as any).message || '');
+        if (code === 'WS_ERR_UNEXPECTED_RSV_1' || code === 'WS_ERR_UNEXPECTED_RSV_2_3' || msg.includes('Invalid WebSocket frame')) {
+          // Gracefully recover from sporadic RSV1 framing errors without user-visible disconnect churn
+          console.warn('⚠️ DJI Bridge framing issue; restarting WebSocket quietly');
+          // Keep UI as is; optionally mark as 'reconnecting' without hiding UI
+          this.connectionStatus = 'reconnecting';
+          this.sendConnectionStatus();
+          this.suppressNextCloseLog = true;
+          this.suppressNextCloseStatus = true;
+          this.quickRestartPending = true;
+          try { this.wsClient?.terminate(); } catch {}
+          setTimeout(() => this.setupWebSocketConnection(), 200);
+          return;
+        }
         console.error('❌ DJI Bridge WebSocket error:', error); // Essential bridge log
         this.connectionStatus = 'error';
         this.sendConnectionStatus();
