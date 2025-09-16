@@ -14,6 +14,8 @@ import { ConnectionStatus } from './ConnectionStatus';
 import { VisionPanel } from './VisionPanel';
 import { AgentPanel } from './AgentPanel';
 import { CameraPanel } from './CameraPanel';
+import { Panel } from './Panel';
+import { mapPanelControls, hsiPanelControls, controllerPanelControls } from './panelControls';
 import { bridgeManager } from '../bridgeManager';
 
 export const App: React.FC = () => {
@@ -119,51 +121,64 @@ export const App: React.FC = () => {
             />
           </CameraPanel>
 
-          {/* Shared overlays that appear on both displays */}
-          {/* Navigation panel - Top Left Corner */}
-          <div className="absolute top-4 left-4 z-20">
-            <div className="flex flex-col space-y-2">
-              {/* Minimap */}
-              <MapDisplay 
-                aircraftLocation={bridgeData.telemetry?.location || null}
-                homeLocation={bridgeData.telemetry?.home_location || null}
-                compassHeading={bridgeData.telemetry?.compass_heading || bridgeData.telemetry?.heading || 0}
-              />
-              
-              {/* HSI Compass - Match Live Map width */}
-              <div className="w-52">
-                <HSICompass 
-                  attitude={bridgeData.telemetry?.attitude || null}
-                  heading={bridgeData.telemetry?.compass_heading || bridgeData.telemetry?.heading || 0}
-                  homeDirection={bridgeData.telemetry?.home_bearing}
-                  size="small"
-                  telemetryData={bridgeData.telemetry}
-                />
-              </div>
-            </div>
-          </div>
+          {/* Map Display Panel */}
+          <Panel
+            title="Map"
+            defaultPosition={{ x: 20, y: 100 }}
+            defaultSize={{ w: 250, h: 200 }}
+            storageKey="map.panel"
+            visibilityEventType="mapPanelVisibilityChange"
+          >
+            <MapDisplay
+              aircraftLocation={bridgeData.telemetry?.location || null}
+              homeLocation={bridgeData.telemetry?.home_location || null}
+              compassHeading={bridgeData.telemetry?.compass_heading || bridgeData.telemetry?.heading || 0}
+            />
+          </Panel>
+
+          {/* HSI Compass Panel */}
+          <Panel
+            title="HSI Compass"
+            defaultPosition={{ x: 20, y: 320 }}
+            defaultSize={{ w: 250, h: 250 }}
+            storageKey="hsi.panel"
+            visibilityEventType="hsiPanelVisibilityChange"
+          >
+            <HSICompass
+              attitude={bridgeData.telemetry?.attitude || null}
+              heading={bridgeData.telemetry?.compass_heading || bridgeData.telemetry?.heading || 0}
+              homeDirection={bridgeData.telemetry?.home_bearing}
+              size="small"
+              telemetryData={bridgeData.telemetry}
+              standalone={false}
+            />
+          </Panel>
           
 
-          {/* Controller data overlay - Top Center */}
+          {/* Controller HUD Panel */}
           {bridgeData.controller && (
-            <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-20">
-              <div className="glass-panel p-2 text-xs">
-                <div className="flex items-center gap-4">
-                  <div>
-                    <span className="text-gray-400">L: </span>
-                    <span className="font-mono text-dji-blue">
-                      {bridgeData.controller.joystick.left_horizontal.toFixed(0)},{bridgeData.controller.joystick.left_vertical.toFixed(0)}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-gray-400">R: </span>
-                    <span className="font-mono text-dji-blue">
-                      {bridgeData.controller.joystick.right_horizontal.toFixed(0)},{bridgeData.controller.joystick.right_vertical.toFixed(0)}
-                    </span>
-                  </div>
+            <Panel
+              title="Controller"
+              defaultPosition={{ x: 400, y: 20 }}
+              defaultSize={{ w: 280, h: 100 }}
+              storageKey="controller.panel"
+              visibilityEventType="controllerPanelVisibilityChange"
+            >
+              <div className="flex items-center gap-4 text-xs">
+                <div>
+                  <span className="text-gray-400">L: </span>
+                  <span className="font-mono text-dji-blue">
+                    {bridgeData.controller.joystick.left_horizontal.toFixed(0)},{bridgeData.controller.joystick.left_vertical.toFixed(0)}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-gray-400">R: </span>
+                  <span className="font-mono text-dji-blue">
+                    {bridgeData.controller.joystick.right_horizontal.toFixed(0)},{bridgeData.controller.joystick.right_vertical.toFixed(0)}
+                  </span>
                 </div>
               </div>
-            </div>
+            </Panel>
           )}
 
           {/* Camera Selector for Vision/Agent */}

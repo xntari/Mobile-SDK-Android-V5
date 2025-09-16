@@ -1,12 +1,13 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { HSICompassProps } from '../types';
 
-export const HSICompass: React.FC<HSICompassProps> = ({ 
-  attitude, 
-  heading, 
+export const HSICompass: React.FC<HSICompassProps> = ({
+  attitude,
+  heading,
   homeDirection,
   size = 'normal',
-  telemetryData
+  telemetryData,
+  standalone = true
 }) => {
   const [useRawPerceptionData, setUseRawPerceptionData] = useState(true);
   const [scaleRange, setScaleRange] = useState(8); // Default 8m range
@@ -454,8 +455,12 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     ? { width: 208, height: 200, canvasWidth: 208, canvasHeight: 200 }
     : { width: 350, height: 260, canvasWidth: 350, canvasHeight: 260 };
 
+  const containerClass = standalone
+    ? `glass-panel ${size === 'small' ? 'p-2' : 'p-4'}`
+    : `w-full h-full flex flex-col ${size === 'small' ? 'p-2' : 'p-4'}`;
+
   return (
-    <div className={`glass-panel ${size === 'small' ? 'p-2' : 'p-4'}`}>
+    <div className={containerClass}>
       {size === 'normal' && (
         <div className="text-center mb-2">
           <div className="text-sm font-semibold text-gray-300">

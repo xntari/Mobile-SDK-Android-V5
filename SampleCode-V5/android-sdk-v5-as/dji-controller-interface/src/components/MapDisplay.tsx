@@ -3,9 +3,9 @@ import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { MapDisplayProps } from '../types';
 
-export const MapDisplay: React.FC<MapDisplayProps> = ({ 
-  aircraftLocation, 
-  homeLocation, 
+export const MapDisplay: React.FC<MapDisplayProps> = ({
+  aircraftLocation,
+  homeLocation,
   flightPath = [],
   compassHeading = 0
 }) => {
@@ -220,15 +220,13 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
   }, [mapReady, flightPath]);
 
   return (
-    <div className="glass-panel p-3 w-52">
-      <div className="text-xs text-gray-400 mb-2 text-center">Live Map</div>
-      
+    <div className="w-full h-full flex flex-col">
       {/* MapLibre container */}
-      <div className="w-44 h-32 rounded border border-gray-600 overflow-hidden relative mx-auto">
-        <div 
-          ref={mapContainer} 
+      <div className="flex-1 rounded border border-gray-600 overflow-hidden relative">
+        <div
+          ref={mapContainer}
           className="w-full h-full"
-          style={{ minHeight: '128px' }}
+          style={{ minHeight: '120px' }}
         />
         
 
