@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { visionPanelControls } from './VisionPanel';
 import { agentPanelControls } from './AgentPanel';
+import { fpvCameraPanelControls, h20nCameraPanelControls } from './CameraPanel';
 
 interface PanelControl {
   id: string;
@@ -10,6 +11,18 @@ interface PanelControl {
 }
 
 const panelControls: PanelControl[] = [
+  {
+    id: 'fpv',
+    title: 'FPV Camera',
+    isVisible: fpvCameraPanelControls.isVisible,
+    setVisible: fpvCameraPanelControls.setVisible
+  },
+  {
+    id: 'h20n',
+    title: 'H20N Camera',
+    isVisible: h20nCameraPanelControls.isVisible,
+    setVisible: h20nCameraPanelControls.setVisible
+  },
   {
     id: 'vision',
     title: 'Vision Analysis',

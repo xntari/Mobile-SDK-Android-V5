@@ -111,13 +111,13 @@ def _qwen_json(img: Image.Image, question: str | None, task: str | None, thr: fl
             "You are a precise multimodal assistant. Respond with JSON only. "
             "Return the list of visible objects. Keys: objects (unique list of up to 10 nouns, non-plural where possible"
         )
-        user_text = "List the clearly visible objects."
+        user_text = "List the clearly visible objects ranked by importance/confidence. Keys: objects (Only unique, maximum of 10 nouns, non-plural where possible)."
     elif task == 'describe':
         sys_msg = (
             "You are a precise multimodal assistant. Respond with JSON only. "
-            "Keys: caption (one paragraph, 3-5 sentences, grounded; describe the main objects, spatial layout, and any unusual elements), objects (optional concise list with count and confidence)."
+            "Keys: caption (one paragraph, max 3 sentences, grounded; describe the main objects, spatial layout, location, don't add subjective comments about the vibe or style)"
         )
-        user_text = "Describe the scene concisely in one paragraph."
+        user_text = "Describe the scene concisely in one paragraph. Grounded, describe the main objects, spatial layout, infer location, don't add subjective comments about the vibe."
     elif task == 'query':
         sys_msg = (
             "You are a precise multimodal assistant. Respond with JSON only. "
@@ -126,9 +126,9 @@ def _qwen_json(img: Image.Image, question: str | None, task: str | None, thr: fl
         user_text = f"Question: {question}" if question else "Question: (none)"
     else:
         sys_msg = (
-            "You are a precise multimodal assistant. Respond with JSON only. Keys: objects, caption, answer."
+            "You are a precise multimodal assistant. Respond with JSON only. Keys: answer."
         )
-        user_text = "Describe and list objects."
+        user_text = "Analyse the scene and respond to the query."
     scaled = _scale_image(img, max_side=320)
     messages = [
         {"role": "system", "content": [{"type":"text","text": sys_msg}]},

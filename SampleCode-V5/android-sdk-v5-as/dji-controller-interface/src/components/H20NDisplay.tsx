@@ -1,7 +1,8 @@
 import React, { useRef, useEffect, useState, forwardRef, useImperativeHandle } from 'react';
-import { H20NDisplayProps } from '../types';
+import { H20NDisplayProps, TelemetryData } from '../types';
 import { GimbalModeToggle, GimbalMode } from './GimbalModeToggle';
 import type { Detection } from '../agent/visionClient';
+import { CameraDisplay } from './CameraDisplay';
 
 export interface H20NDisplayRef {
   getSnapshot: () => Promise<string>;
@@ -20,7 +21,10 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
   width,
   height,
   className = '',
-  children
+  children,
+  telemetryData,
+  visionDetections = [],
+  agentDetections = []
 }, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -65,11 +69,7 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
   const [preciseDurationMs, setPreciseDurationMs] = useState<number>(700);
   const [preciseStrength, setPreciseStrength] = useState<number>(1.0);
 
-  // Agent overlay
-  const [agentDetections, setAgentDetections] = useState<Detection[]>([]);
-  const [visionDetections, setVisionDetections] = useState<Detection[]>([]);
-  // Clear vision boxes when camera moves (any gimbal command updates)
-  useEffect(()=>{ try{ setVisionDetections([]); }catch{} }, [lastGimbalCommand]);
+  // Clear vision boxes when camera moves (any gimbal command updates) - handled by parent App component now
 
   // Helper: provide a snapshot of the current canvas as base64 JPEG
   const getSnapshot = async (): Promise<string> => {
@@ -1242,6 +1242,11 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
             </div>
           )}
           
+          {/* HUD Overlay - Center of camera view */}
+          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-30">
+            <CameraDisplay />
+          </div>
+
           {/* Custom overlays passed as children */}
           {children}
       </div>

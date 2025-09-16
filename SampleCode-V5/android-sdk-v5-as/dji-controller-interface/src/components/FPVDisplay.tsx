@@ -1,6 +1,7 @@
 import React, { useRef, useEffect, useState, forwardRef, useImperativeHandle } from 'react';
-import { FPVDisplayProps } from '../types';
+import { FPVDisplayProps, TelemetryData } from '../types';
 import type { Detection } from '../agent/visionClient';
+import { FlightDisplay } from './FlightDisplay';
 
 export interface FPVDisplayRef {
   getSnapshot: () => Promise<string>;
@@ -10,7 +11,10 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
   width,
   height,
   className = '',
-  children
+  children,
+  telemetryData,
+  visionDetections = [],
+  agentDetections = []
 }, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -23,7 +27,6 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
   const [videoDimensions, setVideoDimensions] = useState({ width: 1920, height: 1080 });
   const [droppedFrameCount, setDroppedFrameCount] = useState<number>(0);
   const [displayRect, setDisplayRect] = useState({ left: 0, top: 0, width: 0, height: 0 });
-  const [visionDetections, setVisionDetections] = useState<Detection[]>([]);
   const spsRef = useRef<Uint8Array | null>(null);
   const ppsRef = useRef<Uint8Array | null>(null);
   const decoderConfiguredRef = useRef<boolean>(false);
@@ -638,8 +641,23 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
             const w = (d.x2 - d.x1) * (displayRect.width || 1);
             const h = (d.y2 - d.y1) * (displayRect.height || 1);
             return (
-              <div key={`vdd-${idx}`} className="absolute border border-green-400 z-10" style={{ left: x, top: y, width: w, height: h }}>
+              <div key={`vision-${idx}`} className="absolute border border-green-400 z-10" style={{ left: x, top: y, width: w, height: h }}>
                 <div className="absolute -top-5 left-0 bg-green-600 text-[10px] px-1 rounded text-white">
+                  {(d.label || 'obj')}{d.score ? ` ${(d.score*100).toFixed(0)}%` : ''}
+                </div>
+              </div>
+            );
+          })}
+
+          {/* Agent detections overlay */}
+          {agentDetections.map((d, idx) => {
+            const x = d.x1 * (displayRect.width || 1);
+            const y = d.y1 * (displayRect.height || 1);
+            const w = (d.x2 - d.x1) * (displayRect.width || 1);
+            const h = (d.y2 - d.y1) * (displayRect.height || 1);
+            return (
+              <div key={`agent-${idx}`} className="absolute border border-blue-400 z-10" style={{ left: x, top: y, width: w, height: h }}>
+                <div className="absolute -top-5 left-0 bg-blue-600 text-[10px] px-1 rounded text-white">
                   {(d.label || 'obj')}{d.score ? ` ${(d.score*100).toFixed(0)}%` : ''}
                 </div>
               </div>
@@ -691,6 +709,14 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
             </div>
           </div>
           
+          {/* HUD Overlay - Center of camera view */}
+          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-30">
+            <FlightDisplay
+              telemetryData={telemetryData}
+              size="compact"
+            />
+          </div>
+
           {/* Custom overlays passed as children */}
           {children}
       </div>
