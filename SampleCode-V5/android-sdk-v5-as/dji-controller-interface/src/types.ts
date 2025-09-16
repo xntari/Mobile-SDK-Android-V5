@@ -117,6 +117,9 @@ export interface FPVDisplayProps {
   height?: number;
   className?: string;
   children?: React.ReactNode;
+  telemetryData?: TelemetryData | null;
+  visionDetections?: any[];
+  agentDetections?: any[];
 }
 
 export interface H20NDisplayProps {
@@ -124,6 +127,9 @@ export interface H20NDisplayProps {
   height?: number;
   className?: string;
   children?: React.ReactNode;
+  telemetryData?: TelemetryData | null;
+  visionDetections?: any[];
+  agentDetections?: any[];
 }
 
 export interface HSICompassProps {

@@ -13,11 +13,14 @@ import { CameraControls } from './CameraControls';
 import { ConnectionStatus } from './ConnectionStatus';
 import { VisionPanel } from './VisionPanel';
 import { AgentPanel } from './AgentPanel';
+import { CameraPanel } from './CameraPanel';
 import { bridgeManager } from '../bridgeManager';
 
 export const App: React.FC = () => {
   const { bridgeData, connectionStatus } = useStableBridgeData();
-  const [displayMode, setDisplayMode] = useState<'fpv' | 'h20n'>('fpv');
+
+  // Camera selection for snapshot functionality
+  const [selectedCamera, setSelectedCamera] = useState<'fpv' | 'h20n'>('fpv');
 
   // Shared detection state for vision/agent integration
   const [visionDetections, setVisionDetections] = useState<any[]>([]);
@@ -30,11 +33,12 @@ export const App: React.FC = () => {
   // Bridge integration functions
   const getSnapshot = async (): Promise<string> => {
     try {
-      // Get snapshot from currently active camera display
-      const activeRef = displayMode === 'fpv' ? fpvDisplayRef.current : h20nDisplayRef.current;
-      if (activeRef?.getSnapshot) {
-        return await activeRef.getSnapshot();
+      // Use the selected camera for snapshot
+      const targetRef = selectedCamera === 'fpv' ? fpvDisplayRef.current : h20nDisplayRef.current;
+      if (targetRef?.getSnapshot) {
+        return await targetRef.getSnapshot();
       }
+
       // Fallback to any available camera
       const fallbackRef = fpvDisplayRef.current || h20nDisplayRef.current;
       if (fallbackRef?.getSnapshot) {
@@ -79,43 +83,41 @@ export const App: React.FC = () => {
           connectionStatus={connectionStatus}
         />
 
-        {/* Main Content Area */}
-        <div className="flex-1 relative bg-black">
-          {/* Camera Display Toggle */}
-          <div className="absolute top-4 right-4 z-30">
-            <div className="glass-panel p-2">
-              <div className="flex items-center gap-2 text-xs">
-                <span className="text-gray-400">Camera:</span>
-                <button
-                  onClick={() => setDisplayMode('fpv')}
-                  className={`px-3 py-1 rounded ${
-                    displayMode === 'fpv' 
-                      ? 'bg-dji-blue text-white' 
-                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                  }`}
-                >
-                  FPV
-                </button>
-                <button
-                  onClick={() => setDisplayMode('h20n')}
-                  className={`px-3 py-1 rounded ${
-                    displayMode === 'h20n' 
-                      ? 'bg-dji-blue text-white' 
-                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                  }`}
-                >
-                  H20N
-                </button>
-              </div>
-            </div>
-          </div>
+        {/* Main Content Area - Dark background for floating panels */}
+        <div className="flex-1 relative bg-dji-dark">
+          {/* FPV Camera Panel */}
+          <CameraPanel
+            title="FPV Camera"
+            defaultPosition={{ x: 50, y: 50 }}
+            defaultSize={{ w: 640, h: 480 }}
+            storageKey="fpv.panel"
+            visibilityEventType="fpvCameraPanelVisibilityChange"
+          >
+            <FPVDisplay
+              ref={fpvDisplayRef}
+              className="w-full h-full"
+              telemetryData={bridgeData.telemetry}
+              visionDetections={selectedCamera === 'fpv' ? visionDetections : []}
+              agentDetections={selectedCamera === 'fpv' ? agentDetections : []}
+            />
+          </CameraPanel>
 
-          {/* Conditional Camera Display */}
-          {displayMode === 'fpv' ? (
-            <FPVDisplay ref={fpvDisplayRef} className="w-full h-full" />
-          ) : (
-            <H20NDisplay ref={h20nDisplayRef} className="w-full h-full" />
-          )}
+          {/* H20N Camera Panel */}
+          <CameraPanel
+            title="H20N Camera"
+            defaultPosition={{ x: 720, y: 50 }}
+            defaultSize={{ w: 640, h: 480 }}
+            storageKey="h20n.panel"
+            visibilityEventType="h20nCameraPanelVisibilityChange"
+          >
+            <H20NDisplay
+              ref={h20nDisplayRef}
+              className="w-full h-full"
+              telemetryData={bridgeData.telemetry}
+              visionDetections={selectedCamera === 'h20n' ? visionDetections : []}
+              agentDetections={selectedCamera === 'h20n' ? agentDetections : []}
+            />
+          </CameraPanel>
 
           {/* Shared overlays that appear on both displays */}
           {/* Navigation panel - Top Left Corner */}
@@ -141,17 +143,6 @@ export const App: React.FC = () => {
             </div>
           </div>
           
-          {/* HUD Overlay - Center of screen */}
-          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-30">
-            {displayMode === 'fpv' ? (
-              <FlightDisplay 
-                telemetryData={bridgeData.telemetry}
-                size="compact"
-              />
-            ) : (
-              <CameraDisplay />
-            )}
-          </div>
 
           {/* Controller data overlay - Top Center */}
           {bridgeData.controller && (
@@ -174,6 +165,35 @@ export const App: React.FC = () => {
               </div>
             </div>
           )}
+
+          {/* Camera Selector for Vision/Agent */}
+          <div className="absolute top-4 right-4 z-30">
+            <div className="glass-panel p-2">
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-gray-400">Snapshot Camera:</span>
+                <button
+                  onClick={() => setSelectedCamera('fpv')}
+                  className={`px-3 py-1 rounded ${
+                    selectedCamera === 'fpv'
+                      ? 'bg-dji-blue text-white'
+                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  }`}
+                >
+                  FPV
+                </button>
+                <button
+                  onClick={() => setSelectedCamera('h20n')}
+                  className={`px-3 py-1 rounded ${
+                    selectedCamera === 'h20n'
+                      ? 'bg-dji-blue text-white'
+                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  }`}
+                >
+                  H20N
+                </button>
+              </div>
+            </div>
+          </div>
 
           {/* Global panels - persist across camera switching */}
           <VisionPanel
