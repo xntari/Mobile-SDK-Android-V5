@@ -10,6 +10,25 @@ export interface AgentPanelProps {
   laserResult?: any;
 }
 
+// Global visibility controls for Components menu
+export const agentPanelControls = {
+  isVisible: (): boolean => {
+    try {
+      const raw = localStorage.getItem('agent.panel.visible');
+      return raw ? JSON.parse(raw) : true;
+    } catch {
+      return true;
+    }
+  },
+  setVisible: (visible: boolean): void => {
+    try {
+      localStorage.setItem('agent.panel.visible', JSON.stringify(visible));
+      // Trigger a custom event to notify the panel
+      window.dispatchEvent(new CustomEvent('agentPanelVisibilityChange', { detail: visible }));
+    } catch {}
+  }
+};
+
 export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge, setDetections, laserResult }) => {
   const [prompt, setPrompt] = useState('find person');
   const [running, setRunning] = useState(false);
@@ -23,6 +42,13 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
   const [programView, setProgramView] = useState<'final'|'high'>('final');
   const [planErrors, setPlanErrors] = useState<Array<{ message: string; path?: string }>>([]);
   const [thr, setThr] = useState<number>(() => getActiveThreshold());
+  const [visible, setVisible] = useState<boolean>(() => {
+    try {
+      const raw = localStorage.getItem('agent.panel.visible');
+      return raw ? JSON.parse(raw) : true;
+    } catch {}
+    return true;
+  });
   const [pos, setPos] = useState<{ x: number; y: number }>(() => {
     try {
       const raw = localStorage.getItem('agent.panel.pos');
@@ -96,10 +122,23 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
     setRunning(false);
   }, []);
 
-  // Persist position when it changes
+  // Persist position and visibility when they change
   React.useEffect(() => {
     try { localStorage.setItem('agent.panel.pos', JSON.stringify(pos)); } catch {}
   }, [pos]);
+
+  React.useEffect(() => {
+    try { localStorage.setItem('agent.panel.visible', JSON.stringify(visible)); } catch {}
+  }, [visible]);
+
+  // Listen for external visibility changes
+  React.useEffect(() => {
+    const handleVisibilityChange = (e: CustomEvent) => {
+      setVisible(e.detail);
+    };
+    window.addEventListener('agentPanelVisibilityChange', handleVisibilityChange as EventListener);
+    return () => window.removeEventListener('agentPanelVisibilityChange', handleVisibilityChange as EventListener);
+  }, []);
 
   // Log LRF results as they arrive
   React.useEffect(() => {
@@ -133,21 +172,39 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
         if (!dragRef.current) return;
         setPos({ x: ev.clientX - dragRef.current.dx, y: ev.clientY - dragRef.current.dy });
       };
-      const onUp = () => { 
-        dragRef.current = null; 
-        window.removeEventListener('mousemove', onMove); 
+      const onUp = () => {
+        dragRef.current = null;
+        window.removeEventListener('mousemove', onMove);
         window.removeEventListener('mouseup', onUp);
         try { localStorage.setItem('agent.panel.pos', JSON.stringify(pos)); } catch {}
       };
       window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
     }}>
       <div className="text-xs text-gray-400 font-semibold">AGENT</div>
-      <div className={`text-[10px] ${running ? 'text-green-400' : 'text-gray-500'}`}>{running ? 'running' : 'idle'}</div>
+      <div className="flex items-center gap-2">
+        <div className={`text-[10px] ${running ? 'text-green-400' : 'text-gray-500'}`}>{running ? 'running' : 'idle'}</div>
+        <button
+          className="text-[10px] text-gray-400 hover:text-white"
+          onClick={(e) => { e.stopPropagation(); setVisible(false); }}
+          title="Hide panel"
+        >✕</button>
+      </div>
     </div>
   ), [running, pos]);
 
   return (
-    <div ref={panelRef} className="glass-panel p-2" style={{ position: 'fixed', left: pos.x, top: pos.y, width: size.w, height: size.h, minWidth: 320, minHeight: 260, resize: 'both' as any, overflow: 'hidden' }}>
+    <div ref={panelRef} className="glass-panel p-2" style={{
+      position: 'fixed',
+      left: pos.x,
+      top: pos.y,
+      width: size.w,
+      height: size.h,
+      minWidth: 320,
+      minHeight: 260,
+      resize: 'both' as any,
+      overflow: 'hidden',
+      display: visible ? 'block' : 'none' // Hide without unmounting
+    }}>
       {header}
       {/* Status chips */}
       <div className="flex gap-1 mb-1 select-text">
@@ -287,8 +344,11 @@ export function usePersistPanelSize(ref: React.RefObject<HTMLDivElement>, setSiz
     const ro = new ResizeObserver(() => {
       const rect = el.getBoundingClientRect();
       const s = { w: Math.round(rect.width), h: Math.round(rect.height) };
-      setSize(s);
-      try { localStorage.setItem('agent.panel.size', JSON.stringify(s)); } catch {}
+      // Only update if panel has actual size (not hidden with display:none)
+      if (s.w > 0 && s.h > 0) {
+        setSize(s);
+        try { localStorage.setItem('agent.panel.size', JSON.stringify(s)); } catch {}
+      }
     });
     ro.observe(el);
     return () => ro.disconnect();

@@ -1,14 +1,17 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, forwardRef, useImperativeHandle } from 'react';
 import { FPVDisplayProps } from '../types';
 import type { Detection } from '../agent/visionClient';
-import { VisionPanel } from './VisionPanel';
 
-export const FPVDisplay: React.FC<FPVDisplayProps> = ({ 
-  width, 
-  height, 
+export interface FPVDisplayRef {
+  getSnapshot: () => Promise<string>;
+}
+
+export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
+  width,
+  height,
   className = '',
   children
-}) => {
+}, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const videoDecoderRef = useRef<VideoDecoder | null>(null);
@@ -130,7 +133,12 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
     return off.toDataURL('image/jpeg', 0.9);
   };
 
-  
+  // Expose methods via ref
+  useImperativeHandle(ref, () => ({
+    getSnapshot
+  }), []);
+
+
 
   useEffect(() => {
     let cleanup: (() => void) | undefined;
@@ -613,12 +621,6 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
         ref={canvasRef}
         className="w-full h-full object-contain"
       />
-      {/* Vision Panel */}
-      <VisionPanel
-        getSnapshot={getSnapshot}
-        setBoxes={setVisionDetections}
-      />
-      
       {/* Video content overlay area - matches actual video display rectangle */}
       <div 
         className="absolute"
@@ -694,4 +696,6 @@ export const FPVDisplay: React.FC<FPVDisplayProps> = ({
       </div>
     </div>
   );
-};
+});
+
+FPVDisplay.displayName = 'FPVDisplay';

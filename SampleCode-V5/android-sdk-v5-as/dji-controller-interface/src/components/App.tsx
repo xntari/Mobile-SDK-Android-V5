@@ -1,8 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useStableBridgeData } from '../hooks/useStableBridgeData';
 import { TopBar } from './TopBar';
-import { FPVDisplay } from './FPVDisplay';
-import { H20NDisplay } from './H20NDisplay';
+import { FPVDisplay, FPVDisplayRef } from './FPVDisplay';
+import { H20NDisplay, H20NDisplayRef } from './H20NDisplay';
 import { TakeOffButton } from './TakeOffButton';
 import { ReturnHomeButton } from './ReturnHomeButton';
 import { HSICompass } from './HSICompass';
@@ -11,10 +11,50 @@ import { FlightDisplay } from './FlightDisplay';
 import { CameraDisplay } from './CameraDisplay';
 import { CameraControls } from './CameraControls';
 import { ConnectionStatus } from './ConnectionStatus';
+import { VisionPanel } from './VisionPanel';
+import { AgentPanel } from './AgentPanel';
+import { bridgeManager } from '../bridgeManager';
 
 export const App: React.FC = () => {
   const { bridgeData, connectionStatus } = useStableBridgeData();
   const [displayMode, setDisplayMode] = useState<'fpv' | 'h20n'>('fpv');
+
+  // Shared detection state for vision/agent integration
+  const [visionDetections, setVisionDetections] = useState<any[]>([]);
+  const [agentDetections, setAgentDetections] = useState<any[]>([]);
+
+  // References to camera displays for snapshot functionality
+  const fpvDisplayRef = useRef<FPVDisplayRef>(null);
+  const h20nDisplayRef = useRef<H20NDisplayRef>(null);
+
+  // Bridge integration functions
+  const getSnapshot = async (): Promise<string> => {
+    try {
+      // Get snapshot from currently active camera display
+      const activeRef = displayMode === 'fpv' ? fpvDisplayRef.current : h20nDisplayRef.current;
+      if (activeRef?.getSnapshot) {
+        return await activeRef.getSnapshot();
+      }
+      // Fallback to any available camera
+      const fallbackRef = fpvDisplayRef.current || h20nDisplayRef.current;
+      if (fallbackRef?.getSnapshot) {
+        return await fallbackRef.getSnapshot();
+      }
+      throw new Error('No camera display available for snapshot');
+    } catch (error) {
+      console.error('Snapshot failed:', error);
+      return 'data:image/jpeg;base64,'; // Return empty base64 as fallback
+    }
+  };
+
+  const sendBridge = async (msg: any): Promise<any> => {
+    try {
+      return await bridgeManager.sendBridgeCommand(msg);
+    } catch (error) {
+      console.error('Bridge command failed:', error);
+      return { success: false, error: error.message };
+    }
+  };
 
   // Show connection screen while not connected or no data at all
   const hasAnyData = bridgeData.controller || bridgeData.telemetry || bridgeData.battery;
@@ -32,13 +72,13 @@ export const App: React.FC = () => {
     return (
       <div className="h-screen bg-dji-dark text-white flex flex-col overflow-hidden no-select">
         {/* Top Status Bar */}
-        <TopBar 
+        <TopBar
           batteryData={bridgeData.battery}
           telemetryData={bridgeData.telemetry}
           controllerData={bridgeData.controller}
           connectionStatus={connectionStatus}
         />
-        
+
         {/* Main Content Area */}
         <div className="flex-1 relative bg-black">
           {/* Camera Display Toggle */}
@@ -72,9 +112,9 @@ export const App: React.FC = () => {
 
           {/* Conditional Camera Display */}
           {displayMode === 'fpv' ? (
-            <FPVDisplay className="w-full h-full" />
+            <FPVDisplay ref={fpvDisplayRef} className="w-full h-full" />
           ) : (
-            <H20NDisplay className="w-full h-full" />
+            <H20NDisplay ref={h20nDisplayRef} className="w-full h-full" />
           )}
 
           {/* Shared overlays that appear on both displays */}
@@ -134,6 +174,20 @@ export const App: React.FC = () => {
               </div>
             </div>
           )}
+
+          {/* Global panels - persist across camera switching */}
+          <VisionPanel
+            getSnapshot={getSnapshot}
+            setBoxes={setVisionDetections}
+          />
+
+          <AgentPanel
+            getSnapshot={getSnapshot}
+            sendBridge={sendBridge}
+            setDetections={setAgentDetections}
+            laserResult={null}
+          />
+
         </div>
       </div>
     );

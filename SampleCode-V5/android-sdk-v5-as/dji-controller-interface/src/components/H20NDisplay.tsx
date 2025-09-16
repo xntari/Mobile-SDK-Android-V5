@@ -1,9 +1,11 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, forwardRef, useImperativeHandle } from 'react';
 import { H20NDisplayProps } from '../types';
 import { GimbalModeToggle, GimbalMode } from './GimbalModeToggle';
-import { AgentPanel } from './AgentPanel';
-import { VisionPanel } from './VisionPanel';
 import type { Detection } from '../agent/visionClient';
+
+export interface H20NDisplayRef {
+  getSnapshot: () => Promise<string>;
+}
 
 interface ClickIndicator {
   id: string;
@@ -14,12 +16,12 @@ interface ClickIndicator {
   message?: string;
 }
 
-export const H20NDisplay: React.FC<H20NDisplayProps> = ({ 
-  width, 
-  height, 
+export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
+  width,
+  height,
   className = '',
   children
-}) => {
+}, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const videoDecoderRef = useRef<VideoDecoder | null>(null);
@@ -88,7 +90,11 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
     }
   };
 
-  
+  // Expose methods via ref
+  useImperativeHandle(ref, () => ({
+    getSnapshot
+  }), []);
+
 
   // Handle canvas click for gimbal tap-to-target or precise look functionality
   const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1003,22 +1009,6 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
         }}
       />
 
-      {/* Agent Panel - bottom-right to avoid overlap with controls */}
-      <div className="absolute right-4 bottom-4 z-30 pointer-events-auto">
-        <AgentPanel 
-          getSnapshot={getSnapshot}
-          sendBridge={(msg:any)=> (window as any).electronAPI?.sendBridgeCommand(msg) ?? Promise.resolve({success:false})}
-          setDetections={setAgentDetections}
-          laserResult={lastLaserResult}
-        />
-      </div>
-
-      {/* Vision Panel - top-left; visible in H20N */}
-      <VisionPanel
-        getSnapshot={getSnapshot}
-        setBoxes={setVisionDetections}
-      />
-      
       {/* Gimbal Mode Toggle - default bottom-left */}
       <div className="absolute bottom-4 left-4 z-30 pointer-events-auto">
         <GimbalModeToggle 
@@ -1257,4 +1247,6 @@ export const H20NDisplay: React.FC<H20NDisplayProps> = ({
       </div>
     </div>
   );
-};
+});
+
+H20NDisplay.displayName = 'H20NDisplay';

@@ -1,6 +1,7 @@
 import React from 'react';
 import { TopBarProps } from '../types';
 import { SettingsModal } from './SettingsModal';
+import { ComponentsMenu } from './ComponentsMenu';
 
 export const TopBar: React.FC<TopBarProps> = ({ 
   batteryData, 
@@ -145,6 +146,9 @@ export const TopBar: React.FC<TopBarProps> = ({
             </div>
           </div>
         )}
+
+        {/* Components menu */}
+        <ComponentsMenu />
 
         {/* Settings menu */}
         <div className="relative">

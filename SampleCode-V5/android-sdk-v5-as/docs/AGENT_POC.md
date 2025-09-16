@@ -14,11 +14,10 @@ Current Phase (Program + Camera Tools)
 - Planner: program‑only service returns both the high‑level macro program and the fully expanded program; server expands macros recursively and validates strictly.
 
 Status Summary
-- UI (Agent): free‑floating, movable, resizable; Run/Stop; detector threshold toggle; ribbon timings; Plan errors panel; Program viewer (toggle: High‑level/Final); execution trace with auto‑scroll. Pane sizes persist in localStorage.
-- Executor: deterministic interpreter (no NL parsing). Handles execution‑time realities only: detect retries; look_at cooldown. While loop timing is measured per loop.
-- Vision: HTTP `/detect` (open‑vocabulary) and `/describe` (multi‑label) services. Threshold adjustable in UI. Overlays render pre‑slew and post‑slew.
-- Bridge: `gimbal_tap_target`, `camera_laser_enable`, `camera_laser_measure`.
-- Planner: program‑only; returns `{ program, high_level_program }` or `{ errors }`. Server expands macros until only primitive/structural nodes remain and validates strictly.
+- Panels: Vision + Agent are floating/resizable; Settings modal for endpoints; boxes always green; Vision works in FPV/H20N.
+- Planner: program‑only; returns `{ program, high_level_program }` or `{ errors }`. Server expands macros recursively and validates strictly.
+- Executor: deterministic interpreter (no NL parsing). Handles cooldowns + retries; while timing per loop.
+- Bridge: resilient WebSocket autoreconnect on RSV frame errors (‘reconnecting’ state keeps UI visible).
 
 Planner + DSL (program‑only)
 - The planner generates a formal program (DSL). See `docs/AGENT_DSL.md`.
@@ -37,9 +36,8 @@ Key Files
   - `tools/vision_detect_server.py` (FastAPI; OWL‑ViT if available; `/detect` and `/describe`)
   - `tools/planner_service.py` (FastAPI; OpenAI via `OPENAI_API_KEY`)
 
-User‑Visible Behavior
-- H20N/FPV: click “Describe” → boxes with labels/confidences overlay the video (debug only).
-- Agent on H20N: “find person” → Run. Program (High‑level/Final) is shown; the view recenters, laser rangefinder measures; execution trace shows resolved values.
+User‑Visible Behavior (Vision panel)
+- Find objects → editable list; Boxes → OWL‑ViT boxes for labels; Describe → 1‑paragraph; Query → 1‑paragraph answer.
 
 Tool / API Contracts
 - Bridge (already implemented)
@@ -47,8 +45,8 @@ Tool / API Contracts
   - `camera_laser_enable { enabled }`
   - `camera_laser_measure { x, y }` → async `camera_laser_result { distance_m, lat, lon, alt_m, ... }`
 - Vision facade
-  - Detect: `POST http://127.0.0.1:9001/detect { image, query, threshold? }` → `{ boxes: [{x1,y1,x2,y2,score,label?}] }`
-  - Describe: `POST http://127.0.0.1:9001/describe { image, labels?, threshold?, top_k? }` → `{ boxes: [{x1,y1,x2,y2,score,label?}] }`
+  - Detect: `POST /detect { image, query, threshold? }` → `{ boxes: [...] }`
+  - General: `POST /general/analyze { image, task, question?, threshold? }` → `{ objects, caption, answer }`
   - Coordinates normalized to [0,1].
 
 Setup: Mac (MacBook Air)

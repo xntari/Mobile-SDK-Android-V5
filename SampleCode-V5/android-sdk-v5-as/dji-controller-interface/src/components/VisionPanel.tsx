@@ -8,9 +8,32 @@ export interface VisionPanelProps {
   setBoxes?: (boxes: Detection[]) => void; // overlay boxes on the active camera view
 }
 
+// Global visibility controls for Components menu
+export const visionPanelControls = {
+  isVisible: (): boolean => {
+    try {
+      const raw = localStorage.getItem('vision.panel.visible');
+      return raw ? JSON.parse(raw) : true;
+    } catch {
+      return true;
+    }
+  },
+  setVisible: (visible: boolean): void => {
+    try {
+      localStorage.setItem('vision.panel.visible', JSON.stringify(visible));
+      // Trigger a custom event to notify the panel
+      window.dispatchEvent(new CustomEvent('visionPanelVisibilityChange', { detail: visible }));
+    } catch {}
+  }
+};
+
 function getGeneralUrl(): string { return getGeneralVisionUrl(); }
 
 export const VisionPanel: React.FC<VisionPanelProps> = ({ getSnapshot, setBoxes }) => {
+  const [visible, setVisible] = React.useState<boolean>(()=>{
+    try { const raw = localStorage.getItem('vision.panel.visible'); if (raw) return JSON.parse(raw); } catch {}
+    return true;
+  });
   const [pos, setPos] = React.useState<{x:number;y:number}>(()=>{
     try { const raw = localStorage.getItem('vision.panel.pos'); if (raw) return JSON.parse(raw); } catch {}
     return { x: 24, y: 24 };
@@ -34,19 +57,32 @@ export const VisionPanel: React.FC<VisionPanelProps> = ({ getSnapshot, setBoxes 
   const panelRef = React.useRef<HTMLDivElement|null>(null);
 
   React.useEffect(()=>{ try{ localStorage.setItem('vision.panel.pos', JSON.stringify(pos)); }catch{} }, [pos]);
+  React.useEffect(()=>{ try{ localStorage.setItem('vision.panel.visible', JSON.stringify(visible)); }catch{} }, [visible]);
   React.useEffect(()=>{ try{ localStorage.setItem('vision.thr', JSON.stringify(thr)); }catch{} }, [thr]);
+
+  // Listen for external visibility changes
+  React.useEffect(() => {
+    const handleVisibilityChange = (e: CustomEvent) => {
+      setVisible(e.detail);
+    };
+    window.addEventListener('visionPanelVisibilityChange', handleVisibilityChange as EventListener);
+    return () => window.removeEventListener('visionPanelVisibilityChange', handleVisibilityChange as EventListener);
+  }, []);
   React.useEffect(()=>{
     if (!panelRef.current) return;
     const el = panelRef.current;
     const ro = new ResizeObserver(()=>{
       const r = el.getBoundingClientRect();
       const s = { w: Math.round(r.width), h: Math.round(r.height) };
-      setSize(s);
-      try { localStorage.setItem('vision.panel.size', JSON.stringify(s)); } catch {}
+      // Only update if panel is visible and has actual size
+      if (visible && s.w > 0 && s.h > 0) {
+        setSize(s);
+        try { localStorage.setItem('vision.panel.size', JSON.stringify(s)); } catch {}
+      }
     });
     ro.observe(el);
     return ()=>ro.disconnect();
-  },[]);
+  },[visible]);
   React.useEffect(()=>{ try{ localStorage.setItem('vision.objText', objText);}catch{} }, [objText]);
 
   async function callGeneral(params: { question?: string; task?: 'objects'|'describe'|'query' }): Promise<{ objects?: any[]; caption?: string; answer?: string }>{
@@ -132,12 +168,31 @@ export const VisionPanel: React.FC<VisionPanelProps> = ({ getSnapshot, setBoxes 
         window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
       }}>
       <div className="text-xs text-gray-400 font-semibold">VISION</div>
-      <div className={`text-[10px] ${busy? 'text-green-400':'text-gray-500'}`}>{busy? 'busy':'idle'}</div>
+      <div className="flex items-center gap-2">
+        <div className={`text-[10px] ${busy? 'text-green-400':'text-gray-500'}`}>{busy? 'busy':'idle'}</div>
+        <button
+          className="text-[10px] text-gray-400 hover:text-white"
+          onClick={(e) => { e.stopPropagation(); setVisible(false); }}
+          title="Hide panel"
+        >✕</button>
+      </div>
     </div>
   );
 
   return (
-    <div ref={panelRef} className="glass-panel p-2" style={{ position: 'fixed', left: pos.x, top: pos.y, width: size.w, height: size.h, minWidth: 320, minHeight: 260, resize: 'both' as any, overflow: 'hidden', zIndex: 50 }}>
+    <div ref={panelRef} className="glass-panel p-2" style={{
+      position: 'fixed',
+      left: pos.x,
+      top: pos.y,
+      width: size.w,
+      height: size.h,
+      minWidth: 320,
+      minHeight: 260,
+      resize: 'both' as any,
+      overflow: 'hidden',
+      zIndex: 50,
+      display: visible ? 'block' : 'none' // Hide without unmounting
+    }}>
       {header}
       <div className="mb-2 text-[10px] text-gray-300 select-text">thr
         <input type="range" min={0.05} max={0.20} step={0.01} value={thr} onChange={(e)=>setThr(parseFloat(e.target.value))} className="mx-2 align-middle" />
