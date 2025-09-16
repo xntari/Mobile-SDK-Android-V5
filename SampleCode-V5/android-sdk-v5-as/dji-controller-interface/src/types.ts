@@ -142,7 +142,7 @@ export interface MapDisplayProps {
 }
 
 // Connection and status types
-export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+export type ConnectionStatus = 'disconnected' | 'connecting' | 'reconnecting' | 'connected' | 'error';
 
 export interface WindowControls {
   minimize: () => void;

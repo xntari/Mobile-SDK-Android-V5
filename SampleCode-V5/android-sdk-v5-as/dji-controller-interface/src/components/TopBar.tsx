@@ -1,5 +1,6 @@
 import React from 'react';
 import { TopBarProps } from '../types';
+import { SettingsModal } from './SettingsModal';
 
 export const TopBar: React.FC<TopBarProps> = ({ 
   batteryData, 
@@ -46,6 +47,9 @@ export const TopBar: React.FC<TopBarProps> = ({
 
   const battery = getBatteryStatus();
   const gps = getGPSStatus();
+  const [openSettings, setOpenSettings] = React.useState(false);
+  const [settingsTab, setSettingsTab] = React.useState<'endpoints'|'models'>('endpoints');
+  const [menuOpen, setMenuOpen] = React.useState(false);
 
   return (
     <div className="h-16 bg-black bg-opacity-90 border-b border-gray-700 flex items-center justify-between px-6 text-sm">
@@ -88,7 +92,7 @@ export const TopBar: React.FC<TopBarProps> = ({
         <div className="flex items-center gap-2">
           <div className={`status-indicator ${
             connectionStatus === 'connected' ? 'bg-status-good' :
-            connectionStatus === 'connecting' ? 'bg-status-warning animate-pulse' :
+            (connectionStatus === 'connecting' || connectionStatus === 'reconnecting') ? 'bg-status-warning animate-pulse' :
             'bg-status-error'
           }`}></div>
           <span className="text-xs text-gray-300">
@@ -109,7 +113,7 @@ export const TopBar: React.FC<TopBarProps> = ({
         )}
       </div>
 
-      {/* Right Side - Telemetry */}
+      {/* Right Side - Telemetry + Menu */}
       <div className="flex items-center gap-6">
         {/* RC Signal */}
         <div className="flex items-center gap-2">
@@ -142,6 +146,17 @@ export const TopBar: React.FC<TopBarProps> = ({
           </div>
         )}
 
+        {/* Settings menu */}
+        <div className="relative">
+          <button className="px-2 py-1 text-xs rounded bg-gray-700 text-gray-200 hover:bg-gray-600" onClick={()=>setMenuOpen(v=>!v)}>Settings ▾</button>
+          {menuOpen && (
+            <div className="absolute right-0 mt-1 w-40 bg-gray-900 border border-gray-700 rounded shadow-lg text-xs z-50" onMouseLeave={()=>setMenuOpen(false)}>
+              <button className="block w-full text-left px-3 py-2 hover:bg-gray-800" onClick={()=>{ setMenuOpen(false); setSettingsTab('models'); setOpenSettings(true); }}>Models</button>
+              <button className="block w-full text-left px-3 py-2 hover:bg-gray-800" onClick={()=>{ setMenuOpen(false); setSettingsTab('endpoints'); setOpenSettings(true); }}>Endpoints</button>
+            </div>
+          )}
+        </div>
+
         {/* Window Controls */}
         <div className="flex items-center gap-1 ml-4">
           <button 
@@ -161,6 +176,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           />
         </div>
       </div>
+      <SettingsModal open={openSettings} onClose={()=>setOpenSettings(false)} initialTab={settingsTab} />
     </div>
   );
 };
