@@ -109,6 +109,9 @@ android-sdk-v5-as/
 
 ## Features
 
+Planning & Handoff
+- See `docs/ROADMAP.md` for the current plan, TL;DR status, and next steps. Keep it updated after changes.
+
 ### ✅ Separate Build and Deploy Scripts
 - **Independent operations**: Build once, deploy multiple times
 - **Faster development**: Deploy to different devices without rebuilding
