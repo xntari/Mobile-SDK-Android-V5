@@ -1,4 +1,5 @@
 import React from 'react';
+import { getNextZIndex, getBaseZIndex } from '../utils/zIndex';
 
 // Generic panel controls factory
 export const createPanelControls = (storageKey: string, eventType: string) => ({
@@ -64,6 +65,14 @@ export const Panel: React.FC<PanelProps> = ({
     }
   });
 
+  const [zIndex, setZIndex] = React.useState<number>(() => {
+    try {
+      const stored = localStorage.getItem(`${storageKey}.zIndex`);
+      return stored ? parseInt(stored) : getBaseZIndex();
+    } catch {
+      return getBaseZIndex();
+    }
+  });
   const dragRef = React.useRef<{ dx: number; dy: number } | null>(null);
   const panelRef = React.useRef<HTMLDivElement | null>(null);
 
@@ -86,6 +95,12 @@ export const Panel: React.FC<PanelProps> = ({
     } catch {}
   }, [size, storageKey]);
 
+  React.useEffect(() => {
+    try {
+      localStorage.setItem(`${storageKey}.zIndex`, zIndex.toString());
+    } catch {}
+  }, [zIndex, storageKey]);
+
   // Listen for external visibility changes
   React.useEffect(() => {
     const handleVisibilityChange = (e: CustomEvent) => {
@@ -94,6 +109,39 @@ export const Panel: React.FC<PanelProps> = ({
     window.addEventListener(visibilityEventType, handleVisibilityChange as EventListener);
     return () => window.removeEventListener(visibilityEventType, handleVisibilityChange as EventListener);
   }, [visibilityEventType]);
+
+  // Listen for layout refresh events
+  React.useEffect(() => {
+    const handleLayoutRefresh = () => {
+      // Reload position, size, and zIndex from localStorage
+      try {
+        const storedPos = localStorage.getItem(`${storageKey}.pos`);
+        const storedSize = localStorage.getItem(`${storageKey}.size`);
+        const storedZIndex = localStorage.getItem(`${storageKey}.zIndex`);
+        const storedVisible = localStorage.getItem(`${storageKey}.visible`);
+
+        if (storedPos) {
+          const newPos = JSON.parse(storedPos);
+          setPos(newPos);
+        }
+        if (storedSize) {
+          const newSize = JSON.parse(storedSize);
+          setSize(newSize);
+        }
+        if (storedZIndex) {
+          setZIndex(parseInt(storedZIndex));
+        }
+        if (storedVisible) {
+          setVisible(JSON.parse(storedVisible));
+        }
+      } catch (error) {
+        console.error(`Failed to refresh layout for ${storageKey}:`, error);
+      }
+    };
+
+    window.addEventListener('layoutRefresh', handleLayoutRefresh);
+    return () => window.removeEventListener('layoutRefresh', handleLayoutRefresh);
+  }, [storageKey]);
 
   // ResizeObserver to track size changes from CSS resize
   React.useEffect(() => {
@@ -111,6 +159,9 @@ export const Panel: React.FC<PanelProps> = ({
   }, [visible]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
+    // Bring to front when starting drag - simple and fast
+    setZIndex(getNextZIndex());
+
     dragRef.current = { dx: e.clientX - pos.x, dy: e.clientY - pos.y };
 
     const onMove = (ev: MouseEvent) => {
@@ -167,11 +218,11 @@ export const Panel: React.FC<PanelProps> = ({
         minHeight: 150,
         resize: 'both' as any,
         overflow: 'hidden',
-        zIndex: 50,
+        zIndex: zIndex,
       }}
     >
       {header}
-      <div className="flex-1 overflow-hidden" style={{ height: 'calc(100% - 32px)' }}>
+      <div className="flex-1 w-full h-full overflow-hidden" style={{ height: 'calc(100% - 32px)' }}>
         {children}
       </div>
     </div>

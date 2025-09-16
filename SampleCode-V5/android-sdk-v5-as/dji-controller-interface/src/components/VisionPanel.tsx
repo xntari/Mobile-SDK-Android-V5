@@ -1,5 +1,6 @@
 import React from 'react';
 import { analyzeDetect, setActiveThreshold, getGeneralVisionUrl } from '../agent/visionClient';
+import { getNextZIndex, getBaseZIndex } from '../utils/zIndex';
 
 type Detection = { x1:number; y1:number; x2:number; y2:number; score:number; label?:string };
 
@@ -53,6 +54,14 @@ export const VisionPanel: React.FC<VisionPanelProps> = ({ getSnapshot, setBoxes 
   const [answer, setAnswer] = React.useState<string>('');
   const [busy, setBusy] = React.useState<boolean>(false);
   const [boxesOn, setBoxesOn] = React.useState<boolean>(false);
+  const [zIndex, setZIndex] = React.useState<number>(() => {
+    try {
+      const stored = localStorage.getItem('vision.panel.zIndex');
+      return stored ? parseInt(stored) : getBaseZIndex();
+    } catch {
+      return getBaseZIndex();
+    }
+  });
   const dragRef = React.useRef<{dx:number;dy:number}|null>(null);
   const panelRef = React.useRef<HTMLDivElement|null>(null);
 
@@ -67,6 +76,39 @@ export const VisionPanel: React.FC<VisionPanelProps> = ({ getSnapshot, setBoxes 
     };
     window.addEventListener('visionPanelVisibilityChange', handleVisibilityChange as EventListener);
     return () => window.removeEventListener('visionPanelVisibilityChange', handleVisibilityChange as EventListener);
+  }, []);
+
+  // Listen for layout refresh events
+  React.useEffect(() => {
+    const handleLayoutRefresh = () => {
+      // Reload position, size, and zIndex from localStorage
+      try {
+        const storedPos = localStorage.getItem('vision.panel.pos');
+        const storedSize = localStorage.getItem('vision.panel.size');
+        const storedZIndex = localStorage.getItem('vision.panel.zIndex');
+        const storedVisible = localStorage.getItem('vision.panel.visible');
+
+        if (storedPos) {
+          const newPos = JSON.parse(storedPos);
+          setPos(newPos);
+        }
+        if (storedSize) {
+          const newSize = JSON.parse(storedSize);
+          setSize(newSize);
+        }
+        if (storedZIndex) {
+          setZIndex(parseInt(storedZIndex));
+        }
+        if (storedVisible) {
+          setVisible(JSON.parse(storedVisible));
+        }
+      } catch (error) {
+        console.error('Failed to refresh VisionPanel layout:', error);
+      }
+    };
+
+    window.addEventListener('layoutRefresh', handleLayoutRefresh);
+    return () => window.removeEventListener('layoutRefresh', handleLayoutRefresh);
   }, []);
   React.useEffect(()=>{
     if (!panelRef.current) return;
@@ -84,6 +126,28 @@ export const VisionPanel: React.FC<VisionPanelProps> = ({ getSnapshot, setBoxes 
     return ()=>ro.disconnect();
   },[visible]);
   React.useEffect(()=>{ try{ localStorage.setItem('vision.objText', objText);}catch{} }, [objText]);
+  React.useEffect(()=>{ try{ localStorage.setItem('vision.panel.zIndex', zIndex.toString());}catch{} }, [zIndex]);
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    // Bring to front when starting drag - simple and fast
+    setZIndex(getNextZIndex());
+
+    dragRef.current = { dx: e.clientX - pos.x, dy: e.clientY - pos.y };
+
+    const onMove = (ev: MouseEvent) => {
+      if (!dragRef.current) return;
+      setPos({ x: ev.clientX - dragRef.current.dx, y: ev.clientY - dragRef.current.dy });
+    };
+
+    const onUp = () => {
+      dragRef.current = null;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
 
   async function callGeneral(params: { question?: string; task?: 'objects'|'describe'|'query' }): Promise<{ objects?: any[]; caption?: string; answer?: string }>{
     const img = await getSnapshot();
@@ -161,12 +225,7 @@ export const VisionPanel: React.FC<VisionPanelProps> = ({ getSnapshot, setBoxes 
 
   const header = (
     <div className="flex items-center justify-between mb-2 cursor-move select-text"
-      onMouseDown={(e)=>{
-        dragRef.current = { dx: e.clientX - pos.x, dy: e.clientY - pos.y };
-        const onMove = (ev:MouseEvent)=>{ if (!dragRef.current) return; setPos({ x: ev.clientX - dragRef.current.dx, y: ev.clientY - dragRef.current.dy }); };
-        const onUp = ()=>{ dragRef.current=null; window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
-        window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
-      }}>
+      onMouseDown={handleMouseDown}>
       <div className="text-xs text-gray-400 font-semibold">VISION</div>
       <div className="flex items-center gap-2">
         <div className={`text-[10px] ${busy? 'text-green-400':'text-gray-500'}`}>{busy? 'busy':'idle'}</div>
@@ -190,7 +249,7 @@ export const VisionPanel: React.FC<VisionPanelProps> = ({ getSnapshot, setBoxes 
       minHeight: 260,
       resize: 'both' as any,
       overflow: 'hidden',
-      zIndex: 50,
+      zIndex: zIndex,
       display: visible ? 'block' : 'none' // Hide without unmounting
     }}>
       {header}

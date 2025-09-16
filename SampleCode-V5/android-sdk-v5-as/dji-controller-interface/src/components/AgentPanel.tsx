@@ -2,6 +2,7 @@ import React, { useCallback, useMemo, useState } from 'react';
 import { runInstruction } from '../agent/orchestrator';
 import type { Detection } from '../agent/visionClient';
 import { getActiveThreshold, setActiveThreshold } from '../agent/visionClient';
+import { getNextZIndex, getBaseZIndex } from '../utils/zIndex';
 
 export interface AgentPanelProps {
   getSnapshot: () => Promise<string>;
@@ -63,12 +64,21 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
     } catch {}
     return { w: 460, h: 420 };
   });
+  const [zIndex, setZIndex] = useState<number>(() => {
+    try {
+      const stored = localStorage.getItem('agent.panel.zIndex');
+      return stored ? parseInt(stored) : getBaseZIndex();
+    } catch {
+      return getBaseZIndex();
+    }
+  });
   const dragRef = React.useRef<{ dx: number; dy: number; resizing: boolean } | null>(null);
   const cancelRef = React.useRef<{ cancelled: boolean }>({ cancelled: false });
   const [trace, setTrace] = useState<Array<{ text: string; kind: 'tool'|'var'|'info'|'warn'|'error' }>>([]);
   const panelRef = React.useRef<HTMLDivElement | null>(null);
   // Persist panel size across restarts
   usePersistPanelSize(panelRef, (s) => setSize(s));
+  React.useEffect(()=>{ try{ localStorage.setItem('agent.panel.zIndex', zIndex.toString());}catch{} }, [zIndex]);
   const programRef = React.useRef<HTMLDivElement | null>(null);
   const execRef = React.useRef<HTMLDivElement | null>(null);
   usePersistElementHeight(programRef, 'agent.h.program', 180);
@@ -140,6 +150,39 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
     return () => window.removeEventListener('agentPanelVisibilityChange', handleVisibilityChange as EventListener);
   }, []);
 
+  // Listen for layout refresh events
+  React.useEffect(() => {
+    const handleLayoutRefresh = () => {
+      // Reload position, size, and zIndex from localStorage
+      try {
+        const storedPos = localStorage.getItem('agent.panel.pos');
+        const storedSize = localStorage.getItem('agent.panel.size');
+        const storedZIndex = localStorage.getItem('agent.panel.zIndex');
+        const storedVisible = localStorage.getItem('agent.panel.visible');
+
+        if (storedPos) {
+          const newPos = JSON.parse(storedPos);
+          setPos(newPos);
+        }
+        if (storedSize) {
+          const newSize = JSON.parse(storedSize);
+          setSize(newSize);
+        }
+        if (storedZIndex) {
+          setZIndex(parseInt(storedZIndex));
+        }
+        if (storedVisible) {
+          setVisible(JSON.parse(storedVisible));
+        }
+      } catch (error) {
+        console.error('Failed to refresh AgentPanel layout:', error);
+      }
+    };
+
+    window.addEventListener('layoutRefresh', handleLayoutRefresh);
+    return () => window.removeEventListener('layoutRefresh', handleLayoutRefresh);
+  }, []);
+
   // Log LRF results as they arrive
   React.useEffect(() => {
     if (!laserResult) return;
@@ -165,21 +208,29 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
     execRef.current.scrollTop = execRef.current.scrollHeight;
   }, [trace.length]);
 
+  const handleMouseDown = (e: React.MouseEvent) => {
+    // Bring to front when starting drag - simple and fast
+    setZIndex(getNextZIndex());
+
+    dragRef.current = { dx: e.clientX - pos.x, dy: e.clientY - pos.y, resizing: false };
+
+    const onMove = (ev: MouseEvent) => {
+      if (!dragRef.current) return;
+      setPos({ x: ev.clientX - dragRef.current.dx, y: ev.clientY - dragRef.current.dy });
+    };
+
+    const onUp = () => {
+      dragRef.current = null;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
   const header = useMemo(() => (
-    <div className="flex items-center justify-between mb-2 cursor-move select-text" onMouseDown={(e)=>{
-      dragRef.current = { dx: e.clientX - pos.x, dy: e.clientY - pos.y, resizing: false };
-      const onMove = (ev: MouseEvent) => {
-        if (!dragRef.current) return;
-        setPos({ x: ev.clientX - dragRef.current.dx, y: ev.clientY - dragRef.current.dy });
-      };
-      const onUp = () => {
-        dragRef.current = null;
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onUp);
-        try { localStorage.setItem('agent.panel.pos', JSON.stringify(pos)); } catch {}
-      };
-      window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
-    }}>
+    <div className="flex items-center justify-between mb-2 cursor-move select-text" onMouseDown={handleMouseDown}>
       <div className="text-xs text-gray-400 font-semibold">AGENT</div>
       <div className="flex items-center gap-2">
         <div className={`text-[10px] ${running ? 'text-green-400' : 'text-gray-500'}`}>{running ? 'running' : 'idle'}</div>
@@ -203,6 +254,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
       minHeight: 260,
       resize: 'both' as any,
       overflow: 'hidden',
+      zIndex: zIndex,
       display: visible ? 'block' : 'none' // Hide without unmounting
     }}>
       {header}

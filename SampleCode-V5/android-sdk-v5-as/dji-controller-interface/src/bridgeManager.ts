@@ -45,6 +45,7 @@ class BridgeManager {
         break;
 
       case 'telemetry_data':
+        console.log('📡 Bridge: Received telemetry_data message');
         // Convert yaw (-180 to +180) to compass heading (0 to 360)
         const convertYawToCompass = (yaw: number): number => {
           let compass = yaw;
@@ -52,18 +53,19 @@ class BridgeManager {
           return compass;
         };
         
-        // Calculate bearing to home if we have both locations
+        // Calculate bearing from aircraft to home using great circle formula
         const calculateBearing = (from: any, to: any): number => {
           if (!from || !to) return 0;
-          
+
           const lat1 = from.latitude * Math.PI / 180;
           const lat2 = to.latitude * Math.PI / 180;
           const deltaLng = (to.longitude - from.longitude) * Math.PI / 180;
-          
-          const x = Math.sin(deltaLng) * Math.cos(lat2);
-          const y = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLng);
-          
-          let bearing = Math.atan2(x, y) * 180 / Math.PI;
+
+          const y = Math.sin(deltaLng) * Math.cos(lat2);
+          const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLng);
+
+          let bearing = Math.atan2(y, x) * 180 / Math.PI;
+          // Normalize to 0-360°
           return (bearing + 360) % 360;
         };
         
@@ -71,7 +73,17 @@ class BridgeManager {
         const rawYaw = message.attitude?.yaw || message.compass_heading || message.heading || 0;
         const trueCompassHeading = convertYawToCompass(rawYaw);
         const bearingToHome = calculateBearing(message.location, message.home_location);
-        
+
+        // Debug home bearing calculation
+        console.log('🏠 Bridge: Home bearing calculation', {
+          aircraft_lat: message.location?.latitude,
+          aircraft_lng: message.location?.longitude,
+          home_lat: message.home_location?.latitude,
+          home_lng: message.home_location?.longitude,
+          calculated_bearing: bearingToHome,
+          has_both_locations: !!(message.location && message.home_location)
+        });
+
         // Debug compass data
         // console.log('🧭 Compass Data Debug:', {
         //   received_compass_heading: message.compass_heading,
