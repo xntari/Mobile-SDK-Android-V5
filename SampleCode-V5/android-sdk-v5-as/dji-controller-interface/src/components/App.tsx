@@ -129,11 +129,7 @@ export const App: React.FC = () => {
             storageKey="map.panel"
             visibilityEventType="mapPanelVisibilityChange"
           >
-            <MapDisplay
-              aircraftLocation={bridgeData.telemetry?.location || null}
-              homeLocation={bridgeData.telemetry?.home_location || null}
-              compassHeading={bridgeData.telemetry?.compass_heading || bridgeData.telemetry?.heading || 0}
-            />
+            <MapDisplay />
           </Panel>
 
           {/* HSI Compass Panel */}
@@ -145,11 +141,7 @@ export const App: React.FC = () => {
             visibilityEventType="hsiPanelVisibilityChange"
           >
             <HSICompass
-              attitude={bridgeData.telemetry?.attitude || null}
-              heading={bridgeData.telemetry?.compass_heading || bridgeData.telemetry?.heading || 0}
-              homeDirection={bridgeData.telemetry?.home_bearing}
               size="small"
-              telemetryData={bridgeData.telemetry}
               standalone={false}
             />
           </Panel>

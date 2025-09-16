@@ -2,17 +2,16 @@ import React, { useRef, useEffect, useState } from 'react';
 import { HSICompassProps } from '../types';
 
 export const HSICompass: React.FC<HSICompassProps> = ({
-  attitude,
-  heading,
-  homeDirection,
   size = 'normal',
-  telemetryData,
   standalone = true
 }) => {
   const [useRawPerceptionData, setUseRawPerceptionData] = useState(true);
   const [scaleRange, setScaleRange] = useState(8); // Default 8m range
   const [useLogarithmicScale, setUseLogarithmicScale] = useState(true); // Logarithmic by default
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // Direct telemetry data state - updated via electronAPI listener like camera components
+  const [telemetryData, setTelemetryData] = useState<any>(null);
 
   // Convert distance to visual radius using linear or logarithmic scale
   const distanceToRadius = (distance: number, maxDistance: number, radius: number): number => {
@@ -280,7 +279,7 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     // Draw compass markings (rotate the compass rose instead of the arrow)
     ctx.save();
     ctx.translate(centerX, centerY);
-    ctx.rotate(heading * Math.PI / 180); // Rotate compass rose by heading
+    ctx.rotate(-heading * Math.PI / 180); // Rotate compass rose counter-clockwise by heading
     ctx.translate(-centerX, -centerY);
     
     ctx.strokeStyle = '#9CA3AF';
@@ -348,11 +347,17 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     ctx.save();
 
     // Draw home direction indicator (if available) - relative to rotated compass
-    if (homeDirection !== undefined) {
+    console.log('🏠 HSI Home Direction Debug:', {
+      homeDirection,
+      heading,
+      hasHomeDirection: homeDirection !== undefined,
+      telemetryHomeBearing: telemetryData?.home_bearing
+    });
+    if (homeDirection !== undefined && homeDirection > 0) {
       ctx.save();
       ctx.translate(centerX, centerY);
       // Rotate by (homeDirection - heading) to account for the rotated compass rose
-      ctx.rotate(-(homeDirection - heading) * Math.PI / 180);
+      ctx.rotate((homeDirection - heading) * Math.PI / 180);
       
       ctx.fillStyle = '#00D084';
       ctx.strokeStyle = '#FFFFFF';
@@ -406,6 +411,72 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     // Roll indicator removed - HSI focuses on horizontal navigation only
   };
 
+  // Direct electronAPI listener for telemetry data like camera components
+  useEffect(() => {
+    if (!window.electronAPI || !(window.electronAPI as any).onBridgeData) {
+      console.warn('⚠️ electronAPI not available for HSI telemetry updates');
+      return;
+    }
+
+    const handleTelemetryData = (message: any) => {
+      if (message.type === 'telemetry_data' && message.location) {
+        // Convert yaw (-180 to +180) to compass heading (0 to 360)
+        const convertYawToCompass = (yaw: number): number => {
+          let compass = yaw;
+          if (compass < 0) compass += 360;
+          return compass;
+        };
+
+        // Calculate bearing from aircraft to home using great circle formula
+        const calculateBearing = (from: any, to: any): number => {
+          if (!from || !to) return 0;
+
+          const lat1 = from.latitude * Math.PI / 180;
+          const lat2 = to.latitude * Math.PI / 180;
+          const deltaLng = (to.longitude - from.longitude) * Math.PI / 180;
+
+          const y = Math.sin(deltaLng) * Math.cos(lat2);
+          const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLng);
+
+          let bearing = Math.atan2(y, x) * 180 / Math.PI;
+          return (bearing + 360) % 360;
+        };
+
+        const rawYaw = message.attitude?.yaw || message.compass_heading || message.heading || 0;
+        const trueCompassHeading = convertYawToCompass(rawYaw);
+        const bearingToHome = calculateBearing(message.location, message.home_location);
+
+        const mappedTelemetry = {
+          ...message,
+          speed: message.ground_speed || message.speed || 0,
+          heading: trueCompassHeading,
+          attitude: message.attitude || { pitch: 0, roll: 0, yaw: 0 },
+          compass_heading: trueCompassHeading,
+          home_bearing: bearingToHome,
+        };
+
+        setTelemetryData(mappedTelemetry);
+      }
+    };
+
+    const listener = (message: any) => {
+      handleTelemetryData(message);
+    };
+
+    (window.electronAPI as any).onBridgeData(listener);
+
+    return () => {
+      // Cleanup would go here if electronAPI supports removeListener
+      if (window.electronAPI && (window.electronAPI as any).removeAllListeners) {
+        try {
+          (window.electronAPI as any).removeAllListeners('bridge-data-hsi');
+        } catch (error) {
+          // Ignore cleanup errors
+        }
+      }
+    };
+  }, []);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -447,8 +518,12 @@ export const HSICompass: React.FC<HSICompassProps> = ({
       // console.log('🛡️ No obstacle_avoidance data in telemetryData');
     }
       
-    drawCompassRose(ctx, centerX, centerY, radius, heading, homeDirection, attitude || undefined, obstacleData);
-  }, [attitude, heading, homeDirection, telemetryData, useRawPerceptionData, scaleRange, useLogarithmicScale]);
+    const heading = telemetryData?.compass_heading || telemetryData?.heading || 0;
+    const homeDirection = telemetryData?.home_bearing;
+    const attitude = telemetryData?.attitude;
+
+    drawCompassRose(ctx, centerX, centerY, radius, heading, homeDirection, attitude, obstacleData);
+  }, [telemetryData, useRawPerceptionData, scaleRange, useLogarithmicScale, size]);
 
   // Size configurations - increased height to fit heading above and distance below
   const sizeConfig = size === 'small' 
@@ -576,33 +651,33 @@ export const HSICompass: React.FC<HSICompassProps> = ({
           <div className="text-center">
             <div className="text-gray-400">HDG</div>
             <div className="font-mono text-dji-blue">
-              {heading.toFixed(0)}°
+              {(telemetryData?.compass_heading || telemetryData?.heading || 0).toFixed(0)}°
             </div>
           </div>
           
-          {attitude && (
+          {telemetryData?.attitude && (
             <>
               <div className="text-center">
                 <div className="text-gray-400">ROLL</div>
                 <div className="font-mono text-yellow-400">
-                  {attitude.roll.toFixed(1)}°
+                  {telemetryData.attitude.roll.toFixed(1)}°
                 </div>
               </div>
-              
+
               <div className="text-center">
                 <div className="text-gray-400">PITCH</div>
                 <div className="font-mono text-green-400">
-                  {attitude.pitch.toFixed(1)}°
+                  {telemetryData.attitude.pitch.toFixed(1)}°
                 </div>
               </div>
             </>
           )}
           
-          {homeDirection !== undefined && (
+          {telemetryData?.home_bearing !== undefined && (
             <div className="text-center">
               <div className="text-gray-400">HOME</div>
               <div className="font-mono text-status-good">
-                {homeDirection.toFixed(0)}°
+                {telemetryData.home_bearing.toFixed(0)}°
               </div>
             </div>
           )}

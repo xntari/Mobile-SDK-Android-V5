@@ -133,19 +133,14 @@ export interface H20NDisplayProps {
 }
 
 export interface HSICompassProps {
-  attitude: TelemetryData['attitude'] | null;
-  heading: number;
-  homeDirection?: number;
   size?: 'small' | 'normal';
-  telemetryData?: TelemetryData | null; // Full telemetry for obstacle data
   standalone?: boolean; // Whether to show own glass-panel container
+  // Note: HSI now uses direct electronAPI listeners for telemetry like camera components
 }
 
 export interface MapDisplayProps {
-  aircraftLocation: TelemetryData['location'] | null;
-  homeLocation: TelemetryData['home_location'] | null;
   flightPath?: Array<{ latitude: number; longitude: number }>;
-  compassHeading?: number; // For map auto-rotation
+  // Note: Map now uses direct electronAPI listeners for telemetry like camera components
 }
 
 // Connection and status types
