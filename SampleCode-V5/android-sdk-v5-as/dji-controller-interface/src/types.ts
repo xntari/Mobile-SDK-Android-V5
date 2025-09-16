@@ -138,6 +138,7 @@ export interface HSICompassProps {
   homeDirection?: number;
   size?: 'small' | 'normal';
   telemetryData?: TelemetryData | null; // Full telemetry for obstacle data
+  standalone?: boolean; // Whether to show own glass-panel container
 }
 
 export interface MapDisplayProps {
