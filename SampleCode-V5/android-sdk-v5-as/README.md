@@ -198,6 +198,36 @@ export OWL_THRESH=0.20
 export DESCRIBE_LABELS="person,car,truck,door,knob"
 ```
 
+### Start the YOLO realtime server (v8/v11)
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install fastapi uvicorn pillow ultralytics
+
+# Detection (auto-download by alias)
+python tools/vision_realtime_server.py --model v8n
+python tools/vision_realtime_server.py --model v11n
+
+# Add other tasks
+python tools/vision_realtime_server.py \
+  --model v11n \
+  --seg-model v11n-seg \
+  --pose-model v11n-pose \
+  --cls-model v11n-cls \
+  --obb-model v11n-obb
+
+# Or use local .pt files
+python tools/vision_realtime_server.py --model ./yolov8n.pt --seg-model ./yolov8n-seg.pt
+
+# Endpoints
+# POST /realtime/detect    -> { boxes: [{x1,y1,x2,y2,score,label}] }
+# POST /realtime/segment   -> { instances: [{points:[{x,y}...], score?, label?}] }
+# POST /realtime/pose      -> { poses: [{keypoints:[{x,y,conf?}]}] }
+# POST /realtime/obb       -> { obb: [{points:[{x,y}x4], score?, label?}] }
+# POST /realtime/classify  -> { classes: [{label, score}] }
+```
+
+In the app: open Components → Vision Realtime (YOLO), select a Mode (Detect | Segment | Pose | Classify | Oriented Box), and click Start. Overlays draw on the selected Snapshot Camera (FPV or H20N). Leave Classes blank to detect all YOLO labels. In Oriented Box mode, the Classes list filters OBB results the same way.
+
 ### Start the vision model
 ```
 pip install fastapi uvicorn pillow ultralytics

@@ -110,7 +110,7 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !telemetryData) return;
+    if (!canvas) return;
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
@@ -123,15 +123,21 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
     // Clear canvas with transparent background
     ctx.clearRect(0, 0, rect.width, rect.height);
 
+    // Safely extract telemetry, fallback to zeros
+    const attitude = telemetryData?.attitude || { roll: 0, pitch: 0 } as any;
+    const altitude = telemetryData?.altitude ?? 0;
+    const speed = telemetryData?.speed ?? 0;
+    const heading = telemetryData?.compass_heading ?? telemetryData?.heading ?? 0;
+
     // Draw HUD overlay
     drawHUD(
       ctx,
       rect.width,
       rect.height,
-      telemetryData.attitude,
-      telemetryData.altitude,
-      telemetryData.speed,
-      telemetryData.compass_heading || telemetryData.heading
+      attitude,
+      altitude,
+      speed,
+      heading
     );
   }, [telemetryData, size]);
 

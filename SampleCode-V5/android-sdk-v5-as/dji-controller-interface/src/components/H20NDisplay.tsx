@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useState, forwardRef, useImperativeHandle } from 'react';
 import { H20NDisplayProps, TelemetryData } from '../types';
 import { GimbalModeToggle, GimbalMode } from './GimbalModeToggle';
-import type { Detection } from '../agent/visionClient';
+import type { Detection, Mask } from '../agent/visionClient';
 import { CameraDisplay } from './CameraDisplay';
 
 export interface H20NDisplayRef {
@@ -17,14 +17,16 @@ interface ClickIndicator {
   message?: string;
 }
 
-export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
+export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({ 
   width,
   height,
   className = '',
   children,
   telemetryData,
   visionDetections = [],
-  agentDetections = []
+  agentDetections = [],
+  visionMasks = [],
+  visionKeypoints = []
 }, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -1107,6 +1109,27 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
             );
           })}
 
+          {/* Vision segmentation overlay */}
+          <svg width={displayRect.width} height={displayRect.height} style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none', zIndex: 10 }}>
+            {visionMasks.map((m: Mask, idx: number) => {
+              const pts = (m.points || []).map(p => ({ x: p.x * (displayRect.width || 1), y: p.y * (displayRect.height || 1) }));
+              const first = pts[0];
+              return (
+                <g key={`h20n-mask-${idx}`}>
+                  <polygon
+                    points={pts.map(p => `${p.x},${p.y}`).join(' ')}
+                    fill="rgba(16,185,129,0.25)" stroke="#10B981" strokeWidth={1}
+                  />
+                  {first && m.label && (
+                    <text x={first.x} y={Math.max(10, first.y - 4)} fill="#10B981" fontSize="10" fontFamily="monospace" >
+                      {m.label}
+                    </text>
+                  )}
+                </g>
+              );
+            })}
+          </svg>
+
           {/* Vision detections overlay */}
           {visionDetections.map((d, idx) => {
             const x = d.x1 * (displayRect.width || 1);
@@ -1121,6 +1144,32 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
               </div>
             );
           })}
+
+          {/* Pose skeleton + keypoints overlay */}
+          <svg width={displayRect.width} height={displayRect.height} style={{ position:'absolute', left:0, top:0, pointerEvents:'none', zIndex: 10 }}>
+            {visionKeypoints.map((kp, i) => {
+              const W = displayRect.width || 1;
+              const H = displayRect.height || 1;
+              const edges: Array<[number, number]> = [
+                [5,6],[5,7],[7,9],[6,8],[8,10],
+                [5,11],[6,12],[11,12],[11,13],[13,15],[12,14],[14,16],
+                [0,1],[0,2],[1,3],[2,4]
+              ];
+              return (
+                <g key={`h20n-pose-${i}`}>
+                  {edges.map(([a,b], ei) => {
+                    if (!kp[a] || !kp[b]) return null;
+                    const x1 = (kp[a].x) * W, y1 = (kp[a].y) * H;
+                    const x2 = (kp[b].x) * W, y2 = (kp[b].y) * H;
+                    return <line key={`h20n-edge-${i}-${ei}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#22c55e" strokeWidth={2} strokeOpacity={0.8} />;
+                  })}
+                  {kp.map((p, j) => (
+                    <circle key={`h20n-pt-${i}-${j}`} cx={(p.x)*W} cy={(p.y)*H} r={2.5} fill="#22c55e" />
+                  ))}
+                </g>
+              );
+            })}
+          </svg>
 
           
 
