@@ -13,9 +13,10 @@ export interface VisionRealtimePanelProps {
   setPoses?: (poses: Array<Array<{x:number;y:number;conf?:number}>>) => void;
   setMaskOpacity?: (v:number)=>void;
   setColorizeById?: (v:boolean)=>void;
+  setDetectThickness?: (v:number)=>void;
 }
 
-export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSnapshot, setBoxes, setMasks, setPoses, setMaskOpacity, setColorizeById }) => {
+export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSnapshot, setBoxes, setMasks, setPoses, setMaskOpacity, setColorizeById, setDetectThickness }) => {
   const [running, setRunning] = React.useState<boolean>(() => {
     try { const raw = localStorage.getItem('visionrt.running'); if (raw) return JSON.parse(raw); } catch {}
     return false;
@@ -289,6 +290,9 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
           </label>
           <label className="flex items-center gap-2">
             <input type="checkbox" defaultChecked={(() => { try { const raw = localStorage.getItem('visionrt.colorizeById'); if (raw) return JSON.parse(raw); } catch {} return false; })()} onChange={(e)=>{ setColorizeById?.(e.target.checked); try { localStorage.setItem('visionrt.colorizeById', JSON.stringify(e.target.checked)); } catch {} }} /> colorize by id
+          </label>
+          <label className="flex items-center gap-2">box thickness
+            <input type="range" min={1} max={6} step={1} defaultValue={(() => { try { const raw = localStorage.getItem('visionrt.detectThickness'); if (raw) return JSON.parse(raw); } catch {} return 1; })()} onChange={(e)=>{ const v = parseInt(e.target.value); setDetectThickness?.(v); try { localStorage.setItem('visionrt.detectThickness', JSON.stringify(v)); } catch {} }} />
           </label>
         </div>
       )}

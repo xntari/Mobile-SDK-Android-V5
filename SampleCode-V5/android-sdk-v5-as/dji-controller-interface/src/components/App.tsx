@@ -36,8 +36,13 @@ export const App: React.FC = () => {
     try { const raw = localStorage.getItem('visionrt.colorizeById'); if (raw) return JSON.parse(raw); } catch {}
     return false;
   });
+  const [detectThickness, setDetectThickness] = useState<number>(() => {
+    try { const raw = localStorage.getItem('visionrt.detectThickness'); if (raw) return JSON.parse(raw); } catch {}
+    return 1;
+  });
   React.useEffect(()=>{ try { localStorage.setItem('visionrt.maskOpacity', JSON.stringify(maskOpacity)); } catch {} }, [maskOpacity]);
   React.useEffect(()=>{ try { localStorage.setItem('visionrt.colorizeById', JSON.stringify(colorizeById)); } catch {} }, [colorizeById]);
+  React.useEffect(()=>{ try { localStorage.setItem('visionrt.detectThickness', JSON.stringify(detectThickness)); } catch {} }, [detectThickness]);
   const [visionKeypoints, setVisionKeypoints] = useState<Array<Array<{x:number;y:number;conf?:number}>>>([]);
   const [agentDetections, setAgentDetections] = useState<any[]>([]);
 
@@ -118,6 +123,7 @@ export const App: React.FC = () => {
               agentDetections={selectedCamera === 'fpv' ? agentDetections : []}
               maskOpacity={maskOpacity}
               colorizeById={colorizeById}
+              detectThickness={detectThickness}
             />
           </CameraPanel>
 
@@ -139,6 +145,7 @@ export const App: React.FC = () => {
               agentDetections={selectedCamera === 'h20n' ? agentDetections : []}
               maskOpacity={maskOpacity}
               colorizeById={colorizeById}
+              detectThickness={detectThickness}
             />
           </CameraPanel>
 
@@ -243,6 +250,7 @@ export const App: React.FC = () => {
             setPoses={(poses)=>setVisionKeypoints(poses)}
             setMaskOpacity={setMaskOpacity}
             setColorizeById={setColorizeById}
+            setDetectThickness={setDetectThickness}
           />
 
         </div>

@@ -23,7 +23,9 @@ Endpoints
 Run
   python -m venv .venv && source .venv/bin/activate
   pip install fastapi uvicorn pillow ultralytics
-  python tools/vision_realtime_server.py --ov-model yoloe-11s-seg.pt
+  python tools/vision_realtime_server.py --ov-model yoloe-11s-seg.pt (small)
+  python tools/vision_realtime_server.py --ov-model yoloe-11m-seg.pt (medium)
+  python tools/vision_realtime_server.py --ov-model yoloe-11l-seg.pt (large)
 """
 from __future__ import annotations
 
@@ -448,7 +450,7 @@ def realtime_detect(req: RTDetectRequest, request: Request):
                             model.set_classes(req.ov_labels)  # type: ignore
                     except Exception:
                         pass
-                track_res = model.track(img2, imgsz=size, conf=thr, verbose=False, persist=True, tracker='bytetrack.yaml')  # type: ignore
+                track_res = model.track(img2, imgsz=size, conf=thr, verbose=False, persist=True, tracker='botsort-reid.yaml')  # type: ignore
                 if track_res:
                     r = track_res[0]
                 else:
