@@ -33,8 +33,10 @@ import io
 import os
 
 from fastapi import FastAPI, Request
-import time
+import tempfile
+import numpy as np  # type: ignore
 from fastapi.middleware.cors import CORSMiddleware
+import ultralytics as _ultra  # type: ignore
 from pydantic import BaseModel
 from PIL import Image
 
@@ -59,11 +61,79 @@ _DEVICE: str = os.environ.get("Y_DEVICE", "auto")  # 'auto' | 'cpu' | 'mps' | 'c
 _CLI_OV_MODEL_SPEC: Optional[str] = None
 _HAVE_YOLOE: bool = False
 _yoloe_model = None
+_YOLOE_API: str = 'unknown'  # 'YOLOE' or 'YOLO'
+_ULTRA_VER: str = getattr(_ultra, '__version__', 'unknown')
 _HAVE_YOLOE_PF: bool = False
 _yoloe_pf_model = None
 
-_TRACKERS: Dict[str, Any] = {}
+# Per-session display ID mapping: track_id -> per-class small id
+_DISPLAY_MAP: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
+def _display_id_for(sid: str, cls_name: str, track_id: Optional[int]) -> Optional[int]:
+    if track_id is None:
+        return None
+    sess = _DISPLAY_MAP.setdefault(sid, {})
+    entry = sess.setdefault(cls_name, {'map': {}, 'next': 0})
+    m = entry['map']
+    if track_id in m:
+        return int(m[track_id])
+    did = int(entry['next'])
+    entry['next'] = did + 1
+    m[track_id] = did
+    return did
+
+# Simple per-session segmentation tracker using IoU over polygon bboxes
+_SEG_TRACKERS: Dict[str, Dict[str, Any]] = {}
+
+def _bbox_from_pts(pts: List[Dict[str, float]]):
+    xs = [float(p['x']) for p in pts]; ys = [float(p['y']) for p in pts]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+def _iou(a, b) -> float:
+    ax1, ay1, ax2, ay2 = a; bx1, by1, bx2, by2 = b
+    ix1 = max(ax1, bx1); iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2); iy2 = min(ay2, by2)
+    iw = max(0.0, ix2 - ix1); ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0: return 0.0
+    aw = max(0.0, ax2 - ax1); ah = max(0.0, ay2 - ay1)
+    bw = max(0.0, bx2 - bx1); bh = max(0.0, by2 - by1)
+    union = aw*ah + bw*bh - inter
+    return inter/union if union > 0 else 0.0
+
+def _assign_seg_ids(sid: str, instances: List[Dict[str, Any]], iou_thr: float = 0.5) -> List[Dict[str, Any]]:
+    state = _SEG_TRACKERS.setdefault(sid, {})  # {class: {next:int, tracks:[{id,bbox}]}}
+    # Prepare current
+    curr = []
+    for ins in instances:
+        pts = ins.get('points') or []
+        if not pts: continue
+        lbl = str(ins.get('label') or 'obj')
+        bb = _bbox_from_pts(pts)
+        curr.append({'label': lbl, 'bbox': bb, 'ref': ins})
+    # Match per class
+    for lbl in {c['label'] for c in curr}:
+        cls_state = state.setdefault(lbl, {'next': 0, 'tracks': []})
+        tracks = cls_state['tracks']
+        used = set()
+        for det in [c for c in curr if c['label'] == lbl]:
+            best, bi = 0.0, -1
+            for i, tr in enumerate(tracks):
+                if i in used: continue
+                val = _iou(det['bbox'], tr['bbox'])
+                if val > best: best, bi = val, i
+            if bi >= 0 and best >= iou_thr:
+                tr = tracks[bi]; used.add(bi)
+                tr['bbox'] = det['bbox']
+                det['ref']['label'] = f"{lbl}_{tr['id']}"
+            else:
+                tid = cls_state['next']; cls_state['next'] = tid + 1
+                tracks.append({'id': tid, 'bbox': det['bbox']})
+                det['ref']['label'] = f"{lbl}_{tid}"
+        cls_state['tracks'] = tracks[:50]
+        state[lbl] = cls_state
+    _SEG_TRACKERS[sid] = state
+    return instances
 
 # ------------------------- Utils -------------------------
 def decode_image_to_pil(image_b64_or_dataurl: str) -> Image.Image:
@@ -124,18 +194,30 @@ def _lazy_load_yoloe():
     if _HAVE_YOLOE:
         return
     try:
+        # Prefer the dedicated YOLOE class per docs; fallback to YOLO
+        YOLOEClass = None
+        try:
+            from ultralytics import YOLOE as YOLOEClass  # type: ignore
+        except Exception:
+            YOLOEClass = None
         from ultralytics import YOLO  # type: ignore
         model_spec = _canonicalize_model_spec(_CLI_OV_MODEL_SPEC or os.environ.get("YOLOE_MODEL"))
         if not model_spec:
             model_spec = 'yoloe.pt'
-        _yoloe_model = YOLO(model_spec)
+        if YOLOEClass is not None:
+            _yoloe_model = YOLOEClass(model_spec)
+            api = 'YOLOE'
+        else:
+            _yoloe_model = YOLO(model_spec)
+            api = 'YOLO'
         try:
             if _DEVICE in ("mps", "cuda"):
                 _yoloe_model.to(_DEVICE)
         except Exception:
             pass
         _HAVE_YOLOE = True
-        print(f"[realtime] YOLO‑E loaded: {model_spec}")
+        globals()['_YOLOE_API'] = api
+        print(f"[realtime] YOLO‑E loaded: {model_spec} api={api} ultralytics={_ULTRA_VER}")
     except Exception as e:
         print('[realtime] yoloe load failed:', e)
         _HAVE_YOLOE = False
@@ -287,86 +369,7 @@ def _parse_masks(result, W: int, H: int, names: Any) -> List[Dict[str, Any]]:
     return out[:100]
 
 
-# ------------------------- Simple tracker (per client session) -------------------------
-def _iou(a, b) -> float:
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
-    ix1 = max(ax1, bx1); iy1 = max(ay1, by1)
-    ix2 = min(ax2, bx2); iy2 = min(ay2, by2)
-    iw = max(0.0, ix2 - ix1); ih = max(0.0, iy2 - iy1)
-    inter = iw * ih
-    if inter <= 0:
-        return 0.0
-    aw = max(0.0, ax2 - ax1); ah = max(0.0, ay2 - ay1)
-    bw = max(0.0, bx2 - bx1); bh = max(0.0, by2 - by1)
-    union = aw * ah + bw * bh - inter
-    return inter / union if union > 0 else 0.0
-
-
-def _assign_tracks(sid: str, detections: List[Dict[str, Any]], label_key: str = 'label', points_key: Optional[str] = None, iou_thr: float = 0.5) -> List[Dict[str, Any]]:
-    """Assign stable IDs per class using greedy IoU matching against previous step for this sid.
-    If points_key is provided, compute bbox from polygon points; else use x1..y2.
-    Mutates labels to include suffix: chair_0, chair_1, ...
-    """
-    st = _TRACKERS.get(sid)
-    now = time.time()
-    if not st:
-        st = {'by_class': {}, 'step': 0, 'last': now}
-        _TRACKERS[sid] = st
-    st['step'] += 1; st['last'] = now
-
-    # Build current boxes with class labels
-    curr = []
-    for d in detections:
-        lbl = str(d.get(label_key) or 'obj')
-        if points_key and d.get(points_key):
-            pts = d.get(points_key) or []
-            if not pts:
-                continue
-            xs = [float(p['x']) for p in pts]
-            ys = [float(p['y']) for p in pts]
-            x1, y1, x2, y2 = max(0.0, min(xs)), max(0.0, min(ys)), max(0.0, max(xs)), max(0.0, max(ys))
-        else:
-            x1, y1, x2, y2 = float(d['x1']), float(d['y1']), float(d['x2']), float(d['y2'])
-        curr.append({'bbox': (x1, y1, x2, y2), 'label': lbl, 'ref': d})
-
-    # Match per class
-    by_class = st['by_class']
-    for lbl in set(c['label'] for c in curr):
-        tracks = by_class.get(lbl, {'next': 0, 'items': []})
-        items = tracks['items']  # list of {id:int, bbox:tuple, seen:int}
-        used = set()
-        # Greedy match by IoU
-        for det in curr:
-            if det['label'] != lbl:
-                continue
-            best_iou, best_idx = 0.0, -1
-            for idx, tr in enumerate(items):
-                if idx in used:
-                    continue
-                iou = _iou(det['bbox'], tr['bbox'])
-                if iou > best_iou:
-                    best_iou, best_idx = iou, idx
-            if best_idx >= 0 and best_iou >= iou_thr:
-                # Assign existing track
-                tr = items[best_idx]
-                used.add(best_idx)
-                tr['bbox'] = det['bbox']
-                tr['seen'] = st['step']
-                det['ref'][label_key] = f"{lbl}_{tr['id']}"
-            else:
-                # New track
-                tid = tracks['next']
-                tracks['next'] += 1
-                items.append({'id': tid, 'bbox': det['bbox'], 'seen': st['step']})
-                det['ref'][label_key] = f"{lbl}_{tid}"
-        # GC old tracks
-        items = [tr for tr in items if (st['step'] - tr.get('seen', 0)) <= 50]
-        tracks['items'] = items
-        by_class[lbl] = tracks
-    st['by_class'] = by_class
-    _TRACKERS[sid] = st
-    return detections
+# (Removed custom tracker) — we will use Ultralytics built‑in tracking (model.track) for IDs
 
 
 # ------------------------- Schemas -------------------------
@@ -431,12 +434,85 @@ def realtime_detect(req: RTDetectRequest, request: Request):
                 print('[realtime] yolo-e set_classes failed:', e)
             res = _safe_predict(_yoloe_model, img2, size, thr)
         if res:
-            r = res[0]
+            # Use Ultralytics built‑in tracker to get IDs
+            try:
+                # Track with ByteTrack; persist=True keeps internal tracker state
+                from ultralytics import YOLO  # type: ignore
+                model = _yoloe_pf_model if use_pf else _yoloe_model
+                if not model:
+                    raise RuntimeError('model not loaded')
+                # For OV, ensure classes are set before tracking as well
+                if (not use_pf) and req.ov_labels:
+                    try:
+                        if hasattr(model, 'set_classes'):
+                            model.set_classes(req.ov_labels)  # type: ignore
+                    except Exception:
+                        pass
+                track_res = model.track(img2, imgsz=size, conf=thr, verbose=False, persist=True, tracker='bytetrack.yaml')  # type: ignore
+                if track_res:
+                    r = track_res[0]
+                else:
+                    r = res[0]
+            except Exception:
+                # Fallback to predict result if track not available
+                r = res[0]
             W, H = img2.size
-            boxes = _parse_boxes(r, W, H, getattr(r, 'names', {}), req.ov_labels if not use_pf else None)
-            # Apply tracking IDs per class
-            sid = request.headers.get('x-client-session') or 'no-sid'
-            boxes = _assign_tracks(sid, boxes, label_key='label', points_key=None)
+            names = getattr(r, 'names', {})
+            b = getattr(r, 'boxes', None)
+            boxes = []
+            if b is not None and getattr(b, 'xyxy', None) is not None:
+                xyxy = b.xyxy.cpu().numpy().tolist()
+                conf = b.conf.cpu().numpy().tolist() if getattr(b, 'conf', None) is not None else []
+                cls = b.cls.cpu().numpy().tolist() if getattr(b, 'cls', None) is not None else []
+                ids_raw = getattr(b, 'id', None)
+                ids = []
+                if ids_raw is not None:
+                    try:
+                        ids = ids_raw.int().cpu().numpy().tolist()
+                        # flatten Nx1
+                        ids = [int(v[0] if isinstance(v, (list, tuple)) else v) for v in ids]
+                    except Exception:
+                        ids = []
+                for i, p in enumerate(xyxy):
+                    try:
+                        x1,y1,x2,y2 = p
+                    except Exception:
+                        continue
+                    sc = float(conf[i]) if i < len(conf) else None
+                    cid = None
+                    if i < len(cls):
+                        try:
+                            raw = cls[i]
+                            cid = int(raw[0] if isinstance(raw,(list,tuple)) else raw)
+                        except Exception:
+                            cid = None
+                    # Resolve label name
+                    lbl = None
+                    try:
+                        if isinstance(names, dict) and isinstance(cid, int) and cid in names:
+                            lbl = str(names[cid])
+                        elif isinstance(names, (list, tuple)) and isinstance(cid, int) and 0 <= cid < len(names):
+                            lbl = str(names[cid])
+                    except Exception:
+                        lbl = None
+                    if (not use_pf) and req.ov_labels and isinstance(cid, int) and 0 <= cid < len(req.ov_labels):
+                        lbl = str(req.ov_labels[cid])
+                    # Append per-class display id based on tracker id
+                    tid = ids[i] if i < len(ids) else None
+                    if tid is not None and lbl:
+                        sid = request.headers.get('x-client-session') or 'no-sid'
+                        disp = _display_id_for(sid, lbl, tid)
+                        if disp is not None:
+                            lbl = f"{lbl}_{disp}"
+                    boxes.append({
+                        'x1': max(0.0, min(1.0, float(x1)/W)),
+                        'y1': max(0.0, min(1.0, float(y1)/H)),
+                        'x2': max(0.0, min(1.0, float(x2)/W)),
+                        'y2': max(0.0, min(1.0, float(y2)/H)),
+                        **({'score': sc} if sc is not None else {}),
+                        **({'label': lbl} if lbl else {}),
+                        **({'track_id': tid} if tid is not None else {}),
+                    })
         # No fallbacks in detect path
     except Exception as e:
         print('[realtime] detect error:', e)
@@ -488,12 +564,11 @@ def realtime_segment(req: RTSegmentRequest, request: Request):
         r = res[0]
         W, H = img2.size
         instances = _parse_masks(r, W, H, getattr(r, 'names', {}))
-        # Apply tracking IDs per class: mutate label with suffix
-        sid = request.headers.get('x-client-session') or 'no-sid'
-        instances = _assign_tracks(sid, instances, label_key='label', points_key='points')
+        # Assign per-session instance IDs to segmentation
+        sid2 = request.headers.get('x-client-session') or 'no-sid'
+        instances = _assign_seg_ids(sid2, instances, iou_thr=0.5)
         # No fallbacks in segmentation path
         try:
-            sid2 = request.headers.get('x-client-session') or 'no-sid'
             print(f"[realtime][SEG][sid={sid2}] mode={'PF' if use_pf else 'OV'} thr={thr} size={size} labels={(req.ov_labels or [])} -> {len(instances)} instances")
         except Exception:
             pass
@@ -509,83 +584,147 @@ def realtime_prompt(req: RTPromptDetectRequest):
         img = decode_image_to_pil(req.image)
     except Exception:
         return {'boxes': []}
-    thr = float(req.threshold) if req.threshold is not None else _DEFAULT_THRESH
-    size = int(req.img_size) if req.img_size else _DEFAULT_IMGSZ
-    img2 = _scale_image(img, size)
-    W, H = img2.size
-    boxes_px = []
-    for b in (req.boxes or []):
-        try:
-            x1 = max(0, min(W, float(b['x1']) * W)); y1 = max(0, min(H, float(b['y1']) * H))
-            x2 = max(0, min(W, float(b['x2']) * W)); y2 = max(0, min(H, float(b['y2']) * H))
-            boxes_px.append([x1, y1, x2, y2])
-        except Exception:
-            continue
+
+
+class RTPromptImageRequest(BaseModel):
+    image: str
+    prompt_image: str
+    threshold: float | None = None
+    img_size: int | None = None
+
+
+@app.post('/realtime/prompt_image')
+def realtime_prompt_image(req: RTPromptImageRequest, request: Request):
+    sid = request.headers.get('x-client-session') or 'no-sid'
+    used_kw = 'none'
+    pw = ph = 0
+    out: List[Dict[str, Any]] = []
     try:
-        # choose model (labels -> OV; none -> PF)
-        use_pf = not (req.ov_labels and len(req.ov_labels) > 0)
-        if use_pf:
-            if not _HAVE_YOLOE_PF:
-                _lazy_load_yoloe_pf()
-            model = _yoloe_pf_model
-        else:
-            if not _HAVE_YOLOE:
-                _lazy_load_yoloe()
-            model = _yoloe_model
+        try:
+            img = decode_image_to_pil(req.image)
+            prompt_img = decode_image_to_pil(req.prompt_image)
+            pw, ph = prompt_img.size
+        except Exception as e0:
+            print(f"[realtime][PROMPT_IMG][sid={sid}] decode error: {e0}")
+            return {'boxes': []}
+        thr = float(req.threshold) if req.threshold is not None else _DEFAULT_THRESH
+        size = int(req.img_size) if req.img_size else _DEFAULT_IMGSZ
+        if not _HAVE_YOLOE:
+            _lazy_load_yoloe()
+        if not _HAVE_YOLOE:
+            print(f"[realtime][PROMPT_IMG][sid={sid}] yolo-e not available")
+            return {'boxes': []}
+        # Write both target and prompt to temp files; predictor expects file paths
+        target_tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg'); target_tmp.close()
+        refer_tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg'); refer_tmp.close()
+        # Do NOT downscale the target for prompt matching; keep original snapshot pixels
+        img_to_save = img
+        img_to_save.save(target_tmp.name, format='JPEG', quality=95)
+        prompt_img.save(refer_tmp.name, format='JPEG', quality=95)
+        res = None
+        try:
             try:
-                if hasattr(model, 'set_classes') and req.ov_labels:
-                    model.set_classes(req.ov_labels)  # type: ignore
+                from ultralytics.models.yolo.yoloe.predict_vp import YOLOEVPSegPredictor  # type: ignore
+                predictor_src = 'ultralytics.models.yolo.yoloe.predict_vp.YOLOEVPSegPredictor'
+            except Exception:
+                from ultralytics.models.yolo.yoloe import YOLOEVPSegPredictor  # type: ignore
+                predictor_src = 'ultralytics.models.yolo.yoloe.YOLOEVPSegPredictor'
+            vp = {
+                'bboxes': np.array([[0.0, 0.0, float(pw), float(ph)]], dtype=np.float32),
+                'cls': np.array([0], dtype=np.int64),
+            }
+            thr_vp = max(0.01, min(0.10, thr))
+            try:
+                tsz = os.path.getsize(target_tmp.name); rsz = os.path.getsize(refer_tmp.name)
+                print(f"[realtime][PROMPT_IMG][sid={sid}] files target={target_tmp.name}({tsz}B) refer={refer_tmp.name}({rsz}B)")
             except Exception:
                 pass
-        # try native prompt keywords
-        used_native = False
-        res = None
-        for kw in ({'prompts': {'boxes': boxes_px}}, {'boxes': boxes_px}, {'bboxes': boxes_px}):
-            res = _safe_predict(model, img2, size, thr, extra=kw)
-            if res:
-                used_native = True
-                break
-        dets: List[Dict[str, Any]] = []
-        if used_native and res:
-            r = res[0]
-            names = getattr(r, 'names', {})
-            dets = _parse_boxes(r, W, H, names, (None if use_pf else req.ov_labels))
-        else:
-            # crop fallback per prompt
-            for bb in boxes_px:
+            print(f"[realtime][PROMPT_IMG][sid={sid}] predictor={predictor_src} ultralytics={_ULTRA_VER} api={_YOLOE_API} vp_cls={vp['cls'].tolist()} vp_box={vp['bboxes'].tolist()[0]}")
+            res = _yoloe_model.predict(target_tmp.name, imgsz=size, conf=thr_vp, verbose=False, refer_image=refer_tmp.name, visual_prompts=vp, predictor=YOLOEVPSegPredictor)  # type: ignore
+            used_kw = 'refer_image(file)+visual_prompts+YOLOEVPSegPredictor'
+        except Exception as e_vp:
+            try:
+                # Fallback older APIs (less ideal)
+                res = _yoloe_model.predict(target_tmp.name, imgsz=size, conf=thr, verbose=False, prompts={'images': [refer_tmp.name]})  # type: ignore
+                used_kw = 'prompts.images(file)'
+            except Exception as e1:
                 try:
-                    x1, y1, x2, y2 = [int(max(0, v)) for v in bb]
+                    res = _yoloe_model.predict(target_tmp.name, imgsz=size, conf=thr, verbose=False, image_prompts=[refer_tmp.name])  # type: ignore
+                    used_kw = 'image_prompts(file)'
+                except Exception as e2:
+                    used_kw = 'none'
+                    res = _yoloe_model.predict(target_tmp.name, imgsz=size, conf=thr, verbose=False)
+        # Parse result
+        r = res[0] if res else None
+        if not r:
+            print(f"[realtime][PROMPT_IMG][sid={sid}] no result r (kw={used_kw})")
+            return {'boxes': []}
+        W, H = img_to_save.size
+        names = getattr(r, 'names', {})
+        b = getattr(r, 'boxes', None)
+        if b is not None and getattr(b, 'xyxy', None) is not None:
+            xyxy = b.xyxy.cpu().numpy().tolist()
+            conf = b.conf.cpu().numpy().tolist() if getattr(b, 'conf', None) is not None else []
+            cls = b.cls.cpu().numpy().tolist() if getattr(b, 'cls', None) is not None else []
+            ids_raw = getattr(b, 'id', None)
+            ids = []
+            if ids_raw is not None:
+                try:
+                    ids = ids_raw.int().cpu().numpy().tolist()
+                    ids = [int(v[0] if isinstance(v, (list, tuple)) else v) for v in ids]
+                except Exception:
+                    ids = []
+            for i, p in enumerate(xyxy):
+                try:
+                    x1,y1,x2,y2 = p
                 except Exception:
                     continue
-                x1, x2 = sorted((x1, x2)); y1, y2 = sorted((y1, y2))
-                if x2 - x1 < 2 or y2 - y1 < 2:
-                    continue
-                crop = img2.crop((x1, y1, x2, y2))
-                sub = _safe_predict(model, crop, min(size, max(crop.size)), thr)
-                if not sub:
-                    continue
-                rr = sub[0]
-                names = getattr(rr, 'names', {})
-                boxes = _parse_boxes(rr, crop.size[0], crop.size[1], names, (None if use_pf else req.ov_labels))
-                for d in boxes:
-                    dets.append({
-                        'x1': max(0.0, min(1.0, (d['x1'] * (x2 - x1) + x1) / W)),
-                        'y1': max(0.0, min(1.0, (d['y1'] * (y2 - y1) + y1) / H)),
-                        'x2': max(0.0, min(1.0, (d['x2'] * (x2 - x1) + x1) / W)),
-                        'y2': max(0.0, min(1.0, (d['y2'] * (y2 - y1) + y1) / H)),
-                        **({'score': d.get('score')} if d.get('score') is not None else {}),
-                        **({'label': d.get('label')} if d.get('label') else {}),
-                    })
-        dets.sort(key=lambda d: d.get('score', 0) or 0, reverse=True)
-        top = dets[:100]
+                sc = float(conf[i]) if i < len(conf) else None
+                cid = None
+                if i < len(cls):
+                    try:
+                        raw = cls[i]
+                        cid = int(raw[0] if isinstance(raw,(list,tuple)) else raw)
+                    except Exception:
+                        cid = None
+                lbl = None
+                try:
+                    if isinstance(names, dict) and isinstance(cid, int) and cid in names:
+                        lbl = str(names[cid])
+                    elif isinstance(names, (list, tuple)) and isinstance(cid, int) and 0 <= cid < len(names):
+                        lbl = str(names[cid])
+                except Exception:
+                    lbl = None
+                tid = ids[i] if i < len(ids) else None
+                if tid is not None and lbl:
+                    disp = _display_id_for(sid, lbl, tid)
+                    if disp is not None:
+                        lbl = f"{lbl}_{disp}"
+                out.append({
+                    'x1': max(0.0, min(1.0, float(x1)/W)),
+                    'y1': max(0.0, min(1.0, float(y1)/H)),
+                    'x2': max(0.0, min(1.0, float(x2)/W)),
+                    'y2': max(0.0, min(1.0, float(y2)/H)),
+                    **({'score': sc} if sc is not None else {}),
+                    **({'label': lbl} if lbl else {}),
+                    **({'track_id': tid} if tid is not None else {}),
+                })
+        return {'boxes': out}
+    except Exception as e:
+        print('[realtime] prompt_image error:', e)
+        return {'boxes': []}
+    finally:
         try:
-            print(f"[realtime][PROMPT] mode={'PF' if use_pf else 'OV'} prompts={len(boxes_px)} -> {len(top)} boxes")
+            print(f"[realtime][PROMPT_IMG][sid={sid}] size={req.img_size or _DEFAULT_IMGSZ} prompt=({pw}x{ph}) kw={used_kw} -> {len(out)} boxes")
+            # cleanup
+            for p in (locals().get('target_tmp'), locals().get('refer_tmp')):
+                try:
+                    if p and os.path.isfile(p.name):
+                        os.unlink(p.name)
+                except Exception:
+                    pass
         except Exception:
             pass
-        return {'boxes': top}
-    except Exception as e:
-        print('[realtime] prompt error:', e)
-        return {'boxes': []}
 
 
 @app.post('/realtime/classify')

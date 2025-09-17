@@ -16,7 +16,9 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
   visionDetections = [],
   agentDetections = [],
   visionMasks = [],
-  visionKeypoints = []
+  visionKeypoints = [],
+  maskOpacity = 0.25,
+  colorizeById = false
 }, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -648,30 +650,63 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
             {visionMasks.map((m: Mask, idx: number) => {
               const pts = (m.points || []).map(p => ({ x: p.x * (displayRect.width || 1), y: p.y * (displayRect.height || 1) }));
               const first = pts[0];
+              const idMatch = typeof m.label === 'string' ? m.label.match(/_(\d+)$/) : null;
+              const idNum = idMatch ? parseInt(idMatch[1], 10) : null;
+              const palette = ['#10B981','#60A5FA','#F59E0B','#EF4444','#8B5CF6','#14B8A6','#F472B6','#22C55E'];
+              const color = colorizeById && idNum !== null ? palette[idNum % palette.length] : '#10B981';
               return (
                 <g key={`mask-${idx}`}>
                   <polygon
                     points={pts.map(p => `${p.x},${p.y}`).join(' ')}
-                    fill="rgba(16,185,129,0.25)" stroke="#10B981" strokeWidth={1}
+                    fill={color}
+                    fillOpacity={maskOpacity}
+                    stroke={color}
+                    strokeOpacity={maskOpacity}
+                    strokeWidth={1}
                   />
-                  {first && m.label && (
-                    <text x={first.x} y={Math.max(10, first.y - 4)} fill="#10B981" fontSize="10" fontFamily="monospace" >
-                      {m.label}
-                    </text>
-                  )}
                 </g>
               );
             })}
           </svg>
+          {/* Mask labels as absolute divs */}
+          {visionMasks.map((m: Mask, idx: number) => {
+            const pts = (m.points || []).map(p => ({ x: p.x * (displayRect.width || 1), y: p.y * (displayRect.height || 1) }));
+            if (!pts.length || !m.label) return null;
+            const xs = pts.map(p=>p.x), ys = pts.map(p=>p.y);
+            const x = Math.min(...xs), y = Math.min(...ys);
+            const idMatch = typeof m.label === 'string' ? m.label.match(/_(\d+)$/) : null;
+            const idNum = idMatch ? parseInt(idMatch[1], 10) : null;
+            const palette = ['#10B981','#60A5FA','#F59E0B','#EF4444','#8B5CF6','#14B8A6','#F472B6','#22C55E'];
+            const color = colorizeById && idNum !== null ? palette[idNum % palette.length] : '#10B981';
+            const labelAbove = y > 14;
+            return (
+              <div key={`masklbl-${idx}`} className="absolute z-10" style={{ left: x, top: y }}>
+                <div className="absolute left-0 text-[10px] px-1 rounded text-white" style={{ background: color, top: labelAbove ? -16 : undefined, bottom: labelAbove ? undefined : -16 }}>
+                  {m.label}
+                </div>
+              </div>
+            );
+          })}
           {/* Vision detections overlay */}
           {visionDetections.map((d, idx) => {
             const x = d.x1 * (displayRect.width || 1);
             const y = d.y1 * (displayRect.height || 1);
             const w = (d.x2 - d.x1) * (displayRect.width || 1);
             const h = (d.y2 - d.y1) * (displayRect.height || 1);
+            const idMatch = typeof d.label === 'string' ? d.label.match(/_(\d+)$/) : null;
+            const idNum = idMatch ? parseInt(idMatch[1],10) : null;
+            const palette = ['#10B981','#60A5FA','#F59E0B','#EF4444','#8B5CF6','#14B8A6','#F472B6','#22C55E'];
+            const color = colorizeById && idNum !== null ? palette[idNum % palette.length] : '#10B981';
+            const borderRGBA = (hex: string, a: number) => {
+              const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+              if (!m) return hex;
+              const r = parseInt(m[1], 16), g = parseInt(m[2], 16), b = parseInt(m[3], 16);
+              return `rgba(${r},${g},${b},${Math.max(0, Math.min(1, a))})`;
+            };
+            const labelAbove = y > 14;
             return (
-              <div key={`vision-${idx}`} className="absolute border border-green-400 z-10" style={{ left: x, top: y, width: w, height: h }}>
-                <div className="absolute -top-5 left-0 bg-green-600 text-[10px] px-1 rounded text-white">
+              <div key={`vision-${idx}`} className="absolute z-10" style={{ left: x, top: y, width: w, height: h, border: `1px solid ${borderRGBA(color, maskOpacity)}` }}>
+                <div className="absolute left-0 text-[10px] px-1 rounded text-white" style={{ background: color, top: labelAbove ? -16 : undefined, bottom: labelAbove ? undefined : -16 }}>
                   {(d.label || 'obj')}{d.score ? ` ${(d.score*100).toFixed(0)}%` : ''}
                 </div>
               </div>

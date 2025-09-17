@@ -9,6 +9,7 @@ export type Detection = {
   y2: number; // normalized [0,1]
   score: number; // 0..1
   label?: string;
+  track_id?: number;
 };
 
 export interface AnalyzeRequest {
@@ -167,7 +168,8 @@ export async function analyzeRealtime(req: RealtimeDetectRequest): Promise<Analy
     const boxes = Array.isArray(data?.boxes) ? data.boxes : [];
     const detections: Detection[] = boxes.map((b: any) => ({
       x1: clamp01(b.x1), y1: clamp01(b.y1), x2: clamp01(b.x2), y2: clamp01(b.y2),
-      score: Number(b.score ?? 0), label: b.label ? String(b.label) : undefined
+      score: Number(b.score ?? 0), label: b.label ? String(b.label) : undefined,
+      track_id: typeof b.track_id === 'number' ? b.track_id : undefined
     }));
     return { detections, meta: { backend: 'http', url, httpBoxes: boxes.length } };
   } catch (e) {
