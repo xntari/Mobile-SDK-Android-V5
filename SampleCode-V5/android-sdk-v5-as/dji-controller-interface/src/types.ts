@@ -122,6 +122,9 @@ export interface FPVDisplayProps {
   agentDetections?: any[];
   visionMasks?: any[];
   visionKeypoints?: Array<Array<{ x:number; y:number; conf?: number }>>;
+  maskOpacity?: number;
+  colorizeById?: boolean;
+  detectThickness?: number;
 }
 
 export interface H20NDisplayProps {
@@ -134,6 +137,9 @@ export interface H20NDisplayProps {
   agentDetections?: any[];
   visionMasks?: any[];
   visionKeypoints?: Array<Array<{ x:number; y:number; conf?: number }>>;
+  maskOpacity?: number;
+  colorizeById?: boolean;
+  detectThickness?: number;
 }
 
 export interface HSICompassProps {

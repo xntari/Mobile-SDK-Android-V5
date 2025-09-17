@@ -28,6 +28,16 @@ export const App: React.FC = () => {
   // Shared detection state for vision/agent integration
   const [visionDetections, setVisionDetections] = useState<any[]>([]);
   const [visionMasks, setVisionMasks] = useState<any[]>([]);
+  const [maskOpacity, setMaskOpacity] = useState<number>(() => {
+    try { const raw = localStorage.getItem('visionrt.maskOpacity'); if (raw) return JSON.parse(raw); } catch {}
+    return 0.25;
+  });
+  const [colorizeById, setColorizeById] = useState<boolean>(() => {
+    try { const raw = localStorage.getItem('visionrt.colorizeById'); if (raw) return JSON.parse(raw); } catch {}
+    return false;
+  });
+  React.useEffect(()=>{ try { localStorage.setItem('visionrt.maskOpacity', JSON.stringify(maskOpacity)); } catch {} }, [maskOpacity]);
+  React.useEffect(()=>{ try { localStorage.setItem('visionrt.colorizeById', JSON.stringify(colorizeById)); } catch {} }, [colorizeById]);
   const [visionKeypoints, setVisionKeypoints] = useState<Array<Array<{x:number;y:number;conf?:number}>>>([]);
   const [agentDetections, setAgentDetections] = useState<any[]>([]);
 
@@ -106,6 +116,8 @@ export const App: React.FC = () => {
               visionMasks={selectedCamera === 'fpv' ? visionMasks : []}
               visionKeypoints={selectedCamera === 'fpv' ? visionKeypoints : []}
               agentDetections={selectedCamera === 'fpv' ? agentDetections : []}
+              maskOpacity={maskOpacity}
+              colorizeById={colorizeById}
             />
           </CameraPanel>
 
@@ -125,6 +137,8 @@ export const App: React.FC = () => {
               visionMasks={selectedCamera === 'h20n' ? visionMasks : []}
               visionKeypoints={selectedCamera === 'h20n' ? visionKeypoints : []}
               agentDetections={selectedCamera === 'h20n' ? agentDetections : []}
+              maskOpacity={maskOpacity}
+              colorizeById={colorizeById}
             />
           </CameraPanel>
 
@@ -227,6 +241,8 @@ export const App: React.FC = () => {
             setBoxes={setVisionDetections}
             setMasks={setVisionMasks}
             setPoses={(poses)=>setVisionKeypoints(poses)}
+            setMaskOpacity={setMaskOpacity}
+            setColorizeById={setColorizeById}
           />
 
         </div>
