@@ -1,20 +1,22 @@
 import React, { useRef, useEffect, useState, forwardRef, useImperativeHandle } from 'react';
 import { FPVDisplayProps, TelemetryData } from '../types';
-import type { Detection } from '../agent/visionClient';
+import type { Detection, Mask } from '../agent/visionClient';
 import { FlightDisplay } from './FlightDisplay';
 
 export interface FPVDisplayRef {
   getSnapshot: () => Promise<string>;
 }
 
-export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
+export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({ 
   width,
   height,
   className = '',
   children,
   telemetryData,
   visionDetections = [],
-  agentDetections = []
+  agentDetections = [],
+  visionMasks = [],
+  visionKeypoints = []
 }, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -31,6 +33,13 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
   const ppsRef = useRef<Uint8Array | null>(null);
   const decoderConfiguredRef = useRef<boolean>(false);
   
+  // HUD toggle
+  const [hudEnabled, setHudEnabled] = useState<boolean>(() => {
+    try { const raw = localStorage.getItem('fpv.hud.enabled'); if (raw) return JSON.parse(raw); } catch {}
+    return true;
+  });
+  useEffect(()=>{ try { localStorage.setItem('fpv.hud.enabled', JSON.stringify(hudEnabled)); } catch{} }, [hudEnabled]);
+
 
   // Calculate actual video display rectangle with object-contain behavior
   const calculateDisplayRect = () => {
@@ -634,6 +643,26 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
           height: `${displayRect.height}px`
         }}
       >
+          {/* Segmentation overlay as SVG polygons */}
+          <svg width={displayRect.width} height={displayRect.height} style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none', zIndex: 10 }}>
+            {visionMasks.map((m: Mask, idx: number) => {
+              const pts = (m.points || []).map(p => ({ x: p.x * (displayRect.width || 1), y: p.y * (displayRect.height || 1) }));
+              const first = pts[0];
+              return (
+                <g key={`mask-${idx}`}>
+                  <polygon
+                    points={pts.map(p => `${p.x},${p.y}`).join(' ')}
+                    fill="rgba(16,185,129,0.25)" stroke="#10B981" strokeWidth={1}
+                  />
+                  {first && m.label && (
+                    <text x={first.x} y={Math.max(10, first.y - 4)} fill="#10B981" fontSize="10" fontFamily="monospace" >
+                      {m.label}
+                    </text>
+                  )}
+                </g>
+              );
+            })}
+          </svg>
           {/* Vision detections overlay */}
           {visionDetections.map((d, idx) => {
             const x = d.x1 * (displayRect.width || 1);
@@ -648,6 +677,33 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
               </div>
             );
           })}
+
+          {/* Pose skeleton + keypoints overlay */}
+          <svg width={displayRect.width} height={displayRect.height} style={{ position:'absolute', left:0, top:0, pointerEvents:'none', zIndex: 10 }}>
+            {visionKeypoints.map((kp, i) => {
+              const W = displayRect.width || 1;
+              const H = displayRect.height || 1;
+              // COCO-17 style skeleton edges
+              const edges: Array<[number, number]> = [
+                [5,6],[5,7],[7,9],[6,8],[8,10],
+                [5,11],[6,12],[11,12],[11,13],[13,15],[12,14],[14,16],
+                [0,1],[0,2],[1,3],[2,4]
+              ];
+              return (
+                <g key={`pose-${i}`}>
+                  {edges.map(([a,b], ei) => {
+                    if (!kp[a] || !kp[b]) return null;
+                    const x1 = (kp[a].x) * W, y1 = (kp[a].y) * H;
+                    const x2 = (kp[b].x) * W, y2 = (kp[b].y) * H;
+                    return <line key={`edge-${i}-${ei}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#22c55e" strokeWidth={2} strokeOpacity={0.8} />;
+                  })}
+                  {kp.map((p, j) => (
+                    <circle key={`pt-${i}-${j}`} cx={(p.x)*W} cy={(p.y)*H} r={2.5} fill="#22c55e" />
+                  ))}
+                </g>
+              );
+            })}
+          </svg>
 
           {/* Agent detections overlay */}
           {agentDetections.map((d, idx) => {
@@ -706,16 +762,24 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
                 <span className="text-gray-400">Quality: </span>
                 <span className="text-white">4K/60</span>
               </div>
+              <div>
+                <span className="text-gray-400">HUD: </span>
+                <button className={`px-2 py-0.5 rounded text-xs ${hudEnabled? 'bg-dji-blue text-white':'bg-gray-700 text-gray-200'}`} onClick={()=>setHudEnabled(v=>!v)}>
+                  {hudEnabled? 'On':'Off'}
+                </button>
+              </div>
             </div>
           </div>
           
           {/* HUD Overlay - Center of camera view */}
-          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-30">
-            <FlightDisplay
-              telemetryData={telemetryData}
-              size="compact"
-            />
-          </div>
+          {hudEnabled && (
+            <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-30">
+              <FlightDisplay
+                telemetryData={telemetryData}
+                size="compact"
+              />
+            </div>
+          )}
 
           {/* Custom overlays passed as children */}
           {children}

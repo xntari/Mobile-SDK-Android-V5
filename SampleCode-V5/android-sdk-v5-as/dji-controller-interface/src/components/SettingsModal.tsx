@@ -4,6 +4,7 @@ type Endpoints = {
   visionDetect: string;
   visionDescribe: string;
   visionGeneral: string;
+  visionRealtime: string;
   planner: string;
 };
 
@@ -19,6 +20,7 @@ function loadEndpoints(): Endpoints {
     visionDetect: (globalThis as any).__VISION_URL__ || 'http://127.0.0.1:9001/detect',
     visionDescribe: (globalThis as any).__DESCRIBE_URL__ || 'http://127.0.0.1:9001/describe',
     visionGeneral: (globalThis as any).__GENERAL_URL__ || 'http://127.0.0.1:9003/general/analyze',
+    visionRealtime: (globalThis as any).__REALTIME_URL__ || 'http://127.0.0.1:9004/realtime/detect',
     planner: (globalThis as any).__PLANNER_URL__ || 'http://127.0.0.1:9002/plan',
   };
 }
@@ -28,6 +30,7 @@ function saveEndpoints(e: Endpoints) {
   (globalThis as any).__VISION_URL__ = e.visionDetect;
   (globalThis as any).__DESCRIBE_URL__ = e.visionDescribe;
   (globalThis as any).__GENERAL_URL__ = e.visionGeneral;
+  (globalThis as any).__REALTIME_URL__ = e.visionRealtime;
   (globalThis as any).__PLANNER_URL__ = e.planner;
 }
 
@@ -59,6 +62,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, ini
             </label>
             <label className="block">General Vision URL
               <input className="w-full bg-gray-800 text-xs px-2 py-1 rounded mt-1" value={ep.visionGeneral} onChange={e=>setEp({...ep, visionGeneral:e.target.value})} />
+            </label>
+            <label className="block">Realtime Vision URL (YOLO)
+              <input className="w-full bg-gray-800 text-xs px-2 py-1 rounded mt-1" value={ep.visionRealtime} onChange={e=>setEp({...ep, visionRealtime:e.target.value})} />
             </label>
             <label className="block">Planner URL
               <input className="w-full bg-gray-800 text-xs px-2 py-1 rounded mt-1" value={ep.planner} onChange={e=>setEp({...ep, planner:e.target.value})} />

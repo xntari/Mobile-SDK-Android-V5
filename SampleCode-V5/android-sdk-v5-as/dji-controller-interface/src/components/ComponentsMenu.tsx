@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { visionPanelControls } from './VisionPanel';
+import { visionRTPanelControls } from './VisionRealtimePanel';
 import { agentPanelControls } from './AgentPanel';
 import { fpvCameraPanelControls, h20nCameraPanelControls } from './CameraPanel';
 import { mapPanelControls, hsiPanelControls, controllerPanelControls } from './panelControls';
@@ -58,6 +59,12 @@ const panelControls: PanelControl[] = [
     title: 'Vision Analysis',
     isVisible: visionPanelControls.isVisible,
     setVisible: visionPanelControls.setVisible
+  },
+  {
+    id: 'visionrt',
+    title: 'Vision Realtime (YOLO)',
+    isVisible: visionRTPanelControls.isVisible,
+    setVisible: visionRTPanelControls.setVisible
   },
   {
     id: 'agent',

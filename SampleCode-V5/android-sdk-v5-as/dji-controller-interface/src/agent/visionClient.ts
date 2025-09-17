@@ -22,7 +22,7 @@ export interface AnalyzeResponse {
 }
 
 // Endpoint helpers — read from globals or persisted settings on every call so Settings take effect immediately.
-type SavedEndpoints = { visionDetect?: string; visionDescribe?: string; visionGeneral?: string; planner?: string };
+type SavedEndpoints = { visionDetect?: string; visionDescribe?: string; visionGeneral?: string; visionRealtime?: string; planner?: string };
 function loadSavedEndpoints(): SavedEndpoints {
   try { const raw = localStorage.getItem('settings.endpoints'); if (raw) return JSON.parse(raw) as SavedEndpoints; } catch {}
   return {};
@@ -38,6 +38,11 @@ export function getDescribeUrl(): string {
 export function getGeneralVisionUrl(): string {
   const ep = loadSavedEndpoints();
   return (globalThis as any).__GENERAL_URL__ || ep.visionGeneral || 'http://127.0.0.1:9003/general/analyze';
+}
+
+export function getRealtimeVisionUrl(): string {
+  const ep = loadSavedEndpoints();
+  return (globalThis as any).__REALTIME_URL__ || ep.visionRealtime || 'http://127.0.0.1:9004/realtime/detect';
 }
 
 function getThreshold(): number {
@@ -127,4 +132,122 @@ export async function analyzeDetect(req: AnalyzeRequest): Promise<AnalyzeRespons
   const fb = naiveFallback(req);
   fb.meta = { ...(fb.meta || {}), httpBoxes: http.meta?.httpBoxes ?? 0, url: http.meta?.url, backend: 'fallback', fallbackUsed: true } as any;
   return fb;
+}
+
+// Experimental: YOLO realtime detect (multi-class) via new endpoint
+export interface RealtimeDetectRequest {
+  imageBase64: string;
+  threshold?: number;
+  classes?: string[];   // optional allowlist
+  img_size?: number;    // optional server downscale control
+  signal?: AbortSignal; // optional abort
+}
+
+export async function analyzeRealtime(req: RealtimeDetectRequest): Promise<AnalyzeResponse> {
+  try {
+    const url = getRealtimeVisionUrl();
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: req.signal,
+      body: JSON.stringify({ image: req.imageBase64, threshold: req.threshold ?? getThreshold(), classes: req.classes, img_size: req.img_size ?? 640 })
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const boxes = Array.isArray(data?.boxes) ? data.boxes : [];
+    const detections: Detection[] = boxes.map((b: any) => ({
+      x1: clamp01(b.x1), y1: clamp01(b.y1), x2: clamp01(b.x2), y2: clamp01(b.y2),
+      score: Number(b.score ?? 0), label: b.label ? String(b.label) : undefined
+    }));
+    return { detections, meta: { backend: 'http', url, httpBoxes: boxes.length } };
+  } catch (e) {
+    console.warn('[visionClient] realtime detect call failed:', e);
+    return { detections: [], meta: { backend: 'http', url: getRealtimeVisionUrl(), httpBoxes: 0 } };
+  }
+}
+
+// Segmentation types and client
+export type Mask = {
+  points: Array<{ x: number; y: number }>; // normalized [0,1]
+  score?: number;
+  label?: string;
+};
+
+export interface RealtimeSegmentRequest {
+  imageBase64: string;
+  threshold?: number;
+  img_size?: number;
+}
+
+export async function analyzeRealtimeSegment(req: RealtimeSegmentRequest & { signal?: AbortSignal }): Promise<{ masks: Mask[]; meta?: any }> {
+  try {
+    const url = getRealtimeVisionUrl().replace('/realtime/detect', '/realtime/segment');
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: (req as any).signal,
+      body: JSON.stringify({ image: req.imageBase64, threshold: req.threshold ?? getThreshold(), img_size: req.img_size ?? 640 })
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const instances = Array.isArray(data?.instances) ? data.instances : [];
+    const masks: Mask[] = instances.map((ins: any) => ({
+      points: Array.isArray(ins.points) ? ins.points.map((p: any) => ({ x: clamp01(p.x), y: clamp01(p.y) })) : [],
+      score: typeof ins.score === 'number' ? ins.score : undefined,
+      label: typeof ins.label === 'string' ? ins.label : undefined
+    })).filter((m: Mask) => m.points.length >= 3);
+    return { masks, meta: { backend: 'http', url } };
+  } catch (e) {
+    console.warn('[visionClient] realtime segment call failed:', e);
+    return { masks: [], meta: { backend: 'http' } };
+  }
+}
+
+// Oriented object detection
+export type OrientedBox = { points: Array<{ x:number; y:number }>; score?: number; label?: string };
+export async function analyzeRealtimeObb(imageBase64: string, threshold?: number, img_size?: number, classes?: string[], signal?: AbortSignal): Promise<{ obb: OrientedBox[]; meta?: any }> {
+  try {
+    const base = getRealtimeVisionUrl().replace('/realtime/detect', '/realtime/obb');
+    const res = await fetch(base, { method:'POST', headers:{'Content-Type':'application/json'}, signal, body: JSON.stringify({ image: imageBase64, threshold: threshold ?? getThreshold(), img_size: img_size ?? 640, classes }) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const obb: OrientedBox[] = Array.isArray(data?.obb) ? data.obb : [];
+    return { obb, meta: { backend: 'http', url: base } };
+  } catch (e) {
+    console.warn('[visionClient] realtime obb call failed:', e);
+    return { obb: [], meta: { backend: 'http' } };
+  }
+}
+
+// Pose endpoint
+export interface PoseKeypoint { x: number; y: number; conf?: number }
+export interface Pose { keypoints: PoseKeypoint[] }
+export async function analyzeRealtimePose(imageBase64: string, img_size?: number, signal?: AbortSignal): Promise<{ poses: Pose[]; meta?: any }> {
+  try {
+    const base = getRealtimeVisionUrl().replace('/realtime/detect', '/realtime/pose');
+    const res = await fetch(base, { method:'POST', headers:{'Content-Type':'application/json'}, signal, body: JSON.stringify({ image: imageBase64, img_size: img_size ?? 640 }) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const poses: Pose[] = Array.isArray(data?.poses) ? data.poses : [];
+    return { poses, meta: { backend: 'http', url: base } };
+  } catch (e) {
+    console.warn('[visionClient] realtime pose call failed:', e);
+    return { poses: [], meta: { backend: 'http' } };
+  }
+}
+
+// Classification endpoint
+export interface ClassProb { label: string; score: number }
+export async function analyzeRealtimeClassify(imageBase64: string, top_k: number = 5, img_size?: number, signal?: AbortSignal): Promise<{ classes: ClassProb[]; meta?: any }> {
+  try {
+    const base = getRealtimeVisionUrl().replace('/realtime/detect', '/realtime/classify');
+    const res = await fetch(base, { method:'POST', headers:{'Content-Type':'application/json'}, signal, body: JSON.stringify({ image: imageBase64, top_k, img_size: img_size ?? 640 }) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const classes: ClassProb[] = Array.isArray(data?.classes) ? data.classes : [];
+    return { classes, meta: { backend: 'http', url: base } };
+  } catch (e) {
+    console.warn('[visionClient] realtime classify call failed:', e);
+    return { classes: [], meta: { backend: 'http' } };
+  }
 }

@@ -120,6 +120,8 @@ export interface FPVDisplayProps {
   telemetryData?: TelemetryData | null;
   visionDetections?: any[];
   agentDetections?: any[];
+  visionMasks?: any[];
+  visionKeypoints?: Array<Array<{ x:number; y:number; conf?: number }>>;
 }
 
 export interface H20NDisplayProps {
@@ -130,6 +132,8 @@ export interface H20NDisplayProps {
   telemetryData?: TelemetryData | null;
   visionDetections?: any[];
   agentDetections?: any[];
+  visionMasks?: any[];
+  visionKeypoints?: Array<Array<{ x:number; y:number; conf?: number }>>;
 }
 
 export interface HSICompassProps {

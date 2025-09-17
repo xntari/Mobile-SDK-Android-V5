@@ -12,6 +12,7 @@ import { CameraDisplay } from './CameraDisplay';
 import { CameraControls } from './CameraControls';
 import { ConnectionStatus } from './ConnectionStatus';
 import { VisionPanel } from './VisionPanel';
+import { VisionRealtimePanel } from './VisionRealtimePanel';
 import { AgentPanel } from './AgentPanel';
 import { CameraPanel } from './CameraPanel';
 import { Panel } from './Panel';
@@ -26,6 +27,8 @@ export const App: React.FC = () => {
 
   // Shared detection state for vision/agent integration
   const [visionDetections, setVisionDetections] = useState<any[]>([]);
+  const [visionMasks, setVisionMasks] = useState<any[]>([]);
+  const [visionKeypoints, setVisionKeypoints] = useState<Array<Array<{x:number;y:number;conf?:number}>>>([]);
   const [agentDetections, setAgentDetections] = useState<any[]>([]);
 
   // References to camera displays for snapshot functionality
@@ -100,6 +103,8 @@ export const App: React.FC = () => {
               className="w-full h-full"
               telemetryData={bridgeData.telemetry}
               visionDetections={selectedCamera === 'fpv' ? visionDetections : []}
+              visionMasks={selectedCamera === 'fpv' ? visionMasks : []}
+              visionKeypoints={selectedCamera === 'fpv' ? visionKeypoints : []}
               agentDetections={selectedCamera === 'fpv' ? agentDetections : []}
             />
           </CameraPanel>
@@ -117,6 +122,8 @@ export const App: React.FC = () => {
               className="w-full h-full"
               telemetryData={bridgeData.telemetry}
               visionDetections={selectedCamera === 'h20n' ? visionDetections : []}
+              visionMasks={selectedCamera === 'h20n' ? visionMasks : []}
+              visionKeypoints={selectedCamera === 'h20n' ? visionKeypoints : []}
               agentDetections={selectedCamera === 'h20n' ? agentDetections : []}
             />
           </CameraPanel>
@@ -213,6 +220,13 @@ export const App: React.FC = () => {
             sendBridge={sendBridge}
             setDetections={setAgentDetections}
             laserResult={null}
+          />
+
+          <VisionRealtimePanel
+            getSnapshot={getSnapshot}
+            setBoxes={setVisionDetections}
+            setMasks={setVisionMasks}
+            setPoses={(poses)=>setVisionKeypoints(poses)}
           />
 
         </div>
