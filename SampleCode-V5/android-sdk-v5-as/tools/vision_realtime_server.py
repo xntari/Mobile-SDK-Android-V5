@@ -33,6 +33,7 @@ import io
 import os
 
 from fastapi import FastAPI, Request
+import time
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from PIL import Image
@@ -60,6 +61,8 @@ _HAVE_YOLOE: bool = False
 _yoloe_model = None
 _HAVE_YOLOE_PF: bool = False
 _yoloe_pf_model = None
+
+_TRACKERS: Dict[str, Any] = {}
 
 
 # ------------------------- Utils -------------------------
@@ -284,6 +287,88 @@ def _parse_masks(result, W: int, H: int, names: Any) -> List[Dict[str, Any]]:
     return out[:100]
 
 
+# ------------------------- Simple tracker (per client session) -------------------------
+def _iou(a, b) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1 = max(ax1, bx1); iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2); iy2 = min(ay2, by2)
+    iw = max(0.0, ix2 - ix1); ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    aw = max(0.0, ax2 - ax1); ah = max(0.0, ay2 - ay1)
+    bw = max(0.0, bx2 - bx1); bh = max(0.0, by2 - by1)
+    union = aw * ah + bw * bh - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _assign_tracks(sid: str, detections: List[Dict[str, Any]], label_key: str = 'label', points_key: Optional[str] = None, iou_thr: float = 0.5) -> List[Dict[str, Any]]:
+    """Assign stable IDs per class using greedy IoU matching against previous step for this sid.
+    If points_key is provided, compute bbox from polygon points; else use x1..y2.
+    Mutates labels to include suffix: chair_0, chair_1, ...
+    """
+    st = _TRACKERS.get(sid)
+    now = time.time()
+    if not st:
+        st = {'by_class': {}, 'step': 0, 'last': now}
+        _TRACKERS[sid] = st
+    st['step'] += 1; st['last'] = now
+
+    # Build current boxes with class labels
+    curr = []
+    for d in detections:
+        lbl = str(d.get(label_key) or 'obj')
+        if points_key and d.get(points_key):
+            pts = d.get(points_key) or []
+            if not pts:
+                continue
+            xs = [float(p['x']) for p in pts]
+            ys = [float(p['y']) for p in pts]
+            x1, y1, x2, y2 = max(0.0, min(xs)), max(0.0, min(ys)), max(0.0, max(xs)), max(0.0, max(ys))
+        else:
+            x1, y1, x2, y2 = float(d['x1']), float(d['y1']), float(d['x2']), float(d['y2'])
+        curr.append({'bbox': (x1, y1, x2, y2), 'label': lbl, 'ref': d})
+
+    # Match per class
+    by_class = st['by_class']
+    for lbl in set(c['label'] for c in curr):
+        tracks = by_class.get(lbl, {'next': 0, 'items': []})
+        items = tracks['items']  # list of {id:int, bbox:tuple, seen:int}
+        used = set()
+        # Greedy match by IoU
+        for det in curr:
+            if det['label'] != lbl:
+                continue
+            best_iou, best_idx = 0.0, -1
+            for idx, tr in enumerate(items):
+                if idx in used:
+                    continue
+                iou = _iou(det['bbox'], tr['bbox'])
+                if iou > best_iou:
+                    best_iou, best_idx = iou, idx
+            if best_idx >= 0 and best_iou >= iou_thr:
+                # Assign existing track
+                tr = items[best_idx]
+                used.add(best_idx)
+                tr['bbox'] = det['bbox']
+                tr['seen'] = st['step']
+                det['ref'][label_key] = f"{lbl}_{tr['id']}"
+            else:
+                # New track
+                tid = tracks['next']
+                tracks['next'] += 1
+                items.append({'id': tid, 'bbox': det['bbox'], 'seen': st['step']})
+                det['ref'][label_key] = f"{lbl}_{tid}"
+        # GC old tracks
+        items = [tr for tr in items if (st['step'] - tr.get('seen', 0)) <= 50]
+        tracks['items'] = items
+        by_class[lbl] = tracks
+    st['by_class'] = by_class
+    _TRACKERS[sid] = st
+    return detections
+
+
 # ------------------------- Schemas -------------------------
 class RTDetectRequest(BaseModel):
     image: str
@@ -349,6 +434,9 @@ def realtime_detect(req: RTDetectRequest, request: Request):
             r = res[0]
             W, H = img2.size
             boxes = _parse_boxes(r, W, H, getattr(r, 'names', {}), req.ov_labels if not use_pf else None)
+            # Apply tracking IDs per class
+            sid = request.headers.get('x-client-session') or 'no-sid'
+            boxes = _assign_tracks(sid, boxes, label_key='label', points_key=None)
         # No fallbacks in detect path
     except Exception as e:
         print('[realtime] detect error:', e)
@@ -400,10 +488,13 @@ def realtime_segment(req: RTSegmentRequest, request: Request):
         r = res[0]
         W, H = img2.size
         instances = _parse_masks(r, W, H, getattr(r, 'names', {}))
+        # Apply tracking IDs per class: mutate label with suffix
+        sid = request.headers.get('x-client-session') or 'no-sid'
+        instances = _assign_tracks(sid, instances, label_key='label', points_key='points')
         # No fallbacks in segmentation path
         try:
-            sid = request.headers.get('x-client-session') or 'no-sid'
-            print(f"[realtime][SEG][sid={sid}] mode={'PF' if use_pf else 'OV'} thr={thr} size={size} labels={(req.ov_labels or [])} -> {len(instances)} instances")
+            sid2 = request.headers.get('x-client-session') or 'no-sid'
+            print(f"[realtime][SEG][sid={sid2}] mode={'PF' if use_pf else 'OV'} thr={thr} size={size} labels={(req.ov_labels or [])} -> {len(instances)} instances")
         except Exception:
             pass
         return {'instances': instances}
