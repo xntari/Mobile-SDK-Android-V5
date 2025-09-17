@@ -543,32 +543,143 @@ def realtime_segment(req: RTSegmentRequest, request: Request):
     img2 = _scale_image(img, size)
     try:
         use_pf = not (req.ov_labels and len(req.ov_labels) > 0)
-        res = None
+        model = None
         if use_pf:
             if not _HAVE_YOLOE_PF:
                 _lazy_load_yoloe_pf()
             if not _HAVE_YOLOE_PF:
                 return {'instances': []}
-            res = _safe_predict(_yoloe_pf_model, img2, size, thr)
+            model = _yoloe_pf_model
         else:
             if not _HAVE_YOLOE:
                 _lazy_load_yoloe()
             if not _HAVE_YOLOE:
                 return {'instances': []}
+            model = _yoloe_model
             try:
-                if hasattr(_yoloe_model, 'set_classes') and req.ov_labels:
-                    _yoloe_model.set_classes(req.ov_labels)  # type: ignore
+                if hasattr(model, 'set_classes') and req.ov_labels:
+                    model.set_classes(req.ov_labels)  # type: ignore
             except Exception as e:
                 print('[realtime] yolo-e set_classes failed:', e)
-            res = _safe_predict(_yoloe_model, img2, size, thr)
-        if not res:
-            return {'instances': []}
-        r = res[0]
+
+        # Use track() instead of predict() to get consistent tracking IDs
+        try:
+            # Track with ByteTrack + ReID for consistent IDs across detect/segment
+            track_res = model.track(img2, imgsz=size, conf=thr, verbose=False, persist=True, tracker='botsort-reid.yaml')  # type: ignore
+            if track_res:
+                r = track_res[0]
+            else:
+                # Fallback to predict if track fails
+                res = _safe_predict(model, img2, size, thr)
+                if not res:
+                    return {'instances': []}
+                r = res[0]
+        except Exception as e_track:
+            print(f'[realtime] segment track failed ({e_track}), falling back to predict')
+            # Fallback to predict without tracking
+            res = _safe_predict(model, img2, size, thr)
+            if not res:
+                return {'instances': []}
+            r = res[0]
+
         W, H = img2.size
-        instances = _parse_masks(r, W, H, getattr(r, 'names', {}))
-        # Assign per-session instance IDs to segmentation
         sid2 = request.headers.get('x-client-session') or 'no-sid'
-        instances = _assign_seg_ids(sid2, instances, iou_thr=0.5)
+
+        # Parse masks with tracking IDs if available
+        instances = []
+        m = getattr(r, 'masks', None)
+        b = getattr(r, 'boxes', None)
+        polys = getattr(m, 'xy', None) if m is not None else None
+        conf = b.conf.cpu().numpy().tolist() if b is not None and getattr(b, 'conf', None) is not None else []
+        cls = b.cls.cpu().numpy().tolist() if b is not None and getattr(b, 'cls', None) is not None else []
+        names = getattr(r, 'names', {})
+
+        # Get tracking IDs if available
+        ids_raw = getattr(b, 'id', None) if b is not None else None
+        ids = []
+        if ids_raw is not None:
+            try:
+                ids = ids_raw.int().cpu().numpy().tolist()
+                # flatten Nx1
+                ids = [int(v[0] if isinstance(v, (list, tuple)) else v) for v in ids]
+            except Exception:
+                ids = []
+
+        if polys is None:
+            # Build quads from boxes
+            if b is None or getattr(b, 'xyxy', None) is None:
+                return {'instances': []}
+            xyxy = b.xyxy.cpu().numpy().tolist()
+            for i, bb in enumerate(xyxy):
+                try:
+                    x1, y1, x2, y2 = bb
+                except Exception:
+                    continue
+                pts = [
+                    {'x': max(0.0, min(1.0, x1 / W)), 'y': max(0.0, min(1.0, y1 / H))},
+                    {'x': max(0.0, min(1.0, x2 / W)), 'y': max(0.0, min(1.0, y1 / H))},
+                    {'x': max(0.0, min(1.0, x2 / W)), 'y': max(0.0, min(1.0, y2 / H))},
+                    {'x': max(0.0, min(1.0, x1 / W)), 'y': max(0.0, min(1.0, y2 / H))},
+                ]
+                sc = float(conf[i]) if i < len(conf) else None
+                lbl = None
+                if i < len(cls):
+                    try:
+                        cid = int(cls[i])
+                        if isinstance(names, dict) and cid in names:
+                            lbl = str(names[cid])
+                        elif isinstance(names, (list, tuple)) and 0 <= cid < len(names):
+                            lbl = str(names[cid])
+                    except Exception:
+                        lbl = None
+                # Use tracker ID for consistent labeling
+                tid = ids[i] if i < len(ids) else None
+                if tid is not None and lbl:
+                    disp = _display_id_for(sid2, lbl, tid)
+                    if disp is not None:
+                        lbl = f"{lbl}_{disp}"
+                instances.append({
+                    'points': pts,
+                    **({'score': sc} if sc is not None else {}),
+                    **({'label': lbl} if lbl else {}),
+                    **({'track_id': tid} if tid is not None else {})
+                })
+        else:
+            # Masks polygons
+            for i, poly in enumerate(polys):
+                pts = []
+                try:
+                    for x, y in poly:
+                        pts.append({'x': max(0.0, min(1.0, float(x) / W)), 'y': max(0.0, min(1.0, float(y) / H))})
+                except Exception:
+                    continue
+                sc = float(conf[i]) if i < len(conf) else None
+                lbl = None
+                if i < len(cls):
+                    try:
+                        cid = int(cls[i])
+                        if isinstance(names, dict) and cid in names:
+                            lbl = str(names[cid])
+                        elif isinstance(names, (list, tuple)) and 0 <= cid < len(names):
+                            lbl = str(names[cid])
+                    except Exception:
+                        lbl = None
+                # Use tracker ID for consistent labeling
+                tid = ids[i] if i < len(ids) else None
+                if tid is not None and lbl:
+                    disp = _display_id_for(sid2, lbl, tid)
+                    if disp is not None:
+                        lbl = f"{lbl}_{disp}"
+                instances.append({
+                    'points': pts,
+                    **({'score': sc} if sc is not None else {}),
+                    **({'label': lbl} if lbl else {}),
+                    **({'track_id': tid} if tid is not None else {})
+                })
+
+        instances.sort(key=lambda d: d.get('score', 0) or 0, reverse=True)
+        instances = instances[:100]
+
         # No fallbacks in segmentation path
         try:
             print(f"[realtime][SEG][sid={sid2}] mode={'PF' if use_pf else 'OV'} thr={thr} size={size} labels={(req.ov_labels or [])} -> {len(instances)} instances")
