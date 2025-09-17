@@ -32,7 +32,7 @@ import base64
 import io
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from PIL import Image
@@ -296,6 +296,7 @@ class RTSegmentRequest(BaseModel):
     image: str
     threshold: float | None = None
     img_size: int | None = None
+    ov_labels: list[str] | None = None
 
 
 class RTPromptDetectRequest(BaseModel):
@@ -314,7 +315,7 @@ class RTClassifyRequest(BaseModel):
 
 # ------------------------- Routes -------------------------
 @app.post('/realtime/detect')
-def realtime_detect(req: RTDetectRequest):
+def realtime_detect(req: RTDetectRequest, request: Request):
     try:
         img = decode_image_to_pil(req.image)
     except Exception:
@@ -337,34 +338,18 @@ def realtime_detect(req: RTDetectRequest):
                 _lazy_load_yoloe()
             if not _HAVE_YOLOE:
                 return {'boxes': []}
-            # set textual classes and predict; try prompt args if needed
+            # set textual classes and single predict per docs
             try:
-                if hasattr(_yoloe_model, 'set_classes'):
+                if hasattr(_yoloe_model, 'set_classes') and req.ov_labels:
                     _yoloe_model.set_classes(req.ov_labels)  # type: ignore
-                elif hasattr(_yoloe_model, 'set_labels'):
-                    getattr(_yoloe_model, 'set_labels')(req.ov_labels)  # type: ignore
-            except Exception:
-                pass
+            except Exception as e:
+                print('[realtime] yolo-e set_classes failed:', e)
             res = _safe_predict(_yoloe_model, img2, size, thr)
-            if (not res or len(res) == 0) and req.ov_labels:
-                for kw in ({'prompts': req.ov_labels}, {'text': req.ov_labels}):
-                    res = _safe_predict(_yoloe_model, img2, size, thr, extra=kw)
-                    if res:
-                        break
         if res:
             r = res[0]
             W, H = img2.size
             boxes = _parse_boxes(r, W, H, getattr(r, 'names', {}), req.ov_labels if not use_pf else None)
-        # Fallback: if OV failed, try PF once
-        if not boxes and not use_pf:
-            if not _HAVE_YOLOE_PF:
-                _lazy_load_yoloe_pf()
-            if _HAVE_YOLOE_PF:
-                res2 = _safe_predict(_yoloe_pf_model, img2, size, thr)
-                if res2:
-                    r2 = res2[0]
-                    W, H = img2.size
-                    boxes = _parse_boxes(r2, W, H, getattr(r2, 'names', {}), None)
+        # No fallbacks in detect path
     except Exception as e:
         print('[realtime] detect error:', e)
     try:
@@ -374,14 +359,15 @@ def realtime_detect(req: RTDetectRequest):
             if lbl:
                 lab_counts[lbl] = lab_counts.get(lbl, 0) + 1
         top = sorted(lab_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
-        print(f"[realtime][DETECT] thr={thr} size={size} mode={'PF' if use_pf else 'OV'} labels={(req.ov_labels or [])} -> {len(boxes)} boxes; top: {top}")
+        sid = request.headers.get('x-client-session') or 'no-sid'
+        print(f"[realtime][DETECT][sid={sid}] thr={thr} size={size} mode={'PF' if use_pf else 'OV'} labels={(req.ov_labels or [])} -> {len(boxes)} boxes; top: {top}")
     except Exception:
         pass
     return {'boxes': boxes}
 
 
 @app.post('/realtime/segment')
-def realtime_segment(req: RTSegmentRequest):
+def realtime_segment(req: RTSegmentRequest, request: Request):
     try:
         img = decode_image_to_pil(req.image)
     except Exception:
@@ -390,18 +376,34 @@ def realtime_segment(req: RTSegmentRequest):
     size = int(req.img_size) if req.img_size else _DEFAULT_IMGSZ
     img2 = _scale_image(img, size)
     try:
-        if not _HAVE_YOLOE_PF:
-            _lazy_load_yoloe_pf()
-        if not _HAVE_YOLOE_PF:
-            return {'instances': []}
-        res = _safe_predict(_yoloe_pf_model, img2, size, thr)
+        use_pf = not (req.ov_labels and len(req.ov_labels) > 0)
+        res = None
+        if use_pf:
+            if not _HAVE_YOLOE_PF:
+                _lazy_load_yoloe_pf()
+            if not _HAVE_YOLOE_PF:
+                return {'instances': []}
+            res = _safe_predict(_yoloe_pf_model, img2, size, thr)
+        else:
+            if not _HAVE_YOLOE:
+                _lazy_load_yoloe()
+            if not _HAVE_YOLOE:
+                return {'instances': []}
+            try:
+                if hasattr(_yoloe_model, 'set_classes') and req.ov_labels:
+                    _yoloe_model.set_classes(req.ov_labels)  # type: ignore
+            except Exception as e:
+                print('[realtime] yolo-e set_classes failed:', e)
+            res = _safe_predict(_yoloe_model, img2, size, thr)
         if not res:
             return {'instances': []}
         r = res[0]
         W, H = img2.size
         instances = _parse_masks(r, W, H, getattr(r, 'names', {}))
+        # No fallbacks in segmentation path
         try:
-            print(f"[realtime][SEG] thr={thr} size={size} -> {len(instances)} instances")
+            sid = request.headers.get('x-client-session') or 'no-sid'
+            print(f"[realtime][SEG][sid={sid}] mode={'PF' if use_pf else 'OV'} thr={thr} size={size} labels={(req.ov_labels or [])} -> {len(instances)} instances")
         except Exception:
             pass
         return {'instances': instances}
@@ -553,4 +555,3 @@ if __name__ == '__main__':
 
     import uvicorn
     uvicorn.run(app, host='0.0.0.0', port=_DEFAULT_PORT)
-
