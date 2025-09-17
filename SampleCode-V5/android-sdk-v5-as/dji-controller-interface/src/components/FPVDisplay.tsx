@@ -18,7 +18,8 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
   visionMasks = [],
   visionKeypoints = [],
   maskOpacity = 0.25,
-  colorizeById = false
+  colorizeById = false,
+  detectThickness = 1
 }, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -645,73 +646,299 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
           height: `${displayRect.height}px`
         }}
       >
-          {/* Segmentation overlay as SVG polygons */}
-          <svg width={displayRect.width} height={displayRect.height} style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none', zIndex: 10 }}>
-            {visionMasks.map((m: Mask, idx: number) => {
+          {/* Label anti-collision system for masks and detections */}
+          {(() => {
+            // Collect all labels that need to be placed
+            const allLabels: Array<{
+              type: 'mask' | 'detection';
+              idx: number;
+              x: number;
+              y: number;
+              w: number;
+              h: number;
+              label: string;
+              color: string;
+              score?: number;
+              globalId: number;
+            }> = [];
+
+            // Global ID counter for unique colors across ALL objects
+            let globalIdCounter = 0;
+
+            // Add mask labels
+            visionMasks.forEach((m: Mask, idx: number) => {
               const pts = (m.points || []).map(p => ({ x: p.x * (displayRect.width || 1), y: p.y * (displayRect.height || 1) }));
-              const first = pts[0];
-              const idMatch = typeof m.label === 'string' ? m.label.match(/_(\d+)$/) : null;
-              const idNum = idMatch ? parseInt(idMatch[1], 10) : null;
-              const palette = ['#10B981','#60A5FA','#F59E0B','#EF4444','#8B5CF6','#14B8A6','#F472B6','#22C55E'];
-              const color = colorizeById && idNum !== null ? palette[idNum % palette.length] : '#10B981';
-              return (
-                <g key={`mask-${idx}`}>
-                  <polygon
-                    points={pts.map(p => `${p.x},${p.y}`).join(' ')}
-                    fill={color}
-                    fillOpacity={maskOpacity}
-                    stroke={color}
-                    strokeOpacity={maskOpacity}
-                    strokeWidth={1}
-                  />
-                </g>
-              );
-            })}
-          </svg>
-          {/* Mask labels as absolute divs */}
-          {visionMasks.map((m: Mask, idx: number) => {
-            const pts = (m.points || []).map(p => ({ x: p.x * (displayRect.width || 1), y: p.y * (displayRect.height || 1) }));
-            if (!pts.length || !m.label) return null;
-            const xs = pts.map(p=>p.x), ys = pts.map(p=>p.y);
-            const x = Math.min(...xs), y = Math.min(...ys);
-            const idMatch = typeof m.label === 'string' ? m.label.match(/_(\d+)$/) : null;
-            const idNum = idMatch ? parseInt(idMatch[1], 10) : null;
-            const palette = ['#10B981','#60A5FA','#F59E0B','#EF4444','#8B5CF6','#14B8A6','#F472B6','#22C55E'];
-            const color = colorizeById && idNum !== null ? palette[idNum % palette.length] : '#10B981';
-            const labelAbove = y > 14;
-            return (
-              <div key={`masklbl-${idx}`} className="absolute z-10" style={{ left: x, top: y }}>
-                <div className="absolute left-0 text-[10px] px-1 rounded text-white" style={{ background: color, top: labelAbove ? -16 : undefined, bottom: labelAbove ? undefined : -16 }}>
-                  {m.label}
-                </div>
-              </div>
-            );
-          })}
-          {/* Vision detections overlay */}
-          {visionDetections.map((d, idx) => {
-            const x = d.x1 * (displayRect.width || 1);
-            const y = d.y1 * (displayRect.height || 1);
-            const w = (d.x2 - d.x1) * (displayRect.width || 1);
-            const h = (d.y2 - d.y1) * (displayRect.height || 1);
-            const idMatch = typeof d.label === 'string' ? d.label.match(/_(\d+)$/) : null;
-            const idNum = idMatch ? parseInt(idMatch[1],10) : null;
-            const palette = ['#10B981','#60A5FA','#F59E0B','#EF4444','#8B5CF6','#14B8A6','#F472B6','#22C55E'];
-            const color = colorizeById && idNum !== null ? palette[idNum % palette.length] : '#10B981';
-            const borderRGBA = (hex: string, a: number) => {
-              const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-              if (!m) return hex;
-              const r = parseInt(m[1], 16), g = parseInt(m[2], 16), b = parseInt(m[3], 16);
-              return `rgba(${r},${g},${b},${Math.max(0, Math.min(1, a))})`;
+              if (!pts.length || !m.label) return;
+              const xs = pts.map(p=>p.x), ys = pts.map(p=>p.y);
+              const x = Math.min(...xs), y = Math.min(...ys);
+              const w = Math.max(...xs) - x;
+              const h = Math.max(...ys) - y;
+
+              // Extended palette with more distinct colors
+              const palette = ['#10B981','#60A5FA','#F59E0B','#EF4444','#8B5CF6','#14B8A6','#F472B6','#22C55E',
+                              '#FBBF24', '#A78BFA', '#34D399', '#FB7185', '#94A3B8', '#C084FC', '#2DD4BF', '#FCA5A5'];
+
+              // Use global ID for unique colors across all objects
+              const color = colorizeById ? palette[globalIdCounter % palette.length] : '#10B981';
+
+              allLabels.push({
+                type: 'mask',
+                idx,
+                x,
+                y,
+                w,
+                h,
+                label: m.label,
+                color,
+                globalId: globalIdCounter++
+              });
+            });
+
+            // Add detection labels
+            visionDetections.forEach((d, idx) => {
+              const x = d.x1 * (displayRect.width || 1);
+              const y = d.y1 * (displayRect.height || 1);
+              const w = (d.x2 - d.x1) * (displayRect.width || 1);
+              const h = (d.y2 - d.y1) * (displayRect.height || 1);
+
+              // Extended palette with more distinct colors
+              const palette = ['#10B981','#60A5FA','#F59E0B','#EF4444','#8B5CF6','#14B8A6','#F472B6','#22C55E',
+                              '#FBBF24', '#A78BFA', '#34D399', '#FB7185', '#94A3B8', '#C084FC', '#2DD4BF', '#FCA5A5'];
+
+              // Use global ID for unique colors across all objects
+              const color = colorizeById ? palette[globalIdCounter % palette.length] : '#10B981';
+
+              allLabels.push({
+                type: 'detection',
+                idx,
+                x,
+                y,
+                w,
+                h,
+                label: d.label || 'obj',
+                color,
+                score: d.score,
+                globalId: globalIdCounter++
+              });
+            });
+
+            // Place labels with anti-collision
+            const placedLabels: Array<{ x: number; y: number; w: number; h: number }> = [];
+            const occupiedAreas: Array<{ x: number; y: number; w: number; h: number }> = [];
+
+            // Add bounding boxes to occupied areas
+            allLabels.forEach(item => {
+              occupiedAreas.push({
+                x: item.x,
+                y: item.y,
+                w: item.w,
+                h: item.h
+              });
+            });
+
+            // Add vision detection boxes to occupied areas
+            visionDetections.forEach(d => {
+              const x = d.x1 * (displayRect.width || 1);
+              const y = d.y1 * (displayRect.height || 1);
+              const w = (d.x2 - d.x1) * (displayRect.width || 1);
+              const h = (d.y2 - d.y1) * (displayRect.height || 1);
+              occupiedAreas.push({ x, y, w, h });
+            });
+
+            // Add mask bounding boxes to occupied areas
+            visionMasks.forEach(m => {
+              const pts = (m.points || []).map(p => ({
+                x: p.x * (displayRect.width || 1),
+                y: p.y * (displayRect.height || 1)
+              }));
+              if (pts.length > 0) {
+                const minX = Math.min(...pts.map(p => p.x));
+                const maxX = Math.max(...pts.map(p => p.x));
+                const minY = Math.min(...pts.map(p => p.y));
+                const maxY = Math.max(...pts.map(p => p.y));
+                occupiedAreas.push({
+                  x: minX,
+                  y: minY,
+                  w: maxX - minX,
+                  h: maxY - minY
+                });
+              }
+            });
+
+            const getLabelDimensions = (text: string) => {
+              // Estimate label dimensions based on text length (approximation)
+              const charWidth = 6; // Approximate width per character at text-[10px]
+              const padding = 8; // px-1 = 4px each side
+              const height = 16; // Height of label box
+              const width = text.length * charWidth + padding;
+              return { width, height };
             };
-            const labelAbove = y > 14;
+
+            const checkCollision = (x: number, y: number, w: number, h: number) => {
+              // Check collision with other labels
+              const labelCollision = placedLabels.some(label =>
+                !(x + w <= label.x || x >= label.x + label.w ||
+                  y + h <= label.y || y >= label.y + label.h)
+              );
+
+              // Check collision with occupied areas (boxes/masks)
+              const areaCollision = occupiedAreas.some(area =>
+                !(x + w <= area.x || x >= area.x + area.w ||
+                  y + h <= area.y || y >= area.y + area.h)
+              );
+
+              return labelCollision || areaCollision;
+            };
+
+            const findNonCollidingPosition = (
+              boxX: number,
+              boxY: number,
+              boxW: number,
+              boxH: number,
+              labelW: number,
+              labelH: number
+            ): { x: number; y: number; position: string } => {
+              // Extended positions for crowded scenes
+              const spacing = 2;
+              const positions = [
+                // Primary positions
+                { x: boxX, y: boxY - labelH - spacing, position: 'above' },
+                { x: boxX, y: boxY + boxH + spacing, position: 'below' },
+                { x: boxX - labelW - spacing, y: boxY, position: 'left' },
+                { x: boxX + boxW + spacing, y: boxY, position: 'right' },
+                // Corners
+                { x: boxX + boxW - labelW, y: boxY - labelH - spacing, position: 'above-right' },
+                { x: boxX + boxW - labelW, y: boxY + boxH + spacing, position: 'below-right' },
+                { x: boxX - labelW - spacing, y: boxY + boxH - labelH, position: 'left-bottom' },
+                { x: boxX + boxW + spacing, y: boxY + boxH - labelH, position: 'right-bottom' },
+                // Mid-aligned positions
+                { x: boxX + (boxW - labelW) / 2, y: boxY - labelH - spacing, position: 'above-center' },
+                { x: boxX + (boxW - labelW) / 2, y: boxY + boxH + spacing, position: 'below-center' },
+                { x: boxX - labelW - spacing, y: boxY + (boxH - labelH) / 2, position: 'left-center' },
+                { x: boxX + boxW + spacing, y: boxY + (boxH - labelH) / 2, position: 'right-center' },
+                // Additional positions with more spacing for crowded scenes
+                { x: boxX, y: boxY - labelH - spacing * 4, position: 'above-far' },
+                { x: boxX, y: boxY + boxH + spacing * 4, position: 'below-far' },
+                { x: boxX - labelW - spacing * 4, y: boxY, position: 'left-far' },
+                { x: boxX + boxW + spacing * 4, y: boxY, position: 'right-far' },
+                // Diagonal positions
+                { x: boxX - labelW - spacing * 3, y: boxY - labelH - spacing * 3, position: 'top-left-diag' },
+                { x: boxX + boxW + spacing * 3, y: boxY - labelH - spacing * 3, position: 'top-right-diag' },
+                { x: boxX - labelW - spacing * 3, y: boxY + boxH + spacing * 3, position: 'bottom-left-diag' },
+                { x: boxX + boxW + spacing * 3, y: boxY + boxH + spacing * 3, position: 'bottom-right-diag' }
+              ];
+
+              // Find first non-colliding position
+              for (const pos of positions) {
+                // Ensure label stays within display bounds
+                if (pos.x < 0 || pos.y < 0 ||
+                    pos.x + labelW > (displayRect.width || 0) ||
+                    pos.y + labelH > (displayRect.height || 0)) {
+                  continue;
+                }
+
+                if (!checkCollision(pos.x, pos.y, labelW, labelH)) {
+                  return pos;
+                }
+              }
+
+              // Fallback to original position (above or below based on y position)
+              return boxY > 14
+                ? { x: boxX, y: boxY - labelH - 2, position: 'above' }
+                : { x: boxX, y: boxY + boxH + 2, position: 'below' };
+            };
+
             return (
-              <div key={`vision-${idx}`} className="absolute z-10" style={{ left: x, top: y, width: w, height: h, border: `1px solid ${borderRGBA(color, maskOpacity)}` }}>
-                <div className="absolute left-0 text-[10px] px-1 rounded text-white" style={{ background: color, top: labelAbove ? -16 : undefined, bottom: labelAbove ? undefined : -16 }}>
-                  {(d.label || 'obj')}{d.score ? ` ${(d.score*100).toFixed(0)}%` : ''}
-                </div>
-              </div>
+              <>
+                {/* Vision segmentation overlay */}
+                <svg width={displayRect.width} height={displayRect.height} style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none', zIndex: 10 }}>
+                  {visionMasks.map((m: Mask, idx: number) => {
+                    const pts = (m.points || []).map(p => ({ x: p.x * (displayRect.width || 1), y: p.y * (displayRect.height || 1) }));
+                    // Find the corresponding label to get its color
+                    const labelItem = allLabels.find(l => l.type === 'mask' && l.idx === idx);
+                    const color = labelItem ? labelItem.color : '#10B981';
+                    return (
+                      <g key={`mask-${idx}`}>
+                        <polygon
+                          points={pts.map(p => `${p.x},${p.y}`).join(' ')}
+                          fill={color}
+                          fillOpacity={maskOpacity}
+                          stroke={color}
+                          strokeOpacity={maskOpacity}
+                          strokeWidth={1}
+                        />
+                      </g>
+                    );
+                  })}
+                </svg>
+
+                {/* Vision detections boxes */}
+                {visionDetections.map((d, idx) => {
+                  const x = d.x1 * (displayRect.width || 1);
+                  const y = d.y1 * (displayRect.height || 1);
+                  const w = (d.x2 - d.x1) * (displayRect.width || 1);
+                  const h = (d.y2 - d.y1) * (displayRect.height || 1);
+                  // Find the corresponding label to get its color
+                  const labelItem = allLabels.find(l => l.type === 'detection' && l.idx === idx);
+                  const color = labelItem ? labelItem.color : '#10B981';
+                  const borderRGBA = (hex: string, a: number) => {
+                    const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+                    if (!m) return hex;
+                    const r = parseInt(m[1], 16), g = parseInt(m[2], 16), b = parseInt(m[3], 16);
+                    return `rgba(${r},${g},${b},${Math.max(0, Math.min(1, a))})`;
+                  };
+                  return (
+                    <div key={`vision-box-${idx}`} className="absolute z-10" style={{
+                      left: x,
+                      top: y,
+                      width: w,
+                      height: h,
+                      border: `${detectThickness}px solid ${borderRGBA(color, maskOpacity)}`
+                    }} />
+                  );
+                })}
+
+                {/* All labels with anti-collision */}
+                {allLabels.map((item) => {
+                  const labelText = item.type === 'detection' && item.score
+                    ? `${item.label} ${(item.score * 100).toFixed(0)}%`
+                    : item.label;
+
+                  const labelDims = getLabelDimensions(labelText);
+                  const labelPos = findNonCollidingPosition(
+                    item.x,
+                    item.y,
+                    item.w,
+                    item.h,
+                    labelDims.width,
+                    labelDims.height
+                  );
+
+                  // Record this label's position
+                  placedLabels.push({
+                    x: labelPos.x,
+                    y: labelPos.y,
+                    w: labelDims.width,
+                    h: labelDims.height
+                  });
+
+                  return (
+                    <div
+                      key={`${item.type}-label-${item.idx}`}
+                      className="absolute z-20 text-[10px] px-1 rounded text-white pointer-events-none"
+                      style={{
+                        left: labelPos.x,
+                        top: labelPos.y,
+                        background: item.color
+                      }}
+                    >
+                      {labelText}
+                    </div>
+                  );
+                })}
+              </>
             );
-          })}
+          })()}
 
           {/* Pose skeleton + keypoints overlay */}
           <svg width={displayRect.width} height={displayRect.height} style={{ position:'absolute', left:0, top:0, pointerEvents:'none', zIndex: 10 }}>
