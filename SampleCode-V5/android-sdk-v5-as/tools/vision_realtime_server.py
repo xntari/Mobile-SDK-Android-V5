@@ -57,7 +57,7 @@ class RTDetectRequest(BaseModel):
     threshold: float | None = None
     classes: list[str] | None = None  # optional allowlist of labels
     img_size: int | None = None       # optional max side for downscale (server-side)
-    ov_labels: list[str] | None = None   # optional open-vocab labels to supplement
+    ov_labels: list[str] | None = None   # optional open-vocab labels (handled by YOLO-E if available)
 
 
 def decode_image_to_pil(image_b64_or_dataurl: str) -> Image.Image:
@@ -91,9 +91,12 @@ _DEFAULT_IMGSZ: int = int(os.environ.get("Y8_IMGSZ", "640"))
 _DEFAULT_THRESH: float = float(os.environ.get("Y8_THRESH", "0.25"))
 _DEVICE: str = os.environ.get("Y_DEVICE", "auto")  # 'auto' | 'cpu' | 'mps' | 'cuda'
 
-# Hybrid open-vocab supplement
-_DETECT_BACKEND: str = os.environ.get("DETECT_BACKEND", "yolov")  # 'yolov' | 'hybrid' | 'ovonly'
-_HYBRID_LABELS: List[str] = [s.strip() for s in os.environ.get("HYBRID_LABELS", "").split(',') if s.strip()]
+# Open-vocabulary via YOLO-E (YOLO-World E). If installed, can be used when ov_labels provided.
+_HAVE_YOLOE: bool = False
+_yoloe_model = None
+_CLI_OV_MODEL_SPEC: Optional[str] = None
+_YOLOE_DEFAULT_LABELS: List[str] = [s.strip() for s in os.environ.get("YOLOE_DEFAULT_LABELS", "").split(',') if s.strip()]
+_FORCE_OV_ONLY: bool = False  # if True, always use YOLO-E for detect (prompt-free when no labels)
 
 
 def _canonicalize_model_spec(spec: Optional[str], task: str) -> Optional[str]:
@@ -136,6 +139,18 @@ def _canonicalize_model_spec(spec: Optional[str], task: str) -> Optional[str]:
             'v8n-obb': 'yolov8n-obb.pt', 'v8s-obb': 'yolov8s-obb.pt',
             'v11n-obb': 'yolo11n-obb.pt', 'v11s-obb': 'yolo11s-obb.pt',
         })
+    if task == 'ov':
+        alias_map.update({
+            'yoloe': 'yoloe.pt',
+            'yoloe-n': 'yoloe-n.pt', 'yoloe_s': 'yoloe_s.pt', 'yoloe-s': 'yoloe-s.pt',
+            'yoloe-m': 'yoloe-m.pt', 'yoloe_l': 'yoloe_l.pt', 'yoloe-l': 'yoloe-l.pt',
+            'yoloe-x': 'yoloe-x.pt',
+            'e': 'yoloe.pt', 'e-n': 'yoloe-n.pt', 'e-s': 'yoloe-s.pt', 'e-m': 'yoloe-m.pt', 'e-l': 'yoloe-l.pt', 'e-x': 'yoloe-x.pt',
+        })
+        # If user passed a bare name without .pt, append .pt
+        if s.lower() not in alias_map and not s.lower().endswith('.pt') and not os.path.isfile(s):
+            s = s + '.pt'
+            return s
     return alias_map.get(s.lower(), s)
 
 
@@ -265,90 +280,113 @@ def _detect_with_yolo(img: Image.Image, threshold: float, classes: Optional[List
     boxes.sort(key=lambda b: b.get("score", 0), reverse=True)
     return boxes[:50]
 
-
-# Open-vocabulary supplement (OWL-ViT fallback)
-_OVL_LOADED = False
-_ov_processor = None
-_ov_model = None
-
-def _lazy_load_ov():
-    global _OVL_LOADED, _ov_processor, _ov_model
-    if _OVL_LOADED:
+def _lazy_load_yoloe():
+    """Attempt to load YOLO‑E (Ultralytics) for open‑vocabulary detection.
+    Uses Ultralytics' YOLO class with YOLO‑E weights and optional set_classes().
+    """
+    global _HAVE_YOLOE, _yoloe_model
+    if _HAVE_YOLOE:
         return
     try:
-        from transformers import OwlViTProcessor, OwlViTForObjectDetection  # type: ignore
-        model_id = os.environ.get("OV_MODEL", "google/owlvit-base-patch32")
-        _ov_processor = OwlViTProcessor.from_pretrained(model_id)
-        _ov_model = OwlViTForObjectDetection.from_pretrained(model_id)
-        _OVL_LOADED = True
-        print(f"[realtime] Loaded OWL-ViT for open-vocab supplement: {model_id}")
+        from ultralytics import YOLO  # type: ignore
+        model_spec_in = _CLI_OV_MODEL_SPEC or os.environ.get("YOLOE_MODEL")
+        model_spec = _canonicalize_model_spec(model_spec_in, 'ov') if model_spec_in else None
+        if not model_spec:
+            # Try common local filenames before falling back to a hub name
+            candidates = [
+                os.path.join(os.getcwd(), "yoloe.pt"),
+                os.path.join(os.getcwd(), "yoloe_s.pt"),
+                os.path.join(os.getcwd(), "yoloe-n.pt"),
+                os.path.join(os.getcwd(), "yoloe-nano.pt"),
+            ]
+            model_spec = next((p for p in candidates if os.path.isfile(p)), None) or "yoloe.pt"
+        _yoloe_model = YOLO(model_spec)
+        try:
+            if _DEVICE in ("mps","cuda"):
+                _yoloe_model.to(_DEVICE)
+        except Exception:
+            pass
+        _HAVE_YOLOE = True
+        print(f"[realtime] Loaded YOLO‑E model: {model_spec}")
     except Exception as e:
-        print("[realtime] OWL-ViT unavailable for hybrid detect:", e)
-        _OVL_LOADED = False
+        print("[realtime] YOLO‑E unavailable:", e)
+        _HAVE_YOLOE = False
 
 
-def _ov_detect(img: Image.Image, labels: List[str], threshold: float = 0.15) -> List[Dict[str, Any]]:
-    if not labels:
-        return []
-    if not _OVL_LOADED:
-        _lazy_load_ov()
-    if not _OVL_LOADED:
+def _detect_with_yoloe(img: Image.Image, labels: Optional[List[str]], threshold: float, img_size: int) -> List[Dict[str, Any]]:
+    if not _HAVE_YOLOE:
+        _lazy_load_yoloe()
+    if not _HAVE_YOLOE or _yoloe_model is None:
         return []
     try:
-        from transformers import OwlViTProcessor  # type: ignore
-        import torch  # type: ignore
-        max_side = 1280
-        if max(img.size) > max_side:
-            scale = max_side / max(img.size)
-            img = img.resize((int(img.width*scale), int(img.height*scale)))
-        inputs = _ov_processor(text=[labels], images=img, return_tensors="pt")
-        with torch.no_grad():
-            outputs = _ov_model(**inputs)
-        target_sizes = torch.tensor([img.size[::-1]])
-        res = _ov_processor.post_process_object_detection(outputs, target_sizes=target_sizes, threshold=threshold)[0]
-        boxes_px = res.get("boxes", [])
-        scores = res.get("scores", [])
-        lab_idx = res.get("labels", [])
+        # Ultralytics YOLO‑E supports set_classes([...]) for open‑vocab prompts.
+        lbls = labels if (labels and len(labels) > 0) else _YOLOE_DEFAULT_LABELS
+        if lbls:
+            try:
+                _yoloe_model.set_classes(lbls)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        # Predict (PIL accepted); mirror ultralytics kw seen in other paths
+        results = _yoloe_model.predict(img, imgsz=img_size, conf=threshold, verbose=False)  # type: ignore
+        if not results:
+            return []
+        r = results[0]
+        names = getattr(r, 'names', {})
         W, H = img.size
-        out = []
-        for i in range(len(boxes_px)):
-            x1,y1,x2,y2 = boxes_px[i].tolist()
-            li = int(lab_idx[i].item()) if len(lab_idx)>i else -1
-            lbl = labels[li] if 0 <= li < len(labels) else None
+        # Try parsing similar to ultralytics Boxes
+        boxes_attr = getattr(r, 'boxes', None)
+        if boxes_attr is None:
+            return []
+        xyxy = getattr(boxes_attr, 'xyxy', None)
+        conf = getattr(boxes_attr, 'conf', None)
+        cls = getattr(boxes_attr, 'cls', None)
+        if xyxy is None:
+            return []
+        xyxy = xyxy.cpu().numpy().tolist() if hasattr(xyxy, 'cpu') else xyxy
+        conf = conf.cpu().numpy().tolist() if conf is not None and hasattr(conf, 'cpu') else (conf or [])
+        cls = cls.cpu().numpy().tolist() if cls is not None and hasattr(cls, 'cpu') else (cls or [])
+        # Normalize names mapping to a function
+        def name_for(idx: int) -> Optional[str]:
+            try:
+                if isinstance(names, dict):
+                    return str(names.get(idx)) if idx in names else None
+                if isinstance(names, (list, tuple)) and 0 <= idx < len(names):
+                    return str(names[idx])
+            except Exception:
+                pass
+            # Fallback to provided labels (YOLO‑E open‑vocab set)
+            if labels and 0 <= idx < len(labels):
+                try:
+                    return str(labels[idx])
+                except Exception:
+                    return None
+            return None
+        out: List[Dict[str, Any]] = []
+        for i, b in enumerate(xyxy):
+            try:
+                x1,y1,x2,y2 = b
+            except Exception:
+                continue
+            score = float(conf[i]) if i < len(conf) else None
+            raw_cid = cls[i] if i < len(cls) else None
+            try:
+                cid = int(raw_cid[0] if isinstance(raw_cid, (list, tuple)) else raw_cid) if raw_cid is not None else None
+            except Exception:
+                cid = None
+            label = name_for(cid) if isinstance(cid, int) else None
             out.append({
-                "x1": max(0.0, min(1.0, x1/W)),
-                "y1": max(0.0, min(1.0, y1/H)),
-                "x2": max(0.0, min(1.0, x2/W)),
-                "y2": max(0.0, min(1.0, y2/H)),
-                "score": float(scores[i].item()),
-                "label": lbl,
+                "x1": max(0.0, min(1.0, float(x1) / W)),
+                "y1": max(0.0, min(1.0, float(y1) / H)),
+                "x2": max(0.0, min(1.0, float(x2) / W)),
+                "y2": max(0.0, min(1.0, float(y2) / H)),
+                **({"score": score} if score is not None else {}),
+                **({"label": label} if label is not None else {}),
             })
         out.sort(key=lambda b: b.get("score", 0), reverse=True)
         return out[:50]
     except Exception as e:
-        print("[realtime] ov detect error:", e)
+        print("[realtime] yolo-e detect error:", e)
         return []
-
-
-def _merge_nms(a: List[Dict[str,Any]], b: List[Dict[str,Any]], iou_thr: float = 0.5) -> List[Dict[str,Any]]:
-    # Merge two detection lists with IoU-based suppression
-    out = a[:]
-    def iou(b1,b2):
-        import math
-        xA=max(b1['x1'],b2['x1']); yA=max(b1['y1'],b2['y1']); xB=min(b1['x2'],b2['x2']); yB=min(b1['y2'],b2['y2'])
-        inter=max(0,xB-xA)*max(0,yB-yA)
-        a1=(b1['x2']-b1['x1'])*(b1['y2']-b1['y1']); a2=(b2['x2']-b2['x1'])*(b2['y2']-b2['y1'])
-        union=a1+a2-inter
-        return inter/union if union>0 else 0
-    for bb in b:
-        keep=True
-        for aa in out:
-            if (aa.get('label')==bb.get('label')) and iou(aa,bb)>iou_thr:
-                keep=False; break
-        if keep:
-            out.append(bb)
-    out.sort(key=lambda x:x.get('score',0), reverse=True)
-    return out[:50]
 
 
 @app.post("/realtime/detect")
@@ -365,24 +403,21 @@ def realtime_detect(req: RTDetectRequest):
     size = int(req.img_size) if req.img_size else _DEFAULT_IMGSZ
 
     try:
-        # Base YOLO
-        if _HAVE_YOLO_DET:
-            img2 = _scale_image(img, max_side=size)
-            boxes = _detect_with_yolo(img2, threshold=thr, classes=req.classes, img_size=size)
-        else:
-            boxes = _detect_fallback(img, req.classes)
-        # Hybrid supplement
-        use_hybrid = (_DETECT_BACKEND in ("hybrid","ovonly")) or (req.ov_labels and len(req.ov_labels)>0)
-        if use_hybrid:
-            labels = req.ov_labels or _HYBRID_LABELS
-            if _DETECT_BACKEND == 'ovonly':
+        img2 = _scale_image(img, max_side=size)
+        # If forced OV-only (CLI --ov-model provided) or YOLO-E is available, use YOLO-E always.
+        if _FORCE_OV_ONLY or _HAVE_YOLOE:
+            boxes = _detect_with_yoloe(img2, labels=(req.ov_labels if (req.ov_labels and len(req.ov_labels)>0) else None), threshold=max(0.05, thr), img_size=size)
+            # If YOLO-E not available or returned nothing, fallback to empty (no DET)
+            if not boxes:
                 boxes = []
-            if labels:
-                ovb = _ov_detect(img2 if 'img2' in locals() else img, labels, threshold=max(0.10, thr-0.05))
-                if boxes:
-                    boxes = _merge_nms(boxes, ovb, iou_thr=0.5)
-                else:
-                    boxes = ovb
+        else:
+            # Base YOLOv8/YOLO11 detection
+            if not _HAVE_YOLO_DET:
+                _lazy_load_yolo_det()
+            if _HAVE_YOLO_DET:
+                boxes = _detect_with_yolo(img2, threshold=thr, classes=req.classes, img_size=size)
+            else:
+                boxes = _detect_fallback(img, req.classes)
     except Exception as e:
         print("[realtime] detection error:", e)
         boxes = _detect_fallback(img, req.classes)
@@ -394,7 +429,7 @@ def realtime_detect(req: RTDetectRequest):
             if lbl:
                 lab_counts[lbl] = lab_counts.get(lbl, 0) + 1
         top = sorted(lab_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
-        print(f"[realtime][DETECT] thr={thr} size={size} classes={req.classes or 'ALL'} backend={_DETECT_BACKEND} ov={bool(req.ov_labels)} -> {len(boxes)} boxes; top: {top}")
+        print(f"[realtime][DETECT] thr={thr} size={size} ov_only={_FORCE_OV_ONLY} ov_labels={(req.ov_labels if req.ov_labels else [])} classes={(req.classes if req.classes else 'ALL')} -> {len(boxes)} boxes; top: {top}")
     except Exception:
         pass
     return {"boxes": boxes}
@@ -860,8 +895,7 @@ if __name__ == "__main__":
     parser.add_argument("--pose-model", type=str, default=None, help="Pose model alias/path (v8n-pose, v11n-pose, yolov8n-pose.pt, yolo11n-pose.pt, or path)")
     parser.add_argument("--cls-model", type=str, default=None, help="Classification model alias/path (v8n-cls, v11n-cls, yolov8n-cls.pt, yolo11n-cls.pt, or path)")
     parser.add_argument("--device", type=str, default=_DEVICE, choices=['auto','cpu','mps','cuda'], help="Inference device")
-    parser.add_argument("--detect-backend", type=str, default=_DETECT_BACKEND, choices=['yolov','hybrid','ovonly'], help="Detection backend")
-    parser.add_argument("--hybrid-labels", type=str, default=','.join(_HYBRID_LABELS), help="Comma-separated open-vocab labels used in hybrid detect")
+    parser.add_argument("--ov-model", type=str, default=None, help="YOLO-E (Ultralytics) model path or id for open-vocab requests; if set, disables YOLOv8/11 for /realtime/detect and uses prompt-free when no labels are provided")
     args = parser.parse_args()
 
     # Apply CLI defaults/globals
@@ -874,8 +908,8 @@ if __name__ == "__main__":
     _DEFAULT_IMGSZ = int(args.imgsz)
     _DEFAULT_THRESH = float(args.threshold)
     _DEVICE = args.device
-    _DETECT_BACKEND = args.detect_backend
-    _HYBRID_LABELS = [s.strip() for s in (args.hybrid_labels or '').split(',') if s.strip()]
+    _CLI_OV_MODEL_SPEC = args.ov_model
+    _FORCE_OV_ONLY = bool(args.ov_model)
 
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=_DEFAULT_PORT)

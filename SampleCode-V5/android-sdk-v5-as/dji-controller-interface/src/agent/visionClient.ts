@@ -150,7 +150,15 @@ export async function analyzeRealtime(req: RealtimeDetectRequest): Promise<Analy
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: req.signal,
-      body: JSON.stringify({ image: req.imageBase64, threshold: req.threshold ?? getThreshold(), classes: req.classes, img_size: req.img_size ?? 640 })
+      // If labels provided, send them as open‑vocab labels for YOLO‑E; otherwise use closed‑vocab YOLO (all classes by default)
+      body: JSON.stringify({
+        image: req.imageBase64,
+        threshold: req.threshold ?? getThreshold(),
+        img_size: req.img_size ?? 640,
+        ...(Array.isArray(req.classes) && req.classes.length > 0
+          ? { ov_labels: req.classes }
+          : {})
+      })
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
