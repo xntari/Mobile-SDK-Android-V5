@@ -146,9 +146,11 @@ export interface RealtimeDetectRequest {
 export async function analyzeRealtime(req: RealtimeDetectRequest): Promise<AnalyzeResponse> {
   try {
     const url = getRealtimeVisionUrl();
+    // Attach a per-client session header to diagnose duplicate clients
+    const sid = (globalThis as any).__VISION_SESSION_ID__ || ((globalThis as any).__VISION_SESSION_ID__ = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`);
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Client-Session': String(sid) },
       signal: req.signal,
       // If labels provided, send them as open‑vocab labels for YOLO‑E; otherwise use closed‑vocab YOLO (all classes by default)
       body: JSON.stringify({
@@ -185,16 +187,23 @@ export interface RealtimeSegmentRequest {
   imageBase64: string;
   threshold?: number;
   img_size?: number;
+  classes?: string[]; // optional labels (open-vocab segmentation)
 }
 
 export async function analyzeRealtimeSegment(req: RealtimeSegmentRequest & { signal?: AbortSignal }): Promise<{ masks: Mask[]; meta?: any }> {
   try {
     const url = getRealtimeVisionUrl().replace('/realtime/detect', '/realtime/segment');
+    const sid = (globalThis as any).__VISION_SESSION_ID__ || ((globalThis as any).__VISION_SESSION_ID__ = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`);
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Client-Session': String(sid) },
       signal: (req as any).signal,
-      body: JSON.stringify({ image: req.imageBase64, threshold: req.threshold ?? getThreshold(), img_size: req.img_size ?? 640 })
+      body: JSON.stringify({
+        image: req.imageBase64,
+        threshold: req.threshold ?? getThreshold(),
+        img_size: req.img_size ?? 640,
+        ...(Array.isArray(req.classes) && req.classes.length > 0 ? { ov_labels: req.classes } : {})
+      })
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();

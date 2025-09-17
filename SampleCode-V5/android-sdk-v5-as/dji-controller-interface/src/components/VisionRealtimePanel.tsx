@@ -64,7 +64,7 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
         setBoxes?.(out.detections || []);
       } else {
         if (mode === 'segment') {
-          const out = await analyzeRealtimeSegment({ imageBase64: img, threshold: thr, img_size: imgSize, signal: abortRef.current?.signal });
+          const out = await analyzeRealtimeSegment({ imageBase64: img, threshold: thr, img_size: imgSize, classes: parsedClasses, signal: abortRef.current?.signal });
           if (token !== runTokenRef.current || !running) return;
           setBoxes?.([]);
           setPoses?.([]);
@@ -99,6 +99,49 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
       console.warn('[VisionRT] step failed:', e);
     }
   }, [getSnapshot, setBoxes, setMasks, setPoses, thr, parsedClasses, imgSize, mode, running]);
+
+  // Single-step: run one request without starting the loop.
+  const stepOnce = React.useCallback(async () => {
+    // Cancel any in-flight work before issuing a single step
+    if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
+    abortRef.current = new AbortController();
+    try {
+      const img = await getSnapshot();
+      if (mode === 'detect') {
+        const out = await analyzeRealtime({ imageBase64: img, threshold: thr, classes: parsedClasses, img_size: imgSize, signal: abortRef.current?.signal });
+        setMasks?.([]);
+        setPoses?.([]);
+        setClassResults([]);
+        setBoxes?.(out.detections || []);
+      } else if (mode === 'segment') {
+        const out = await analyzeRealtimeSegment({ imageBase64: img, threshold: thr, img_size: imgSize, classes: parsedClasses, signal: abortRef.current?.signal });
+        setBoxes?.([]);
+        setPoses?.([]);
+        setClassResults([]);
+        setMasks?.(out.masks || []);
+      } else if (mode === 'pose') {
+        const out = await analyzeRealtimePose(img, imgSize, abortRef.current?.signal);
+        setBoxes?.([]);
+        setMasks?.([]);
+        setClassResults([]);
+        setPoses?.((out.poses || []).map(p => p.keypoints));
+      } else if (mode === 'classify') {
+        const out = await analyzeRealtimeClassify(img, 5, imgSize, abortRef.current?.signal);
+        setBoxes?.([]);
+        setMasks?.([]);
+        setPoses?.([]);
+        setClassResults(out.classes || []);
+      } else if (mode === 'obb') {
+        const out = await analyzeRealtimeObb(img, thr, imgSize, parsedClasses.length ? parsedClasses : undefined, abortRef.current?.signal);
+        setBoxes?.([]);
+        setPoses?.([]);
+        setClassResults([]);
+        setMasks?.((out.obb || []).map(o => ({ points: o.points, score: o.score, label: o.label })));
+      }
+    } catch (e) {
+      console.warn('[VisionRT] stepOnce failed:', e);
+    }
+  }, [getSnapshot, setBoxes, setMasks, setPoses, thr, parsedClasses, imgSize, mode]);
 
   const start = async () => {
     if (running) return;
@@ -150,6 +193,7 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
       <div className="flex items-center justify-between">
         <div className="text-[10px] text-gray-400">Endpoint: {getRealtimeVisionUrl()}</div>
         <div className="flex items-center gap-2">
+          <button className="px-2 py-1 rounded bg-blue-700 hover:bg-blue-600" onClick={stepOnce}>Step</button>
           {!running ? (
             <button className="px-2 py-1 rounded bg-green-700 hover:bg-green-600" onClick={start}>Start</button>
           ) : (
@@ -180,9 +224,9 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
         </label>
       </div>
 
-      {mode === 'detect' && (
+      {(mode === 'detect' || mode === 'segment') && (
         <div className="flex-1 overflow-auto">
-          <div className="text-[10px] text-gray-400 mb-1">Classes allowlist (optional, one per line)</div>
+          <div className="text-[10px] text-gray-400 mb-1">Labels (optional; used for YOLO‑E open‑vocab {mode === 'segment' ? 'segmentation' : 'detection'}; leave blank for prompt‑free)</div>
           <textarea className="w-full h-full bg-gray-800 text-gray-200 text-xs p-2 rounded"
             placeholder={"person\ncar\ntruck"}
             value={classesText}
