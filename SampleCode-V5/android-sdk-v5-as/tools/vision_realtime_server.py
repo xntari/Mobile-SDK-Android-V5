@@ -1,35 +1,32 @@
 #!/usr/bin/env python3
 """
-Experimental realtime vision server using YOLOv8/YOLO11 (CPU-friendly variants) for
-MacBook Air-class hardware. This keeps the API minimal and independent from the
-existing Vision endpoints.
+Realtime vision server using Ultralytics YOLO‑E only.
 
-Endpoints:
-  POST /realtime/detect { image, threshold?, classes?, img_size? }
-    → { boxes: [{ x1,y1,x2,y2,score,label }] } (normalized 0..1)
-  POST /realtime/segment { image, threshold?, img_size? }
-    → { instances: [{ points:[{x,y}...], score?, label? }] }
-  POST /realtime/pose { image, img_size? }
-    → { poses: [{ keypoints:[{x,y,conf?}] }] }
-  POST /realtime/classify { image, top_k?, img_size? }
-    → { classes: [{ label, score }] }
+Endpoints
+- POST /realtime/detect  { image, ov_labels?, threshold?, img_size? }
+  -> { boxes: [{x1,y1,x2,y2,score?,label?}] }
+  - With ov_labels: open‑vocab mode (set textual classes)
+  - Without ov_labels: prompt‑free model (‑pf) “detect everything”
 
-Notes:
-- If `ultralytics` is installed and the model loads, uses actual YOLO inference.
-- Otherwise, gracefully falls back to a dummy center box so the UI path can be wired.
+- POST /realtime/segment { image, threshold?, img_size? }
+  -> { instances: [{points:[{x,y}...], score?, label?}] }
+  - Uses prompt‑free YOLO‑E; returns masks polygons if available, else box quads
 
-Run:
+- POST /realtime/prompt  { image, boxes:[{x1,y1,x2,y2}], ov_labels?, threshold?, img_size? }
+  -> { boxes: [{x1,y1,x2,y2,score?,label?}] }
+  - Visual prompt: tries native prompt API, else crops per box and refines
+
+- POST /realtime/classify { image, top_k?, img_size? }
+  -> { classes: [{label, score}] }
+  - Derives classes from prompt‑free detections by aggregating scores per label
+
+Run
   python -m venv .venv && source .venv/bin/activate
   pip install fastapi uvicorn pillow ultralytics
-  # Start with aliases (auto-download via Ultralytics if not local):
-  python tools/vision_realtime_server.py --model v8n
-  python tools/vision_realtime_server.py --model v11n
-  # Add segmentation/pose/cls/obb support (optional):
-  python tools/vision_realtime_server.py --model v11n --seg-model v11n-seg --pose-model v11n-pose --cls-model v11n-cls --obb-model v11n-obb
-  # Or use local files:
-  python tools/vision_realtime_server.py --model ./yolov8n.pt --seg-model ./yolov8n-seg.pt
-  # http://0.0.0.0:9004
+  python tools/vision_realtime_server.py --ov-model yoloe-11s-seg.pt
 """
+from __future__ import annotations
+
 from typing import List, Dict, Any, Optional
 import base64
 import io
@@ -42,6 +39,8 @@ from PIL import Image
 
 import argparse
 
+
+# ------------------------- Server config -------------------------
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -51,178 +50,64 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_DEFAULT_PORT: int = int(os.environ.get("REALTIME_PORT", "9004"))
+_DEFAULT_IMGSZ: int = int(os.environ.get("Y_IMGSZ", "640"))
+_DEFAULT_THRESH: float = float(os.environ.get("Y_THRESH", "0.25"))
+_DEVICE: str = os.environ.get("Y_DEVICE", "auto")  # 'auto' | 'cpu' | 'mps' | 'cuda'
 
-class RTDetectRequest(BaseModel):
-    image: str                    # base64 or data URL
-    threshold: float | None = None
-    classes: list[str] | None = None  # optional allowlist of labels
-    img_size: int | None = None       # optional max side for downscale (server-side)
-    ov_labels: list[str] | None = None   # optional open-vocab labels (handled by YOLO-E if available)
+_CLI_OV_MODEL_SPEC: Optional[str] = None
+_HAVE_YOLOE: bool = False
+_yoloe_model = None
+_HAVE_YOLOE_PF: bool = False
+_yoloe_pf_model = None
 
 
+# ------------------------- Utils -------------------------
 def decode_image_to_pil(image_b64_or_dataurl: str) -> Image.Image:
     data = image_b64_or_dataurl
     if data.startswith("data:"):
-        header, b64 = data.split(",", 1)
+        _, b64 = data.split(",", 1)
     else:
         b64 = data
     raw = base64.b64decode(b64)
     return Image.open(io.BytesIO(raw)).convert("RGB")
 
 
-_HAVE_YOLO_DET = False
-_yolo_model_det = None
-_HAVE_YOLO_SEG = False
-_yolo_model_seg = None
-_HAVE_YOLO_OBB = False
-_yolo_model_obb = None
-_HAVE_YOLO_POSE = False
-_yolo_model_pose = None
-_HAVE_YOLO_CLS = False
-_yolo_model_cls = None
-
-_CLI_MODEL_SPEC: Optional[str] = None
-_CLI_SEG_MODEL_SPEC: Optional[str] = None
-_CLI_OBB_MODEL_SPEC: Optional[str] = None
-_CLI_POSE_MODEL_SPEC: Optional[str] = None
-_CLI_CLS_MODEL_SPEC: Optional[str] = None
-_DEFAULT_PORT: int = int(os.environ.get("REALTIME_PORT", "9004"))
-_DEFAULT_IMGSZ: int = int(os.environ.get("Y8_IMGSZ", "640"))
-_DEFAULT_THRESH: float = float(os.environ.get("Y8_THRESH", "0.25"))
-_DEVICE: str = os.environ.get("Y_DEVICE", "auto")  # 'auto' | 'cpu' | 'mps' | 'cuda'
-
-# Open-vocabulary via YOLO-E (YOLO-World E). If installed, can be used when ov_labels provided.
-_HAVE_YOLOE: bool = False
-_yoloe_model = None
-_CLI_OV_MODEL_SPEC: Optional[str] = None
-_YOLOE_DEFAULT_LABELS: List[str] = [s.strip() for s in os.environ.get("YOLOE_DEFAULT_LABELS", "").split(',') if s.strip()]
-_FORCE_OV_ONLY: bool = False  # if True, always use YOLO-E for detect (prompt-free when no labels)
-
-
-def _canonicalize_model_spec(spec: Optional[str], task: str) -> Optional[str]:
-    """Map friendly aliases to canonical YOLO model names or paths.
-    Accepted aliases:
-      v8n, v8s, v8m, v8l, v8x -> yolov8*.pt
-      v11n, v11s, v11m, v11l, v11x -> yolo11*.pt
-    If spec is a local path, return as-is; if None, return None.
-    """
+def _canonicalize_model_spec(spec: Optional[str]) -> Optional[str]:
     if not spec:
         return None
     s = spec.strip()
-    # If it's an existing local file path, use it
     if os.path.isfile(s):
         return s
-    # If it looks like a URL or a .pt name, let Ultralytics resolve it
-    # Map short aliases
-    alias_map = {
-        'v8n': 'yolov8n.pt', 'v8s': 'yolov8s.pt', 'v8m': 'yolov8m.pt', 'v8l': 'yolov8l.pt', 'v8x': 'yolov8x.pt',
-        'v11n': 'yolo11n.pt', 'v11s': 'yolo11s.pt', 'v11m': 'yolo11m.pt', 'v11l': 'yolo11l.pt', 'v11x': 'yolo11x.pt',
+    alias = {
+        'yoloe': 'yoloe.pt',
+        'yoloe-n': 'yoloe-n.pt', 'yoloe_s': 'yoloe_s.pt', 'yoloe-s': 'yoloe-s.pt',
+        'yoloe-m': 'yoloe-m.pt', 'yoloe_l': 'yoloe_l.pt', 'yoloe-l': 'yoloe-l.pt',
+        'yoloe-x': 'yoloe-x.pt',
+        # 11-series examples
+        'yoloe-11s-seg': 'yoloe-11s-seg.pt', 'yoloe-11s-det': 'yoloe-11s-det.pt',
     }
-    # Segmentation variants
-    if task == 'seg':
-        alias_map.update({
-            'v8n-seg': 'yolov8n-seg.pt', 'v8s-seg': 'yolov8s-seg.pt', 'v8m-seg': 'yolov8m-seg.pt', 'v8l-seg': 'yolov8l-seg.pt', 'v8x-seg': 'yolov8x-seg.pt',
-            'v11n-seg': 'yolo11n-seg.pt', 'v11s-seg': 'yolo11s-seg.pt', 'v11m-seg': 'yolo11m-seg.pt', 'v11l-seg': 'yolo11l-seg.pt', 'v11x-seg': 'yolo11x-seg.pt',
-        })
-    if task == 'pose':
-        alias_map.update({
-            'v8n-pose': 'yolov8n-pose.pt', 'v8s-pose': 'yolov8s-pose.pt',
-            'v11n-pose': 'yolo11n-pose.pt', 'v11s-pose': 'yolo11s-pose.pt',
-        })
-    if task == 'cls':
-        alias_map.update({
-            'v8n-cls': 'yolov8n-cls.pt', 'v8s-cls': 'yolov8s-cls.pt',
-            'v11n-cls': 'yolo11n-cls.pt', 'v11s-cls': 'yolo11s-cls.pt',
-        })
-    if task == 'obb':
-        alias_map.update({
-            'v8n-obb': 'yolov8n-obb.pt', 'v8s-obb': 'yolov8s-obb.pt',
-            'v11n-obb': 'yolo11n-obb.pt', 'v11s-obb': 'yolo11s-obb.pt',
-        })
-    if task == 'ov':
-        alias_map.update({
-            'yoloe': 'yoloe.pt',
-            'yoloe-n': 'yoloe-n.pt', 'yoloe_s': 'yoloe_s.pt', 'yoloe-s': 'yoloe-s.pt',
-            'yoloe-m': 'yoloe-m.pt', 'yoloe_l': 'yoloe_l.pt', 'yoloe-l': 'yoloe-l.pt',
-            'yoloe-x': 'yoloe-x.pt',
-            'e': 'yoloe.pt', 'e-n': 'yoloe-n.pt', 'e-s': 'yoloe-s.pt', 'e-m': 'yoloe-m.pt', 'e-l': 'yoloe-l.pt', 'e-x': 'yoloe-x.pt',
-        })
-        # If user passed a bare name without .pt, append .pt
-        if s.lower() not in alias_map and not s.lower().endswith('.pt') and not os.path.isfile(s):
-            s = s + '.pt'
-            return s
-    return alias_map.get(s.lower(), s)
+    if s.lower() in alias:
+        return alias[s.lower()]
+    if not s.lower().endswith('.pt'):
+        return s + '.pt'
+    return s
 
 
-def _lazy_load_yolo_det():
-    global _HAVE_YOLO_DET, _yolo_model_det
-    if _HAVE_YOLO_DET:
-        return
+def _derive_pf_spec(spec: str) -> str:
+    # Insert "-pf" before extension when missing
     try:
-        from ultralytics import YOLO  # type: ignore
-        # Prefer CLI spec, then env, then known local files
-        model_path_env = _canonicalize_model_spec(_CLI_MODEL_SPEC, 'det') or os.environ.get("YOLO_MODEL") or os.environ.get("Y8_MODEL")
-        fallback_order = [
-            model_path_env,
-            os.path.join(os.getcwd(), "yolov8n.pt"),
-            os.path.join(os.getcwd(), "yolo11n.pt"),
-        ]
-        model_path = None
-        for p in fallback_order:
-            if p and os.path.isfile(p):
-                model_path = p
-                break
-        if model_path is None:
-            # Let ultralytics try resolving a hub name as a last resort (may hit network)
-            model_path = model_path_env or "yolov8n.pt"
-        _yolo_model_det = YOLO(model_path)
-        # Move to device if requested
-        try:
-            if _DEVICE in ("mps","cuda"):
-                _yolo_model_det.to(_DEVICE)
-        except Exception:
-            pass
-        _HAVE_YOLO_DET = True
-        print(f"[realtime] Loaded YOLO model: {model_path}")
-    except Exception as e:
-        print("[realtime] YOLO DET unavailable or failed to load, using fallback:", e)
-        _HAVE_YOLO_DET = False
+        base, ext = os.path.splitext(spec)
+        if base.endswith('-pf'):
+            return spec
+        if base.endswith('-seg'):
+            return f"{base}-pf{ext or '.pt'}"
+        return f"{base}-pf{ext or '.pt'}"
+    except Exception:
+        return spec
 
 
-def _lazy_load_yolo_seg():
-    global _HAVE_YOLO_SEG, _yolo_model_seg
-    if _HAVE_YOLO_SEG:
-        return
-    try:
-        from ultralytics import YOLO  # type: ignore
-        # Use CLI spec first, then envs, then local seg files
-        model_path_env = _canonicalize_model_spec(_CLI_SEG_MODEL_SPEC, 'seg') or os.environ.get("YOLO_SEG_MODEL") or os.environ.get("Y8_SEG_MODEL")
-        fallback_order = [
-            model_path_env,
-            os.path.join(os.getcwd(), "yolov8n-seg.pt"),
-            os.path.join(os.getcwd(), "yolo11n-seg.pt"),
-        ]
-        model_path = None
-        for p in fallback_order:
-            if p and os.path.isfile(p):
-                model_path = p
-                break
-        if model_path is None:
-            model_path = model_path_env or "yolov8n-seg.pt"
-        _yolo_model_seg = YOLO(model_path)
-        try:
-            if _DEVICE in ("mps","cuda"):
-                _yolo_model_seg.to(_DEVICE)
-        except Exception:
-            pass
-        _HAVE_YOLO_SEG = True
-        print(f"[realtime] Loaded YOLO SEG model: {model_path}")
-    except Exception as e:
-        print("[realtime] YOLO SEG unavailable or failed to load:", e)
-        _HAVE_YOLO_SEG = False
-
-
-def _scale_image(img: Image.Image, max_side: int = 640) -> Image.Image:
+def _scale_image(img: Image.Image, max_side: int) -> Image.Image:
     if max(img.size) <= max_side:
         return img
     scale = max_side / max(img.size)
@@ -230,209 +115,181 @@ def _scale_image(img: Image.Image, max_side: int = 640) -> Image.Image:
     return img.resize(new_size)
 
 
-def _detect_fallback(img: Image.Image, classes: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    # Dummy center box; pick label from classes[0] if specified
-    label = (classes[0] if classes else "object") if classes else "object"
-    cx, cy, w, h = 0.5, 0.5, 0.25, 0.25
-    return [{"x1": cx - w/2, "y1": cy - h/2, "x2": cx + w/2, "y2": cy + h/2, "score": 0.2, "label": label}]
-
-
-def _detect_with_yolo(img: Image.Image, threshold: float, classes: Optional[List[str]], img_size: int) -> List[Dict[str, Any]]:
-    from ultralytics import YOLO  # type: ignore
-    assert _yolo_model_det is not None
-    # Ultralytics can accept PIL directly; control size via imgsz
-    kw = {"imgsz": img_size, "conf": threshold, "verbose": False}
-    if _DEVICE in ("mps","cuda"):
-        kw["device"] = _DEVICE
-    results = _yolo_model_det.predict(img, **kw)
-    boxes: List[Dict[str, Any]] = []
-    W, H = img.size
-    # results is a list; take first
-    if not results:
-        return boxes
-    r = results[0]
-    names = r.names if hasattr(r, 'names') else {}
-    # r.boxes.xyxy, r.boxes.conf, r.boxes.cls
-    try:
-        xyxy = r.boxes.xyxy.cpu().numpy().tolist()
-        conf = r.boxes.conf.cpu().numpy().tolist()
-        cls = r.boxes.cls.cpu().numpy().tolist()
-    except Exception:
-        return boxes
-
-    for i in range(len(xyxy)):
-        x1, y1, x2, y2 = xyxy[i]
-        score = float(conf[i])
-        cls_id = int(cls[i])
-        label = str(names.get(cls_id, str(cls_id)))
-        # filter by classes if provided
-        if classes and label not in classes:
-            continue
-        boxes.append({
-            "x1": max(0.0, min(1.0, x1 / W)),
-            "y1": max(0.0, min(1.0, y1 / H)),
-            "x2": max(0.0, min(1.0, x2 / W)),
-            "y2": max(0.0, min(1.0, y2 / H)),
-            "score": score,
-            "label": label,
-        })
-    # Sort by score desc and keep top 50
-    boxes.sort(key=lambda b: b.get("score", 0), reverse=True)
-    return boxes[:50]
-
+# ------------------------- YOLO‑E loaders -------------------------
 def _lazy_load_yoloe():
-    """Attempt to load YOLO‑E (Ultralytics) for open‑vocabulary detection.
-    Uses Ultralytics' YOLO class with YOLO‑E weights and optional set_classes().
-    """
     global _HAVE_YOLOE, _yoloe_model
     if _HAVE_YOLOE:
         return
     try:
         from ultralytics import YOLO  # type: ignore
-        model_spec_in = _CLI_OV_MODEL_SPEC or os.environ.get("YOLOE_MODEL")
-        model_spec = _canonicalize_model_spec(model_spec_in, 'ov') if model_spec_in else None
+        model_spec = _canonicalize_model_spec(_CLI_OV_MODEL_SPEC or os.environ.get("YOLOE_MODEL"))
         if not model_spec:
-            # Try common local filenames before falling back to a hub name
-            candidates = [
-                os.path.join(os.getcwd(), "yoloe.pt"),
-                os.path.join(os.getcwd(), "yoloe_s.pt"),
-                os.path.join(os.getcwd(), "yoloe-n.pt"),
-                os.path.join(os.getcwd(), "yoloe-nano.pt"),
-            ]
-            model_spec = next((p for p in candidates if os.path.isfile(p)), None) or "yoloe.pt"
+            model_spec = 'yoloe.pt'
         _yoloe_model = YOLO(model_spec)
         try:
-            if _DEVICE in ("mps","cuda"):
+            if _DEVICE in ("mps", "cuda"):
                 _yoloe_model.to(_DEVICE)
         except Exception:
             pass
         _HAVE_YOLOE = True
-        print(f"[realtime] Loaded YOLO‑E model: {model_spec}")
+        print(f"[realtime] YOLO‑E loaded: {model_spec}")
     except Exception as e:
-        print("[realtime] YOLO‑E unavailable:", e)
+        print('[realtime] yoloe load failed:', e)
         _HAVE_YOLOE = False
 
 
-def _detect_with_yoloe(img: Image.Image, labels: Optional[List[str]], threshold: float, img_size: int) -> List[Dict[str, Any]]:
-    if not _HAVE_YOLOE:
-        _lazy_load_yoloe()
-    if not _HAVE_YOLOE or _yoloe_model is None:
-        return []
+def _lazy_load_yoloe_pf():
+    global _HAVE_YOLOE_PF, _yoloe_pf_model
+    if _HAVE_YOLOE_PF:
+        return
     try:
-        # Ultralytics YOLO‑E supports set_classes([...]) for open‑vocab prompts.
-        lbls = labels if (labels and len(labels) > 0) else _YOLOE_DEFAULT_LABELS
-        if lbls:
-            try:
-                _yoloe_model.set_classes(lbls)  # type: ignore[attr-defined]
-            except Exception:
-                pass
-        # Predict (PIL accepted); mirror ultralytics kw seen in other paths
-        results = _yoloe_model.predict(img, imgsz=img_size, conf=threshold, verbose=False)  # type: ignore
-        if not results:
-            return []
-        r = results[0]
-        names = getattr(r, 'names', {})
-        W, H = img.size
-        # Try parsing similar to ultralytics Boxes
-        boxes_attr = getattr(r, 'boxes', None)
-        if boxes_attr is None:
-            return []
-        xyxy = getattr(boxes_attr, 'xyxy', None)
-        conf = getattr(boxes_attr, 'conf', None)
-        cls = getattr(boxes_attr, 'cls', None)
-        if xyxy is None:
-            return []
-        xyxy = xyxy.cpu().numpy().tolist() if hasattr(xyxy, 'cpu') else xyxy
-        conf = conf.cpu().numpy().tolist() if conf is not None and hasattr(conf, 'cpu') else (conf or [])
-        cls = cls.cpu().numpy().tolist() if cls is not None and hasattr(cls, 'cpu') else (cls or [])
-        # Normalize names mapping to a function
-        def name_for(idx: int) -> Optional[str]:
-            try:
-                if isinstance(names, dict):
-                    return str(names.get(idx)) if idx in names else None
-                if isinstance(names, (list, tuple)) and 0 <= idx < len(names):
-                    return str(names[idx])
-            except Exception:
-                pass
-            # Fallback to provided labels (YOLO‑E open‑vocab set)
-            if labels and 0 <= idx < len(labels):
-                try:
-                    return str(labels[idx])
-                except Exception:
-                    return None
+        from ultralytics import YOLO  # type: ignore
+        base_spec = _canonicalize_model_spec(_CLI_OV_MODEL_SPEC or os.environ.get("YOLOE_MODEL")) or 'yoloe.pt'
+        pf_spec = _derive_pf_spec(base_spec)
+        _yoloe_pf_model = YOLO(pf_spec)
+        try:
+            if _DEVICE in ("mps", "cuda"):
+                _yoloe_pf_model.to(_DEVICE)
+        except Exception:
+            pass
+        _HAVE_YOLOE_PF = True
+        print(f"[realtime] YOLO‑E PF loaded: {pf_spec}")
+    except Exception as e:
+        print('[realtime] yoloe‑pf load failed:', e)
+        _HAVE_YOLOE_PF = False
+
+
+# ------------------------- Inference helpers -------------------------
+def _safe_predict(model, img: Image.Image, imgsz: int, conf: float, extra: Optional[Dict[str, Any]] = None):
+    extra = extra or {}
+    try:
+        return model.predict(img, imgsz=imgsz, conf=conf, verbose=False, **extra)  # type: ignore
+    except Exception as e:
+        print('[realtime] predict failed:', e)
+        # Try without imgsz as a fallback
+        try:
+            return model.predict(img, conf=conf, verbose=False, **extra)  # type: ignore
+        except Exception as e2:
+            print('[realtime] predict retry failed:', e2)
             return None
-        out: List[Dict[str, Any]] = []
-        for i, b in enumerate(xyxy):
+
+
+def _parse_boxes(result, W: int, H: int, names: Any, ov_labels: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    boxes = []
+    b = getattr(result, 'boxes', None)
+    if b is None or getattr(b, 'xyxy', None) is None:
+        return boxes
+    xyxy = b.xyxy.cpu().numpy().tolist()
+    conf = b.conf.cpu().numpy().tolist() if getattr(b, 'conf', None) is not None else []
+    cls = b.cls.cpu().numpy().tolist() if getattr(b, 'cls', None) is not None else []
+
+    def name_for(idx: Optional[int]) -> Optional[str]:
+        if idx is None:
+            return None
+        try:
+            if isinstance(names, dict) and idx in names:
+                return str(names[idx])
+            if isinstance(names, (list, tuple)) and 0 <= idx < len(names):
+                return str(names[idx])
+        except Exception:
+            pass
+        if ov_labels and 0 <= idx < len(ov_labels):
+            return str(ov_labels[idx])
+        return None
+
+    for i, p in enumerate(xyxy):
+        try:
+            x1, y1, x2, y2 = p
+        except Exception:
+            continue
+        sc = float(conf[i]) if i < len(conf) else None
+        cid = None
+        if i < len(cls):
             try:
-                x1,y1,x2,y2 = b
-            except Exception:
-                continue
-            score = float(conf[i]) if i < len(conf) else None
-            raw_cid = cls[i] if i < len(cls) else None
-            try:
-                cid = int(raw_cid[0] if isinstance(raw_cid, (list, tuple)) else raw_cid) if raw_cid is not None else None
+                raw = cls[i]
+                cid = int(raw[0] if isinstance(raw, (list, tuple)) else raw)
             except Exception:
                 cid = None
-            label = name_for(cid) if isinstance(cid, int) else None
-            out.append({
-                "x1": max(0.0, min(1.0, float(x1) / W)),
-                "y1": max(0.0, min(1.0, float(y1) / H)),
-                "x2": max(0.0, min(1.0, float(x2) / W)),
-                "y2": max(0.0, min(1.0, float(y2) / H)),
-                **({"score": score} if score is not None else {}),
-                **({"label": label} if label is not None else {}),
-            })
-        out.sort(key=lambda b: b.get("score", 0), reverse=True)
-        return out[:50]
-    except Exception as e:
-        print("[realtime] yolo-e detect error:", e)
-        return []
+        lbl = name_for(cid)
+        boxes.append({
+            'x1': max(0.0, min(1.0, float(x1) / W)),
+            'y1': max(0.0, min(1.0, float(y1) / H)),
+            'x2': max(0.0, min(1.0, float(x2) / W)),
+            'y2': max(0.0, min(1.0, float(y2) / H)),
+            **({'score': sc} if sc is not None else {}),
+            **({'label': lbl} if lbl else {}),
+        })
+    boxes.sort(key=lambda d: d.get('score', 0) or 0, reverse=True)
+    return boxes[:100]
 
 
-@app.post("/realtime/detect")
-def realtime_detect(req: RTDetectRequest):
-    try:
-        img = decode_image_to_pil(req.image)
-    except Exception:
-        return {"boxes": []}
+def _parse_masks(result, W: int, H: int, names: Any) -> List[Dict[str, Any]]:
+    out = []
+    m = getattr(result, 'masks', None)
+    b = getattr(result, 'boxes', None)
+    polys = getattr(m, 'xy', None) if m is not None else None
+    conf = b.conf.cpu().numpy().tolist() if b is not None and getattr(b, 'conf', None) is not None else []
+    cls = b.cls.cpu().numpy().tolist() if b is not None and getattr(b, 'cls', None) is not None else []
+    if polys is None:
+        # build quads from boxes
+        if b is None or getattr(b, 'xyxy', None) is None:
+            return out
+        xyxy = b.xyxy.cpu().numpy().tolist()
+        for i, bb in enumerate(xyxy):
+            try:
+                x1, y1, x2, y2 = bb
+            except Exception:
+                continue
+            pts = [
+                {'x': max(0.0, min(1.0, x1 / W)), 'y': max(0.0, min(1.0, y1 / H))},
+                {'x': max(0.0, min(1.0, x2 / W)), 'y': max(0.0, min(1.0, y1 / H))},
+                {'x': max(0.0, min(1.0, x2 / W)), 'y': max(0.0, min(1.0, y2 / H))},
+                {'x': max(0.0, min(1.0, x1 / W)), 'y': max(0.0, min(1.0, y2 / H))},
+            ]
+            sc = float(conf[i]) if i < len(conf) else None
+            lbl = None
+            if i < len(cls):
+                try:
+                    cid = int(cls[i])
+                    if isinstance(names, dict) and cid in names:
+                        lbl = str(names[cid])
+                    elif isinstance(names, (list, tuple)) and 0 <= cid < len(names):
+                        lbl = str(names[cid])
+                except Exception:
+                    lbl = None
+            out.append({'points': pts, **({'score': sc} if sc is not None else {}), **({'label': lbl} if lbl else {})})
+        return out[:100]
 
-    if not _HAVE_YOLO_DET:
-        _lazy_load_yolo_det()
+    # masks polygons
+    for i, poly in enumerate(polys):
+        pts = []
+        try:
+            for x, y in poly:
+                pts.append({'x': max(0.0, min(1.0, float(x) / W)), 'y': max(0.0, min(1.0, float(y) / H))})
+        except Exception:
+            continue
+        sc = float(conf[i]) if i < len(conf) else None
+        lbl = None
+        if i < len(cls):
+            try:
+                cid = int(cls[i])
+                if isinstance(names, dict) and cid in names:
+                    lbl = str(names[cid])
+                elif isinstance(names, (list, tuple)) and 0 <= cid < len(names):
+                    lbl = str(names[cid])
+            except Exception:
+                lbl = None
+        out.append({'points': pts, **({'score': sc} if sc is not None else {}), **({'label': lbl} if lbl else {})})
+    out.sort(key=lambda d: d.get('score', 0) or 0, reverse=True)
+    return out[:100]
 
-    thr = float(req.threshold) if req.threshold is not None else _DEFAULT_THRESH
-    size = int(req.img_size) if req.img_size else _DEFAULT_IMGSZ
 
-    try:
-        img2 = _scale_image(img, max_side=size)
-        # If forced OV-only (CLI --ov-model provided) or YOLO-E is available, use YOLO-E always.
-        if _FORCE_OV_ONLY or _HAVE_YOLOE:
-            boxes = _detect_with_yoloe(img2, labels=(req.ov_labels if (req.ov_labels and len(req.ov_labels)>0) else None), threshold=max(0.05, thr), img_size=size)
-            # If YOLO-E not available or returned nothing, fallback to empty (no DET)
-            if not boxes:
-                boxes = []
-        else:
-            # Base YOLOv8/YOLO11 detection
-            if not _HAVE_YOLO_DET:
-                _lazy_load_yolo_det()
-            if _HAVE_YOLO_DET:
-                boxes = _detect_with_yolo(img2, threshold=thr, classes=req.classes, img_size=size)
-            else:
-                boxes = _detect_fallback(img, req.classes)
-    except Exception as e:
-        print("[realtime] detection error:", e)
-        boxes = _detect_fallback(img, req.classes)
-    # Debug summary
-    try:
-        lab_counts = {}
-        for b in boxes:
-            lbl = str(b.get('label') or '')
-            if lbl:
-                lab_counts[lbl] = lab_counts.get(lbl, 0) + 1
-        top = sorted(lab_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
-        print(f"[realtime][DETECT] thr={thr} size={size} ov_only={_FORCE_OV_ONLY} ov_labels={(req.ov_labels if req.ov_labels else [])} classes={(req.classes if req.classes else 'ALL')} -> {len(boxes)} boxes; top: {top}")
-    except Exception:
-        pass
-    return {"boxes": boxes}
+# ------------------------- Schemas -------------------------
+class RTDetectRequest(BaseModel):
+    image: str
+    threshold: float | None = None
+    img_size: int | None = None
+    ov_labels: list[str] | None = None
 
 
 class RTSegmentRequest(BaseModel):
@@ -441,368 +298,12 @@ class RTSegmentRequest(BaseModel):
     img_size: int | None = None
 
 
-@app.post("/realtime/segment")
-def realtime_segment(req: RTSegmentRequest):
-    try:
-        img = decode_image_to_pil(req.image)
-    except Exception:
-        return {"instances": []}
-
-    # Ensure models are considered
-    if not _HAVE_YOLO_SEG:
-        _lazy_load_yolo_seg()
-
-    thr = float(req.threshold) if req.threshold is not None else _DEFAULT_THRESH
-    size = int(req.img_size) if req.img_size else _DEFAULT_IMGSZ
-
-    # If seg model missing, approximate via DET boxes
-    if not _HAVE_YOLO_SEG:
-        try:
-            if not _HAVE_YOLO_DET:
-                _lazy_load_yolo_det()
-            if not _HAVE_YOLO_DET:
-                return {"instances": []}
-            img2 = _scale_image(img, max_side=size)
-            rlist = _yolo_model_det.predict(img2, imgsz=size, conf=thr, verbose=False)
-            if not rlist:
-                return {"instances": []}
-            r = rlist[0]
-            names = getattr(r, 'names', {})
-            W, H = img2.size
-            xyxy = r.boxes.xyxy.cpu().numpy().tolist() if getattr(r, 'boxes', None) is not None else []
-            conf = r.boxes.conf.cpu().numpy().tolist() if getattr(r, 'boxes', None) is not None else []
-            cls = r.boxes.cls.cpu().numpy().tolist() if getattr(r, 'boxes', None) is not None else []
-            instances = []
-            for i, b in enumerate(xyxy):
-                x1,y1,x2,y2 = b
-                pts = [
-                    {"x": max(0.0, min(1.0, x1/W)), "y": max(0.0, min(1.0, y1/H))},
-                    {"x": max(0.0, min(1.0, x2/W)), "y": max(0.0, min(1.0, y1/H))},
-                    {"x": max(0.0, min(1.0, x2/W)), "y": max(0.0, min(1.0, y2/H))},
-                    {"x": max(0.0, min(1.0, x1/W)), "y": max(0.0, min(1.0, y2/H))},
-                ]
-                label = None
-                if i < len(cls):
-                    cid = int(cls[i])
-                    label = str(names.get(cid, str(cid)))
-                score = float(conf[i]) if i < len(conf) else None
-                instances.append({"points": pts, **({"label": label} if label else {}), **({"score": score} if score is not None else {})})
-            print(f"[realtime][SEG] fallback via DET: thr={thr} size={size} -> {len(instances)} polys")
-            return {"instances": instances}
-        except Exception as e:
-            print("[realtime] segment fallback via detect error:", e)
-            return {"instances": []}
-
-    # Use segmentation model
-    try:
-        img2 = _scale_image(img, max_side=size)
-        from ultralytics import YOLO  # type: ignore
-        assert _yolo_model_seg is not None
-        results = _yolo_model_seg.predict(img2, imgsz=size, conf=thr, verbose=False)
-        if not results:
-            return {"instances": []}
-        r = results[0]
-        names = r.names if hasattr(r, 'names') else {}
-        W, H = img2.size
-        instances: List[Dict[str, Any]] = []
-        if getattr(r, 'masks', None) is not None and getattr(r.masks, 'xy', None) is not None:
-            polys = r.masks.xy
-            conf = r.boxes.conf.cpu().numpy().tolist() if getattr(r, 'boxes', None) is not None else []
-            cls = r.boxes.cls.cpu().numpy().tolist() if getattr(r, 'boxes', None) is not None else []
-            for i, poly in enumerate(polys):
-                pts = []
-                try:
-                    for x, y in poly:
-                        pts.append({"x": max(0.0, min(1.0, float(x) / W)),
-                                    "y": max(0.0, min(1.0, float(y) / H))})
-                except Exception:
-                    continue
-                label = None
-                if i < len(cls):
-                    cls_id = int(cls[i])
-                    label = str(names.get(cls_id, str(cls_id)))
-                score = float(conf[i]) if i < len(conf) else None
-                instances.append({"points": pts, **({"label": label} if label else {}), **({"score": score} if score is not None else {})})
-        else:
-            # Build polygons from boxes if masks missing
-            xyxy = r.boxes.xyxy.cpu().numpy().tolist() if getattr(r, 'boxes', None) is not None else []
-            conf = r.boxes.conf.cpu().numpy().tolist() if getattr(r, 'boxes', None) is not None else []
-            cls = r.boxes.cls.cpu().numpy().tolist() if getattr(r, 'boxes', None) is not None else []
-            for i, b in enumerate(xyxy):
-                x1,y1,x2,y2 = b
-                pts = [
-                    {"x": max(0.0, min(1.0, x1/W)), "y": max(0.0, min(1.0, y1/H))},
-                    {"x": max(0.0, min(1.0, x2/W)), "y": max(0.0, min(1.0, y1/H))},
-                    {"x": max(0.0, min(1.0, x2/W)), "y": max(0.0, min(1.0, y2/H))},
-                    {"x": max(0.0, min(1.0, x1/W)), "y": max(0.0, min(1.0, y2/H))},
-                ]
-                label = None
-                if i < len(cls):
-                    cls_id = int(cls[i])
-                    label = str(names.get(cls_id, str(cls_id)))
-                score = float(conf[i]) if i < len(conf) else None
-                instances.append({"points": pts, **({"label": label} if label else {}), **({"score": score} if score is not None else {})})
-        print(f"[realtime][SEG] model=yes thr={thr} size={size} -> {len(instances)} instances")
-        return {"instances": instances}
-    except Exception as e:
-        print("[realtime] segmentation error:", e)
-        return {"instances": []}
-
-
-class RTOBBRequest(BaseModel):
+class RTPromptDetectRequest(BaseModel):
     image: str
+    boxes: List[Dict[str, float]]  # [{x1,y1,x2,y2}] normalized
     threshold: float | None = None
     img_size: int | None = None
-    classes: list[str] | None = None
-
-
-@app.post("/realtime/obb")
-def realtime_obb(req: RTOBBRequest):
-    try:
-        img = decode_image_to_pil(req.image)
-    except Exception:
-        return {"obb": []}
-
-    global _HAVE_YOLO_OBB, _yolo_model_obb
-    if not _HAVE_YOLO_OBB:
-        try:
-            from ultralytics import YOLO  # type: ignore
-            model_path = _canonicalize_model_spec(_CLI_OBB_MODEL_SPEC, 'obb')
-            if not model_path:
-                for p in (os.path.join(os.getcwd(), "yolov8n-obb.pt"), os.path.join(os.getcwd(), "yolo11n-obb.pt")):
-                    if os.path.isfile(p):
-                        model_path = p
-                        break
-            if not model_path:
-                model_path = 'yolov8n-obb.pt'
-            _yolo_model_obb = YOLO(model_path)
-            _HAVE_YOLO_OBB = True
-            print(f"[realtime] Loaded YOLO OBB model: {model_path}")
-        except Exception as e:
-            print("[realtime] OBB model unavailable:", e)
-            _HAVE_YOLO_OBB = False
-
-    if not _HAVE_YOLO_OBB:
-        return {"obb": []}
-
-    import math
-    thr = float(req.threshold) if req.threshold is not None else _DEFAULT_THRESH
-    size = int(req.img_size) if req.img_size else _DEFAULT_IMGSZ
-    try:
-        img2 = _scale_image(img, max_side=size)
-        rlist = _yolo_model_obb.predict(img2, imgsz=size, conf=thr, verbose=False)
-        if not rlist:
-            rlist = []
-        out = []
-        names = {}
-        W, H = img2.size
-        if rlist:
-            r = rlist[0]
-            names = getattr(r, 'names', {})
-            obb_attr = getattr(r, 'obb', None)
-        else:
-            obb_attr = None
-        # Prefer polygon form if present
-        if obb_attr is not None:
-            polys = getattr(obb_attr, 'xyxyxyxy', None)
-            conf = getattr(r, 'boxes', None)
-            conf = getattr(conf, 'conf', None) if conf is not None else None
-            cls = getattr(r, 'boxes', None)
-            cls = getattr(cls, 'cls', None) if cls is not None else None
-        else:
-            polys = None
-            conf = None
-            cls = None
-        if polys is not None:
-            xyxyxyxy = polys.cpu().numpy().tolist()
-            confarr = conf.cpu().numpy().tolist() if conf is not None else []
-            clsarr = cls.cpu().numpy().tolist() if cls is not None else []
-            for i, pts8 in enumerate(xyxyxyxy):
-                # pts8 might be [x1,y1,x2,y2,x3,y3,x4,y4] or [[x1,y1],...]
-                flat = []
-                if all(isinstance(v, (int, float)) for v in pts8):
-                    flat = pts8
-                else:
-                    for pair in pts8:
-                        if isinstance(pair, (list, tuple)) and len(pair) >= 2:
-                            flat.extend([pair[0], pair[1]])
-                pts = []
-                for j in range(0, len(flat), 2):
-                    try:
-                        x = float(flat[j]) / W
-                        y = float(flat[j+1]) / H
-                    except Exception:
-                        continue
-                    pts.append({"x": max(0.0, min(1.0, x)), "y": max(0.0, min(1.0, y))})
-                label = None
-                if i < len(clsarr):
-                    cid_raw = clsarr[i]
-                    cid = int(cid_raw[0] if isinstance(cid_raw, (list, tuple)) else cid_raw)
-                    label = str(names.get(cid, str(cid)))
-                sc = None
-                if i < len(confarr):
-                    c_raw = confarr[i]
-                    try:
-                        sc = float(c_raw[0] if isinstance(c_raw, (list, tuple)) else c_raw)
-                    except Exception:
-                        sc = None
-                item = {"points": pts, **({"label": label} if label else {}), **({"score": sc} if sc is not None else {})}
-                out.append(item)
-        # Else convert from xywhr (center x,y width,height, rotation radians)
-        xywhr = getattr(obb_attr, 'xywhr', None) if obb_attr is not None else None
-        confarr = conf.cpu().numpy().tolist() if conf is not None else []
-        clsarr = cls.cpu().numpy().tolist() if cls is not None else []
-        if xywhr is not None:
-            arr = xywhr.cpu().numpy().tolist()
-            for i, vals in enumerate(arr):
-                if not isinstance(vals, (list, tuple)) or len(vals) < 5:
-                    continue
-                cx, cy, w, h, rad = vals[:5]
-                cx_n, cy_n = cx / W, cy / H
-                hw, hh = (w / W)/2.0, (h / H)/2.0
-                c, s = math.cos(rad), math.sin(rad)
-                corners = [(-hw,-hh), (hw,-hh), (hw,hh), (-hw,hh)]
-                pts = []
-                for (dx, dy) in corners:
-                    x = cx_n + dx * c - dy * s
-                    y = cy_n + dx * s + dy * c
-                    pts.append({"x": max(0.0, min(1.0, x)), "y": max(0.0, min(1.0, y))})
-                label = None
-                if i < len(clsarr):
-                    cid_raw = clsarr[i]
-                    cid = int(cid_raw[0] if isinstance(cid_raw, (list, tuple)) else cid_raw)
-                    label = str(names.get(cid, str(cid)))
-                sc = None
-                if i < len(confarr):
-                    c_raw = confarr[i]
-                    try:
-                        sc = float(c_raw[0] if isinstance(c_raw, (list, tuple)) else c_raw)
-                    except Exception:
-                        sc = None
-                item = {"points": pts, **({"label": label} if label else {}), **({"score": sc} if sc is not None else {})}
-                out.append(item)
-        # If empty or too few, optionally backfill with DET boxes as polygons to resemble detect behavior
-        if not out or len(out) < 2:
-            try:
-                if not _HAVE_YOLO_DET:
-                    _lazy_load_yolo_det()
-                if _HAVE_YOLO_DET:
-                    dr = _yolo_model_det.predict(img2, imgsz=size, conf=thr, verbose=False)
-                    if dr:
-                        r2 = dr[0]
-                        names2 = getattr(r2, 'names', {})
-                        xyxy2 = r2.boxes.xyxy.cpu().numpy().tolist() if getattr(r2, 'boxes', None) is not None else []
-                        conf2 = r2.boxes.conf.cpu().numpy().tolist() if getattr(r2, 'boxes', None) is not None else []
-                        cls2 = r2.boxes.cls.cpu().numpy().tolist() if getattr(r2, 'boxes', None) is not None else []
-                        for i, b in enumerate(xyxy2):
-                            x1,y1,x2,y2 = b
-                            pts = [
-                                {"x": max(0.0, min(1.0, x1/W)), "y": max(0.0, min(1.0, y1/H))},
-                                {"x": max(0.0, min(1.0, x2/W)), "y": max(0.0, min(1.0, y1/H))},
-                                {"x": max(0.0, min(1.0, x2/W)), "y": max(0.0, min(1.0, y2/H))},
-                                {"x": max(0.0, min(1.0, x1/W)), "y": max(0.0, min(1.0, y2/H))},
-                            ]
-                            label = None
-                            if i < len(cls2):
-                                cid = int(cls2[i])
-                                label = str(names2.get(cid, str(cid)))
-                            score = float(conf2[i]) if i < len(conf2) else None
-                            out.append({"points": pts, **({"label": label} if label else {}), **({"score": score} if score is not None else {})})
-            except Exception as e:
-                print("[realtime] OBB backfill via detect error:", e)
-
-        # Optional filtering by classes
-        if req.classes:
-            allow = {str(x).strip().lower() for x in req.classes}
-            out = [o for o in out if o.get('label') and str(o['label']).strip().lower() in allow]
-        try:
-            print(f"[realtime][OBB] model={'yes' if _HAVE_YOLO_OBB else 'no'} thr={thr} size={size} cls={req.classes or 'ALL'} -> {len(out)} polys")
-        except Exception:
-            pass
-        return {"obb": out}
-    except Exception as e:
-        print("[realtime] obb error:", e)
-        return {"obb": []}
-
-
-class RTPoseRequest(BaseModel):
-    image: str
-    img_size: int | None = None
-
-
-@app.post("/realtime/pose")
-def realtime_pose(req: RTPoseRequest):
-    try:
-        img = decode_image_to_pil(req.image)
-    except Exception:
-        return {"poses": []}
-
-    global _HAVE_YOLO_POSE, _yolo_model_pose
-    if not _HAVE_YOLO_POSE:
-        try:
-            from ultralytics import YOLO  # type: ignore
-            model_path = _canonicalize_model_spec(_CLI_POSE_MODEL_SPEC, 'pose')
-            if not model_path:
-                # try local defaults
-                for p in (os.path.join(os.getcwd(), "yolov8n-pose.pt"), os.path.join(os.getcwd(), "yolo11n-pose.pt")):
-                    if os.path.isfile(p):
-                        model_path = p
-                        break
-            if not model_path:
-                model_path = 'yolov8n-pose.pt'
-            _yolo_model_pose = YOLO(model_path)
-            _HAVE_YOLO_POSE = True
-            print(f"[realtime] Loaded YOLO POSE model: {model_path}")
-        except Exception as e:
-            print("[realtime] pose model unavailable:", e)
-            _HAVE_YOLO_POSE = False
-
-    if not _HAVE_YOLO_POSE:
-        return {"poses": []}
-
-    try:
-        size = int(req.img_size) if req.img_size else _DEFAULT_IMGSZ
-        img2 = _scale_image(img, max_side=size)
-        rlist = _yolo_model_pose.predict(img2, imgsz=size, verbose=False)
-        if not rlist:
-            return {"poses": []}
-        r = rlist[0]
-        W, H = img2.size
-        poses = []
-        kp = getattr(r, 'keypoints', None)
-        if kp is None:
-            return {"poses": []}
-        # Prefer normalized if available
-        xyn = getattr(kp, 'xyn', None)
-        xy = getattr(kp, 'xy', None)
-        conf = getattr(kp, 'conf', None)
-        if xyn is not None:
-            kparr = xyn.cpu().numpy().tolist()
-            confarr = conf.cpu().numpy().tolist() if conf is not None else None
-            for i, one in enumerate(kparr):
-                pts = []
-                for j, (x, y) in enumerate(one):
-                    c = confarr[i][j] if confarr is not None else None
-                    pts.append({"x": float(x), "y": float(y), **({"conf": float(c)} if c is not None else {})})
-                poses.append({"keypoints": pts})
-        elif xy is not None:
-            kparr = xy.cpu().numpy().tolist()
-            confarr = conf.cpu().numpy().tolist() if conf is not None else None
-            for i, one in enumerate(kparr):
-                pts = []
-                for j, (x, y) in enumerate(one):
-                    c = confarr[i][j] if confarr is not None else None
-                    pts.append({"x": float(x)/W, "y": float(y)/H, **({"conf": float(c)} if c is not None else {})})
-                poses.append({"keypoints": pts})
-        try:
-            avg_kp = sum(len(p.get('keypoints', [])) for p in poses) / max(1, len(poses))
-            print(f"[realtime][POSE] size={size} -> poses={len(poses)} avg_kp={avg_kp:.1f}")
-        except Exception:
-            pass
-        return {"poses": poses}
-    except Exception as e:
-        print("[realtime] pose error:", e)
-        return {"poses": []}
+    ov_labels: list[str] | None = None
 
 
 class RTClassifyRequest(BaseModel):
@@ -811,105 +312,245 @@ class RTClassifyRequest(BaseModel):
     img_size: int | None = None
 
 
-@app.post("/realtime/classify")
+# ------------------------- Routes -------------------------
+@app.post('/realtime/detect')
+def realtime_detect(req: RTDetectRequest):
+    try:
+        img = decode_image_to_pil(req.image)
+    except Exception:
+        return {'boxes': []}
+    thr = float(req.threshold) if req.threshold is not None else _DEFAULT_THRESH
+    size = int(req.img_size) if req.img_size else _DEFAULT_IMGSZ
+    img2 = _scale_image(img, size)
+
+    use_pf = not (req.ov_labels and len(req.ov_labels) > 0)
+    boxes: List[Dict[str, Any]] = []
+    try:
+        if use_pf:
+            if not _HAVE_YOLOE_PF:
+                _lazy_load_yoloe_pf()
+            if not _HAVE_YOLOE_PF:
+                return {'boxes': []}
+            res = _safe_predict(_yoloe_pf_model, img2, size, thr)
+        else:
+            if not _HAVE_YOLOE:
+                _lazy_load_yoloe()
+            if not _HAVE_YOLOE:
+                return {'boxes': []}
+            # set textual classes and predict; try prompt args if needed
+            try:
+                if hasattr(_yoloe_model, 'set_classes'):
+                    _yoloe_model.set_classes(req.ov_labels)  # type: ignore
+                elif hasattr(_yoloe_model, 'set_labels'):
+                    getattr(_yoloe_model, 'set_labels')(req.ov_labels)  # type: ignore
+            except Exception:
+                pass
+            res = _safe_predict(_yoloe_model, img2, size, thr)
+            if (not res or len(res) == 0) and req.ov_labels:
+                for kw in ({'prompts': req.ov_labels}, {'text': req.ov_labels}):
+                    res = _safe_predict(_yoloe_model, img2, size, thr, extra=kw)
+                    if res:
+                        break
+        if res:
+            r = res[0]
+            W, H = img2.size
+            boxes = _parse_boxes(r, W, H, getattr(r, 'names', {}), req.ov_labels if not use_pf else None)
+        # Fallback: if OV failed, try PF once
+        if not boxes and not use_pf:
+            if not _HAVE_YOLOE_PF:
+                _lazy_load_yoloe_pf()
+            if _HAVE_YOLOE_PF:
+                res2 = _safe_predict(_yoloe_pf_model, img2, size, thr)
+                if res2:
+                    r2 = res2[0]
+                    W, H = img2.size
+                    boxes = _parse_boxes(r2, W, H, getattr(r2, 'names', {}), None)
+    except Exception as e:
+        print('[realtime] detect error:', e)
+    try:
+        lab_counts = {}
+        for b in boxes:
+            lbl = str(b.get('label') or '')
+            if lbl:
+                lab_counts[lbl] = lab_counts.get(lbl, 0) + 1
+        top = sorted(lab_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        print(f"[realtime][DETECT] thr={thr} size={size} mode={'PF' if use_pf else 'OV'} labels={(req.ov_labels or [])} -> {len(boxes)} boxes; top: {top}")
+    except Exception:
+        pass
+    return {'boxes': boxes}
+
+
+@app.post('/realtime/segment')
+def realtime_segment(req: RTSegmentRequest):
+    try:
+        img = decode_image_to_pil(req.image)
+    except Exception:
+        return {'instances': []}
+    thr = float(req.threshold) if req.threshold is not None else _DEFAULT_THRESH
+    size = int(req.img_size) if req.img_size else _DEFAULT_IMGSZ
+    img2 = _scale_image(img, size)
+    try:
+        if not _HAVE_YOLOE_PF:
+            _lazy_load_yoloe_pf()
+        if not _HAVE_YOLOE_PF:
+            return {'instances': []}
+        res = _safe_predict(_yoloe_pf_model, img2, size, thr)
+        if not res:
+            return {'instances': []}
+        r = res[0]
+        W, H = img2.size
+        instances = _parse_masks(r, W, H, getattr(r, 'names', {}))
+        try:
+            print(f"[realtime][SEG] thr={thr} size={size} -> {len(instances)} instances")
+        except Exception:
+            pass
+        return {'instances': instances}
+    except Exception as e:
+        print('[realtime] segment error:', e)
+        return {'instances': []}
+
+
+@app.post('/realtime/prompt')
+def realtime_prompt(req: RTPromptDetectRequest):
+    try:
+        img = decode_image_to_pil(req.image)
+    except Exception:
+        return {'boxes': []}
+    thr = float(req.threshold) if req.threshold is not None else _DEFAULT_THRESH
+    size = int(req.img_size) if req.img_size else _DEFAULT_IMGSZ
+    img2 = _scale_image(img, size)
+    W, H = img2.size
+    boxes_px = []
+    for b in (req.boxes or []):
+        try:
+            x1 = max(0, min(W, float(b['x1']) * W)); y1 = max(0, min(H, float(b['y1']) * H))
+            x2 = max(0, min(W, float(b['x2']) * W)); y2 = max(0, min(H, float(b['y2']) * H))
+            boxes_px.append([x1, y1, x2, y2])
+        except Exception:
+            continue
+    try:
+        # choose model (labels -> OV; none -> PF)
+        use_pf = not (req.ov_labels and len(req.ov_labels) > 0)
+        if use_pf:
+            if not _HAVE_YOLOE_PF:
+                _lazy_load_yoloe_pf()
+            model = _yoloe_pf_model
+        else:
+            if not _HAVE_YOLOE:
+                _lazy_load_yoloe()
+            model = _yoloe_model
+            try:
+                if hasattr(model, 'set_classes') and req.ov_labels:
+                    model.set_classes(req.ov_labels)  # type: ignore
+            except Exception:
+                pass
+        # try native prompt keywords
+        used_native = False
+        res = None
+        for kw in ({'prompts': {'boxes': boxes_px}}, {'boxes': boxes_px}, {'bboxes': boxes_px}):
+            res = _safe_predict(model, img2, size, thr, extra=kw)
+            if res:
+                used_native = True
+                break
+        dets: List[Dict[str, Any]] = []
+        if used_native and res:
+            r = res[0]
+            names = getattr(r, 'names', {})
+            dets = _parse_boxes(r, W, H, names, (None if use_pf else req.ov_labels))
+        else:
+            # crop fallback per prompt
+            for bb in boxes_px:
+                try:
+                    x1, y1, x2, y2 = [int(max(0, v)) for v in bb]
+                except Exception:
+                    continue
+                x1, x2 = sorted((x1, x2)); y1, y2 = sorted((y1, y2))
+                if x2 - x1 < 2 or y2 - y1 < 2:
+                    continue
+                crop = img2.crop((x1, y1, x2, y2))
+                sub = _safe_predict(model, crop, min(size, max(crop.size)), thr)
+                if not sub:
+                    continue
+                rr = sub[0]
+                names = getattr(rr, 'names', {})
+                boxes = _parse_boxes(rr, crop.size[0], crop.size[1], names, (None if use_pf else req.ov_labels))
+                for d in boxes:
+                    dets.append({
+                        'x1': max(0.0, min(1.0, (d['x1'] * (x2 - x1) + x1) / W)),
+                        'y1': max(0.0, min(1.0, (d['y1'] * (y2 - y1) + y1) / H)),
+                        'x2': max(0.0, min(1.0, (d['x2'] * (x2 - x1) + x1) / W)),
+                        'y2': max(0.0, min(1.0, (d['y2'] * (y2 - y1) + y1) / H)),
+                        **({'score': d.get('score')} if d.get('score') is not None else {}),
+                        **({'label': d.get('label')} if d.get('label') else {}),
+                    })
+        dets.sort(key=lambda d: d.get('score', 0) or 0, reverse=True)
+        top = dets[:100]
+        try:
+            print(f"[realtime][PROMPT] mode={'PF' if use_pf else 'OV'} prompts={len(boxes_px)} -> {len(top)} boxes")
+        except Exception:
+            pass
+        return {'boxes': top}
+    except Exception as e:
+        print('[realtime] prompt error:', e)
+        return {'boxes': []}
+
+
+@app.post('/realtime/classify')
 def realtime_classify(req: RTClassifyRequest):
     try:
         img = decode_image_to_pil(req.image)
     except Exception:
-        return {"classes": []}
-
-    global _HAVE_YOLO_CLS, _yolo_model_cls
-    if not _HAVE_YOLO_CLS:
-        try:
-            from ultralytics import YOLO  # type: ignore
-            model_path = _canonicalize_model_spec(_CLI_CLS_MODEL_SPEC, 'cls')
-            if not model_path:
-                for p in (os.path.join(os.getcwd(), "yolov8n-cls.pt"), os.path.join(os.getcwd(), "yolo11n-cls.pt")):
-                    if os.path.isfile(p):
-                        model_path = p
-                        break
-            if not model_path:
-                model_path = 'yolov8n-cls.pt'
-            _yolo_model_cls = YOLO(model_path)
-            _HAVE_YOLO_CLS = True
-            print(f"[realtime] Loaded YOLO CLS model: {model_path}")
-        except Exception as e:
-            print("[realtime] cls model unavailable:", e)
-            _HAVE_YOLO_CLS = False
-
-    if not _HAVE_YOLO_CLS:
-        return {"classes": []}
-
+        return {'classes': []}
+    size = int(req.img_size) if req.img_size else _DEFAULT_IMGSZ
+    thr = _DEFAULT_THRESH
+    img2 = _scale_image(img, size)
     try:
-        size = int(req.img_size) if req.img_size else _DEFAULT_IMGSZ
-        img2 = _scale_image(img, max_side=size)
-        rlist = _yolo_model_cls.predict(img2, imgsz=size, verbose=False)
-        if not rlist:
-            return {"classes": []}
-        r = rlist[0]
-        # Ultralytics classification returns probabilities via r.probs
-        probs = getattr(r, 'probs', None)
-        names = getattr(r, 'names', None)
-        if probs is None or names is None:
-            return {"classes": []}
-        try:
-            topk = int(req.top_k) if req.top_k else 5
-        except Exception:
-            topk = 5
-        # Prefer built-in top5 indices and confidences if present
-        idxs = getattr(probs, 'top5', None)
-        confs = getattr(probs, 'top5conf', None)
-        if idxs is None or confs is None:
-            # Fallback: sort full probability vector
-            data = getattr(probs, 'data', None)
-            if data is None:
-                return {"classes": []}
-            import numpy as np
-            npv = data.cpu().numpy().astype(float)
-            order = np.argsort(npv)[::-1][:topk]
-            classes = [{"label": str(names.get(int(i), str(i))), "score": float(npv[i])} for i in order]
-            return {"classes": classes}
-        # Use provided top5 and top5conf
-        idxs_list = [int(i) for i in (idxs if isinstance(idxs, (list, tuple)) else idxs.tolist())]
-        confs_list = [float(c) for c in (confs if isinstance(confs, (list, tuple)) else confs.cpu().numpy().tolist())]
-        pairs = list(zip(idxs_list, confs_list))[:topk]
-        classes = [{"label": str(names.get(i, str(i))), "score": s} for i, s in pairs]
-        try:
-            print(f"[realtime][CLS] size={size} top={classes[:5]}")
-        except Exception:
-            pass
-        return {"classes": classes}
+        if not _HAVE_YOLOE_PF:
+            _lazy_load_yoloe_pf()
+        if not _HAVE_YOLOE_PF:
+            return {'classes': []}
+        res = _safe_predict(_yoloe_pf_model, img2, size, thr)
+        if not res:
+            return {'classes': []}
+        r = res[0]
+        W, H = img2.size
+        boxes = _parse_boxes(r, W, H, getattr(r, 'names', {}), None)
+        # Aggregate by label score sum
+        agg: Dict[str, float] = {}
+        for b in boxes:
+            lbl = str(b.get('label') or '')
+            if not lbl:
+                continue
+            agg[lbl] = agg.get(lbl, 0.0) + float(b.get('score') or 0.0)
+        topk = int(req.top_k) if req.top_k else 5
+        top = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:topk]
+        classes = [{'label': k, 'score': v} for k, v in top]
+        return {'classes': classes}
     except Exception as e:
-        print("[realtime] classify error:", e)
-        return {"classes": []}
+        print('[realtime] classify error:', e)
+        return {'classes': []}
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="YOLO realtime vision server (detect/segment)")
-    parser.add_argument("--model", type=str, default=None, help="Detection model path or alias (v8n, v8s, v11n, v11s, yolov8n.pt, yolo11n.pt, or path to .pt)")
-    parser.add_argument("--seg-model", type=str, default=None, help="Segmentation model path or alias (v8n-seg, v11n-seg, yolov8n-seg.pt, yolo11n-seg.pt, or path)")
-    parser.add_argument("--obb-model", type=str, default=None, help="Oriented bounding box model alias/path (v8n-obb, v11n-obb, yolov8n-obb.pt, yolo11n-obb.pt, or path)")
-    parser.add_argument("--port", type=int, default=_DEFAULT_PORT, help=f"HTTP port (default {_DEFAULT_PORT})")
-    parser.add_argument("--imgsz", type=int, default=_DEFAULT_IMGSZ, help=f"Default imgsz for server-side downscale (default {_DEFAULT_IMGSZ})")
-    parser.add_argument("--threshold", type=float, default=_DEFAULT_THRESH, help=f"Default confidence threshold (default {_DEFAULT_THRESH})")
-    parser.add_argument("--pose-model", type=str, default=None, help="Pose model alias/path (v8n-pose, v11n-pose, yolov8n-pose.pt, yolo11n-pose.pt, or path)")
-    parser.add_argument("--cls-model", type=str, default=None, help="Classification model alias/path (v8n-cls, v11n-cls, yolov8n-cls.pt, yolo11n-cls.pt, or path)")
-    parser.add_argument("--device", type=str, default=_DEVICE, choices=['auto','cpu','mps','cuda'], help="Inference device")
-    parser.add_argument("--ov-model", type=str, default=None, help="YOLO-E (Ultralytics) model path or id for open-vocab requests; if set, disables YOLOv8/11 for /realtime/detect and uses prompt-free when no labels are provided")
+# ------------------------- Main -------------------------
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='YOLO‑E realtime vision server')
+    parser.add_argument('--ov-model', type=str, default=None, help='YOLO‑E model path or alias (e.g., yoloe-11s-seg.pt). Auto‑loads -pf for prompt‑free')
+    parser.add_argument('--port', type=int, default=_DEFAULT_PORT)
+    parser.add_argument('--imgsz', type=int, default=_DEFAULT_IMGSZ)
+    parser.add_argument('--threshold', type=float, default=_DEFAULT_THRESH)
+    parser.add_argument('--device', type=str, default=_DEVICE, choices=['auto', 'cpu', 'mps', 'cuda'])
     args = parser.parse_args()
 
-    # Apply CLI defaults/globals
-    _CLI_MODEL_SPEC = args.model
-    _CLI_SEG_MODEL_SPEC = args.seg_model
-    _CLI_OBB_MODEL_SPEC = args.obb_model
-    _CLI_POSE_MODEL_SPEC = args.pose_model
-    _CLI_CLS_MODEL_SPEC = args.cls_model
+    _CLI_OV_MODEL_SPEC = args.ov_model
     _DEFAULT_PORT = int(args.port)
     _DEFAULT_IMGSZ = int(args.imgsz)
     _DEFAULT_THRESH = float(args.threshold)
     _DEVICE = args.device
-    _CLI_OV_MODEL_SPEC = args.ov_model
-    _FORCE_OV_ONLY = bool(args.ov_model)
+
+    # Preload both models so the first call is responsive
+    _lazy_load_yoloe()
+    _lazy_load_yoloe_pf()
 
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=_DEFAULT_PORT)
+    uvicorn.run(app, host='0.0.0.0', port=_DEFAULT_PORT)
+
