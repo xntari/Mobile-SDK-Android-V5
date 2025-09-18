@@ -100,6 +100,8 @@ _EMBEDDINGS_CACHE: Dict[tuple, torch.Tensor] = {}
 # Per-session display ID mapping: track_id -> per-class small id
 _DISPLAY_MAP: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
+# Color assignment now handled by UI based on track_id
+
 def _display_id_for(sid: str, cls_name: str, track_id: Optional[int]) -> Optional[int]:
     if track_id is None:
         return None
@@ -112,6 +114,10 @@ def _display_id_for(sid: str, cls_name: str, track_id: Optional[int]) -> Optiona
     entry['next'] = did + 1
     m[track_id] = did
     return did
+
+
+# Color assignment now handled by UI based on track_id
+
 
 # Simple per-session segmentation tracker using IoU over polygon bboxes
 _SEG_TRACKERS: Dict[str, Dict[str, Any]] = {}
@@ -157,10 +163,12 @@ def _assign_seg_ids(sid: str, instances: List[Dict[str, Any]], iou_thr: float = 
                 tr = tracks[bi]; used.add(bi)
                 tr['bbox'] = det['bbox']
                 det['ref']['label'] = f"{lbl}_{tr['id']}"
+                det['ref']['track_id'] = tr['id']  # Add track_id field
             else:
                 tid = cls_state['next']; cls_state['next'] = tid + 1
                 tracks.append({'id': tid, 'bbox': det['bbox']})
                 det['ref']['label'] = f"{lbl}_{tid}"
+                det['ref']['track_id'] = tid  # Add track_id field
         cls_state['tracks'] = tracks[:50]
         state[lbl] = cls_state
     _SEG_TRACKERS[sid] = state
@@ -547,7 +555,7 @@ def _safe_predict(model, img: Image.Image, imgsz: int, conf: float, extra: Optio
     if _USE_HALF:
         extra['half'] = True
     try:
-        return model.predict(img, imgsz=imgsz, conf=conf, verbose=False, **extra)  # type: ignore
+        return model.predict(img, imgsz=imgsz, conf=conf, verbose=True, **extra)  # type: ignore
     except Exception as e:
         print('[realtime] predict failed:', e)
         # Try without imgsz as a fallback
@@ -969,6 +977,10 @@ def realtime_segment(req: RTSegmentRequest, request: Request):
 
         instances.sort(key=lambda d: d.get('score', 0) or 0, reverse=True)
         instances = instances[:100]
+
+        # If no tracking IDs from BOT-SORT, use simple IoU tracker
+        if instances and not any(inst.get('track_id') is not None for inst in instances):
+            instances = _assign_seg_ids(sid2, instances)
 
         # No fallbacks in segmentation path
         try:

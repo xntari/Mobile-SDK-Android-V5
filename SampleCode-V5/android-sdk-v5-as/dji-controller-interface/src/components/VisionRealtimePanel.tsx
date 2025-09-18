@@ -21,10 +21,8 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
     try { const raw = localStorage.getItem('visionrt.running'); if (raw) return JSON.parse(raw); } catch {}
     return false;
   });
-  const [intervalMs, setIntervalMs] = React.useState<number>(() => {
-    try { const raw = localStorage.getItem('visionrt.intervalMs'); if (raw) return JSON.parse(raw); } catch {}
-    return 150; // ~6-7 FPS default
-  });
+  const runningRef = React.useRef<boolean>(false);
+  // Removed intervalMs - no longer using fixed intervals
   const [thr, setThr] = React.useState<number>(() => {
     try { const raw = localStorage.getItem('visionrt.thr'); if (raw) return JSON.parse(raw); } catch {}
     return 0.25;
@@ -39,17 +37,17 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
   const [selectedIndex, setSelectedIndex] = React.useState<number>(-1);
   const [promptImage, setPromptImage] = React.useState<string | null>(null);
   const [promptInfo, setPromptInfo] = React.useState<string>('');
-  // Use numeric timeout handle for browser/Electron renderer
-  const timerRef = React.useRef<number | null>(null);
-  const runTokenRef = React.useRef<number>(0);
   const abortRef = React.useRef<AbortController | null>(null);
   const [mode, setMode] = React.useState<'detect'|'segment'|'prompt'>(() => {
     try { const raw = localStorage.getItem('visionrt.mode'); if (raw) return JSON.parse(raw); } catch {}
     return 'detect';
   });
 
-  React.useEffect(() => { try { localStorage.setItem('visionrt.running', JSON.stringify(running)); } catch {} }, [running]);
-  React.useEffect(() => { try { localStorage.setItem('visionrt.intervalMs', JSON.stringify(intervalMs)); } catch {} }, [intervalMs]);
+  React.useEffect(() => {
+    try { localStorage.setItem('visionrt.running', JSON.stringify(running)); } catch {}
+    runningRef.current = running;
+  }, [running]);
+  // Removed intervalMs persistence
   React.useEffect(() => { try { localStorage.setItem('visionrt.thr', JSON.stringify(thr)); } catch {} }, [thr]);
   React.useEffect(() => { try { localStorage.setItem('visionrt.imgSize', JSON.stringify(imgSize)); } catch {} }, [imgSize]);
   React.useEffect(() => { try { localStorage.setItem('visionrt.classes', classesText); } catch {} }, [classesText]);
@@ -57,46 +55,7 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
 
   const parsedClasses = React.useMemo(() => classesText.split(/\n|,|;/).map(s=>s.trim()).filter(Boolean).slice(0, 50), [classesText]);
 
-  const step = React.useCallback(async () => {
-    // Capture token to ignore late results after Stop
-    const token = runTokenRef.current;
-    try {
-      const img = await getSnapshot();
-      // Bail if stopped while capturing snapshot
-      if (runTokenRef.current !== token) return;
-      if (mode === 'detect') {
-        const out = await analyzeRealtime({ imageBase64: img, threshold: thr, classes: parsedClasses, img_size: imgSize, signal: abortRef.current?.signal });
-        if (token !== runTokenRef.current || !running) return;
-        setMasks?.([]);
-        setPoses?.([]);
-        setClassResults([]);
-        const det = out.detections || [];
-        setBoxes?.(det);
-        setLastDetections(det);
-      } else {
-        if (mode === 'segment') {
-          const out = await analyzeRealtimeSegment({ imageBase64: img, threshold: thr, img_size: imgSize, classes: parsedClasses, signal: abortRef.current?.signal });
-          if (token !== runTokenRef.current || !running) return;
-          setBoxes?.([]);
-          setPoses?.([]);
-          setClassResults([]);
-          setMasks?.(out.masks || []);
-        } else if (mode === 'prompt') {
-          // In prompt mode, Step behaves like normal detect to refresh the list
-          const out = await analyzeRealtime({ imageBase64: img, threshold: thr, classes: parsedClasses, img_size: imgSize, signal: abortRef.current?.signal });
-          if (token !== runTokenRef.current || !running) return;
-          setMasks?.([]);
-          setPoses?.([]);
-          setClassResults([]);
-          const det = out.detections || [];
-          setBoxes?.(det);
-          setLastDetections(det);
-        }
-      }
-    } catch (e) {
-      console.warn('[VisionRT] step failed:', e);
-    }
-  }, [getSnapshot, setBoxes, setMasks, setPoses, thr, parsedClasses, imgSize, mode, running]);
+  // Removed step callback - using runContinuous instead
 
   // Single-step: run one request without starting the loop.
   const stepOnce = React.useCallback(async () => {
@@ -132,47 +91,104 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
   }, [getSnapshot, setBoxes, setMasks, setPoses, thr, parsedClasses, imgSize, mode]);
 
   const start = async () => {
-    if (running) return;
-    runTokenRef.current = Date.now();
+    if (runningRef.current) return;
+    runningRef.current = true;
+    setRunning(true);
     if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
     abortRef.current = new AbortController();
-    setRunning(true);
+
+    // Start the continuous loop
+    runContinuous();
   };
+
   const stop = () => {
+    runningRef.current = false;
     setRunning(false);
-    // Invalidate current run so late async results are ignored
-    runTokenRef.current = 0;
-    if (timerRef.current !== null) { try { clearTimeout(timerRef.current); } catch {} timerRef.current = null; }
     if (abortRef.current) { try { abortRef.current.abort(); } catch {} abortRef.current = null; }
     setBoxes?.([]);
     setMasks?.([]);
     setPoses?.([]);
     setClassResults([]);
-    };
-
-  // Scheduler: single-flight loop that stops cleanly
-  const pumpRef = React.useRef<null | ((token:number)=>void)>(null);
-  pumpRef.current = (token: number) => {
-    // Only continue if this invocation matches the current run token
-    if (token !== runTokenRef.current || !running) return;
-    step().finally(() => {
-      if (token !== runTokenRef.current || !running) return;
-      const delay = Math.max(50, intervalMs);
-      timerRef.current = (setTimeout(() => {
-        if (pumpRef.current) pumpRef.current(token);
-      }, delay) as unknown) as number;
-    });
   };
 
-  React.useEffect(() => {
-    // Clear any pending timeouts when changing running state
-    if (timerRef.current !== null) { clearTimeout(timerRef.current); timerRef.current = null; }
-    if (running) {
-      const token = runTokenRef.current;
-      if (pumpRef.current) pumpRef.current(token);
+  const clearOverlays = () => {
+    setBoxes?.([]);
+    setMasks?.([]);
+    setPoses?.([]);
+    setClassResults([]);
+    setLastDetections([]);
+    setSelectedIndex(-1);
+    setPromptImage(null);
+    setPromptInfo('');
+  };
+
+  // Store refs for values that need to be accessed in the loop
+  const modeRef = React.useRef(mode);
+  const thrRef = React.useRef(thr);
+  const imgSizeRef = React.useRef(imgSize);
+  const parsedClassesRef = React.useRef(parsedClasses);
+
+  React.useEffect(() => { modeRef.current = mode; }, [mode]);
+  React.useEffect(() => { thrRef.current = thr; }, [thr]);
+  React.useEffect(() => { imgSizeRef.current = imgSize; }, [imgSize]);
+  React.useEffect(() => { parsedClassesRef.current = parsedClasses; }, [parsedClasses]);
+
+  // Continuous loop: wait for response before sending next request
+  const runContinuous = async () => {
+    console.log('[VisionRT] Starting continuous loop');
+    while (runningRef.current) {
+      try {
+        const img = await getSnapshot();
+        if (!runningRef.current) break;
+
+        const currentMode = modeRef.current;
+        const currentThr = thrRef.current;
+        const currentImgSize = imgSizeRef.current;
+        const currentClasses = parsedClassesRef.current;
+
+        if (currentMode === 'detect') {
+          console.log('[VisionRT] Sending detect request...');
+          const out = await analyzeRealtime({ imageBase64: img, threshold: currentThr, classes: currentClasses, img_size: currentImgSize, signal: abortRef.current?.signal });
+          console.log('[VisionRT] Detect response received:', out.detections?.length, 'detections');
+          if (!runningRef.current) break;
+          setMasks?.([]);
+          setPoses?.([]);
+          setClassResults([]);
+          const det = out.detections || [];
+          setBoxes?.(det);
+          setLastDetections(det);
+        } else if (currentMode === 'segment') {
+          console.log('[VisionRT] Sending segment request...');
+          const out = await analyzeRealtimeSegment({ imageBase64: img, threshold: currentThr, img_size: currentImgSize, classes: currentClasses, signal: abortRef.current?.signal });
+          console.log('[VisionRT] Segment response received:', out.masks?.length, 'masks');
+          if (!runningRef.current) break;
+          setBoxes?.([]);
+          setPoses?.([]);
+          setClassResults([]);
+          setMasks?.(out.masks || []);
+        } else if (currentMode === 'prompt') {
+          console.log('[VisionRT] Sending prompt detect request...');
+          const out = await analyzeRealtime({ imageBase64: img, threshold: currentThr, classes: currentClasses, img_size: currentImgSize, signal: abortRef.current?.signal });
+          console.log('[VisionRT] Prompt detect response received:', out.detections?.length, 'detections');
+          if (!runningRef.current) break;
+          setMasks?.([]);
+          setPoses?.([]);
+          setClassResults([]);
+          const det = out.detections || [];
+          setBoxes?.(det);
+          setLastDetections(det);
+        }
+      } catch (e) {
+        if (!runningRef.current) break;
+        console.warn('[VisionRT] continuous loop error:', e);
+        // Brief pause on error before retry
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
     }
-    return () => { if (timerRef.current !== null) { clearTimeout(timerRef.current); timerRef.current = null; } };
-  }, [running, intervalMs, step]);
+    console.log('[VisionRT] Continuous loop stopped');
+  };
+
+  // Remove the useEffect that was starting multiple loops
 
   const [classResults, setClassResults] = React.useState<Array<{label:string; score:number}>>([]);
 
@@ -243,6 +259,7 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
       <div className="flex items-center justify-between">
         <div className="text-[10px] text-gray-400">Endpoint: {getRealtimeVisionUrl()}</div>
         <div className="flex items-center gap-2">
+          <button className="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600" onClick={clearOverlays}>Clear</button>
           <button className="px-2 py-1 rounded bg-blue-700 hover:bg-blue-600" onClick={stepOnce}>Step</button>
           {!running ? (
             <button className="px-2 py-1 rounded bg-green-700 hover:bg-green-600" onClick={start}>Start</button>
@@ -266,9 +283,6 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
         </label>
         <label className="flex items-center gap-1">imgsz
           <input type="number" min={320} max={1280} step={32} value={imgSize} onChange={(e)=>setImgSize(parseInt(e.target.value||'640'))} className="w-20 bg-gray-800 px-2 py-1 rounded" />
-        </label>
-        <label className="flex items-center gap-1">interval(ms)
-          <input type="number" min={50} max={2000} step={10} value={intervalMs} onChange={(e)=>setIntervalMs(parseInt(e.target.value||'150'))} className="w-20 bg-gray-800 px-2 py-1 rounded" />
         </label>
       </div>
 
