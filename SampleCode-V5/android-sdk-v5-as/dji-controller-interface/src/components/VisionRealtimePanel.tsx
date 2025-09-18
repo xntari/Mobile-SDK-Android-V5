@@ -261,7 +261,7 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
           </select>
         </label>
         <label className="flex items-center gap-1">thr
-          <input type="range" min={0.05} max={0.50} step={0.01} value={thr} onChange={(e)=>setThr(parseFloat(e.target.value))} />
+          <input type="range" min={0.01} max={0.99} step={0.01} value={thr} onChange={(e)=>setThr(parseFloat(e.target.value))} />
           <span className="text-gray-400">{thr.toFixed(2)}</span>
         </label>
         <label className="flex items-center gap-1">imgsz
