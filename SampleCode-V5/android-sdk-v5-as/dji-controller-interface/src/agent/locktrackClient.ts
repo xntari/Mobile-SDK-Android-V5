@@ -48,6 +48,7 @@ export async function lockTrackLock(params: {
   search_pad?: number;
   scales?: number[];
   image_max_side?: number;
+  heatmap_cmap?: string;
   signal?: AbortSignal;
 }): Promise<LockTrackLockResponse> {
   const url = getLocktrackBase() + '/lock';
@@ -64,6 +65,7 @@ export async function lockTrackLock(params: {
       search_pad: params.search_pad,
       scales: params.scales,
       image_max_side: params.image_max_side,
+      heatmap_cmap: params.heatmap_cmap,
     }),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -75,6 +77,7 @@ export async function lockTrackStep(params: {
   image: string;
   return_heatmap?: boolean;
   image_max_side?: number;
+  heatmap_cmap?: string;
   signal?: AbortSignal;
 }): Promise<LockTrackStepResponse> {
   const url = getLocktrackBase() + '/step';
@@ -87,6 +90,7 @@ export async function lockTrackStep(params: {
       image: params.image,
       return_heatmap: !!params.return_heatmap,
       image_max_side: params.image_max_side,
+      heatmap_cmap: params.heatmap_cmap,
     }),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);

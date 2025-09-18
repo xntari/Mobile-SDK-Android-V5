@@ -28,6 +28,9 @@ export const App: React.FC = () => {
   // Shared detection state for vision/agent integration
   const [visionDetections, setVisionDetections] = useState<any[]>([]);
   const [visionMasks, setVisionMasks] = useState<any[]>([]);
+  const [visionHeatmap, setVisionHeatmap] = useState<string | null>(null);
+  const [visionHeatmapOpacity, setVisionHeatmapOpacity] = useState<number>(()=>{ try{ const v = JSON.parse(localStorage.getItem('locktrack.hmOpacity')||'0.35'); if(typeof v==='number') return v; }catch{} return 0.35;});
+  React.useEffect(()=>{ try{ localStorage.setItem('locktrack.hmOpacity', JSON.stringify(visionHeatmapOpacity)); }catch{} }, [visionHeatmapOpacity]);
   const [maskOpacity, setMaskOpacity] = useState<number>(() => {
     try { const raw = localStorage.getItem('visionrt.maskOpacity'); if (raw) return JSON.parse(raw); } catch {}
     return 0.25;
@@ -124,6 +127,8 @@ export const App: React.FC = () => {
               maskOpacity={maskOpacity}
               colorizeById={colorizeById}
               detectThickness={detectThickness}
+              visionHeatmap={selectedCamera === 'fpv' ? visionHeatmap : null}
+              visionHeatmapOpacity={visionHeatmapOpacity}
             />
           </CameraPanel>
 
@@ -146,6 +151,8 @@ export const App: React.FC = () => {
               maskOpacity={maskOpacity}
               colorizeById={colorizeById}
               detectThickness={detectThickness}
+              visionHeatmap={selectedCamera === 'h20n' ? visionHeatmap : null}
+              visionHeatmapOpacity={visionHeatmapOpacity}
             />
           </CameraPanel>
 
@@ -251,6 +258,8 @@ export const App: React.FC = () => {
             setMaskOpacity={setMaskOpacity}
             setColorizeById={setColorizeById}
             setDetectThickness={setDetectThickness}
+            setHeatmap={setVisionHeatmap}
+            setHeatmapOpacity={setVisionHeatmapOpacity}
           />
 
         </div>
