@@ -45,7 +45,7 @@ class BridgeManager {
         break;
 
       case 'telemetry_data':
-        console.log('📡 Bridge: Received telemetry_data message');
+        //console.log('📡 Bridge: Received telemetry_data message');
         // Convert yaw (-180 to +180) to compass heading (0 to 360)
         const convertYawToCompass = (yaw: number): number => {
           let compass = yaw;
@@ -75,14 +75,14 @@ class BridgeManager {
         const bearingToHome = calculateBearing(message.location, message.home_location);
 
         // Debug home bearing calculation
-        console.log('🏠 Bridge: Home bearing calculation', {
-          aircraft_lat: message.location?.latitude,
-          aircraft_lng: message.location?.longitude,
-          home_lat: message.home_location?.latitude,
-          home_lng: message.home_location?.longitude,
-          calculated_bearing: bearingToHome,
-          has_both_locations: !!(message.location && message.home_location)
-        });
+        //console.log('🏠 Bridge: Home bearing calculation', {
+        //  aircraft_lat: message.location?.latitude,
+        //  aircraft_lng: message.location?.longitude,
+        //  home_lat: message.home_location?.latitude,
+        //  home_lng: message.home_location?.longitude,
+        //  calculated_bearing: bearingToHome,
+        //  has_both_locations: !!(message.location && message.home_location)
+        //});
 
         // Debug compass data
         // console.log('🧭 Compass Data Debug:', {

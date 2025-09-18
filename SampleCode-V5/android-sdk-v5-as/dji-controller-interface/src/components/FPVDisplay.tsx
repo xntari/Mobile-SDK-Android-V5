@@ -7,7 +7,7 @@ export interface FPVDisplayRef {
   getSnapshot: () => Promise<string>;
 }
 
-export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({ 
+export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
   width,
   height,
   className = '',
@@ -19,7 +19,9 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
   visionKeypoints = [],
   maskOpacity = 0.25,
   colorizeById = false,
-  detectThickness = 1
+  detectThickness = 1,
+  visionHeatmap = null,
+  visionHeatmapOpacity = 0.35
 }, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -852,7 +854,16 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
 
             return (
               <>
-                {/* Vision segmentation overlay */}
+        {/* Heatmap overlay (LockTrack) */}
+        {visionHeatmap && (
+          <img
+            src={visionHeatmap}
+            alt="heatmap"
+            style={{ position: 'absolute', left: 0, top: 0, width: displayRect.width, height: displayRect.height, opacity: Math.max(0, Math.min(1, visionHeatmapOpacity)), pointerEvents: 'none', zIndex: 9 }}
+          />
+        )}
+
+        {/* Vision segmentation overlay */}
                 <svg width={displayRect.width} height={displayRect.height} style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none', zIndex: 10 }}>
                   {visionMasks.map((m: Mask, idx: number) => {
                     const pts = (m.points || []).map(p => ({ x: p.x * (displayRect.width || 1), y: p.y * (displayRect.height || 1) }));

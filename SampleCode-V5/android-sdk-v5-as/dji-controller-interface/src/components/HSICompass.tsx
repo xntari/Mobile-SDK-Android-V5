@@ -215,7 +215,7 @@ export const HSICompass: React.FC<HSICompassProps> = ({
   ) => {
     if (!sectors.length) return;
     
-    console.log(`🎨 Drawing ${sectors.length} obstacle sectors with source differentiation`);
+    //console.log(`🎨 Drawing ${sectors.length} obstacle sectors with source differentiation`);
     
     sectors.forEach((sector, index) => {
       if (sector.warning_level === 'none') return; // Skip safe sectors
@@ -347,12 +347,12 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     ctx.save();
 
     // Draw home direction indicator (if available) - relative to rotated compass
-    console.log('🏠 HSI Home Direction Debug:', {
-      homeDirection,
-      heading,
-      hasHomeDirection: homeDirection !== undefined,
-      telemetryHomeBearing: telemetryData?.home_bearing
-    });
+    //console.log('🏠 HSI Home Direction Debug:', {
+    //  homeDirection,
+    //  heading,
+    //  hasHomeDirection: homeDirection !== undefined,
+    //  telemetryHomeBearing: telemetryData?.home_bearing
+    //});
     if (homeDirection !== undefined && homeDirection > 0) {
       ctx.save();
       ctx.translate(centerX, centerY);

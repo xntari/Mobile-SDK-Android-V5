@@ -125,6 +125,8 @@ export interface FPVDisplayProps {
   maskOpacity?: number;
   colorizeById?: boolean;
   detectThickness?: number;
+  visionHeatmap?: string | null;
+  visionHeatmapOpacity?: number;
 }
 
 export interface H20NDisplayProps {
@@ -140,6 +142,8 @@ export interface H20NDisplayProps {
   maskOpacity?: number;
   colorizeById?: boolean;
   detectThickness?: number;
+  visionHeatmap?: string | null;
+  visionHeatmapOpacity?: number;
 }
 
 export interface HSICompassProps {

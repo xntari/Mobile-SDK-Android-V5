@@ -17,7 +17,7 @@ interface ClickIndicator {
   message?: string;
 }
 
-export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
+export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({ 
   width,
   height,
   className = '',
@@ -29,7 +29,9 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
   visionKeypoints = [],
   maskOpacity = 0.25,
   colorizeById = false,
-  detectThickness = 1
+  detectThickness = 1,
+  visionHeatmap = null,
+  visionHeatmapOpacity = 0.35
 }, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -1291,6 +1293,15 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
 
             return (
               <>
+                {/* Heatmap overlay (LockTrack) */}
+                {visionHeatmap && (
+                  <img
+                    src={visionHeatmap}
+                    alt="heatmap"
+                    style={{ position: 'absolute', left: 0, top: 0, width: displayRect.width, height: displayRect.height, opacity: Math.max(0, Math.min(1, visionHeatmapOpacity)), pointerEvents: 'none', zIndex: 9 }}
+                  />
+                )}
+
                 {/* Vision segmentation overlay */}
                 <svg width={displayRect.width} height={displayRect.height} style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none', zIndex: 10 }}>
                   {visionMasks.map((m: Mask, idx: number) => {

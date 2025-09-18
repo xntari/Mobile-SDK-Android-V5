@@ -14,9 +14,11 @@ export interface VisionRealtimePanelProps {
   setMaskOpacity?: (v:number)=>void;
   setColorizeById?: (v:boolean)=>void;
   setDetectThickness?: (v:number)=>void;
+  setHeatmap?: (dataUrl: string | null) => void;
+  setHeatmapOpacity?: (v:number)=>void;
 }
 
-export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSnapshot, setBoxes, setMasks, setPoses, setMaskOpacity, setColorizeById, setDetectThickness }) => {
+export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSnapshot, setBoxes, setMasks, setPoses, setMaskOpacity, setColorizeById, setDetectThickness, setHeatmap, setHeatmapOpacity }) => {
   const [running, setRunning] = React.useState<boolean>(() => {
     try { const raw = localStorage.getItem('visionrt.running'); if (raw) return JSON.parse(raw); } catch {}
     return false;
@@ -206,6 +208,12 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
     const [ltClassesText, setLtClassesText] = React.useState<string>(()=>{ try { return localStorage.getItem('locktrack.labels') || ''; } catch {} return ''; });
     const [ltScanThr, setLtScanThr] = React.useState<number>(()=>{ try { const raw = localStorage.getItem('locktrack.scanThr'); if (raw) return JSON.parse(raw); } catch {} return 0.25; });
     const [maxSide, setMaxSide] = React.useState<number>(()=>{ try { const raw = localStorage.getItem('locktrack.maxSide'); if (raw) return JSON.parse(raw); } catch {} return 0; });
+    const [trackMode, setTrackMode] = React.useState<'free_look'|'look_at'>(()=>{ try { return (localStorage.getItem('locktrack.trackMode') as any) || 'free_look'; } catch {} return 'free_look'; });
+    const [vxGain, setVxGain] = React.useState<number>(()=>{ try { const v = JSON.parse(localStorage.getItem('locktrack.vxGain')||'1.0'); if (typeof v==='number') return v; } catch {} return 1.0; });
+    const [deadZone, setDeadZone] = React.useState<number>(()=>{ try { const v = JSON.parse(localStorage.getItem('locktrack.deadZone')||'0.05'); if (typeof v==='number') return v; } catch {} return 0.05; });
+    const freeLookStartedRef = React.useRef<boolean>(false);
+    const [hmCmap, setHmCmap] = React.useState<string>(()=>{ try { return localStorage.getItem('locktrack.hmCmap') || 'jet'; } catch {} return 'jet'; });
+    const [hmOpacity, setHmOpacity] = React.useState<number>(()=>{ try { const v = JSON.parse(localStorage.getItem('locktrack.hmOpacity')||'0.35'); if (typeof v==='number') return v; } catch {} return 0.35; });
     const doScan = async () => {
       try {
         const img = await getSnapshot();
@@ -249,6 +257,7 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
     };
     const doLock = async () => {
       try {
+        console.log('[LockTrack] Lock: capturing snapshot');
         const img = await getSnapshot();
         let ref_image: string | undefined = undefined;
         let box: {x:number;y:number;w:number;h:number} | undefined = undefined;
@@ -269,14 +278,23 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
           }
         }
         const scales = scalesText.split(/,|\s+/).map(s=>parseFloat(s)).filter(n=>!isNaN(n) && n>0).slice(0,5);
-        const out = await lockTrackLock({ image: img, ref_image, box, return_heatmap: showHeatmap, threshold: thrLT, search_pad: pad, scales, signal: abortRef.current?.signal, image_max_side: maxSide>0?maxSide:undefined });
+        abortRef.current = new AbortController();
+        const out = await lockTrackLock({ image: img, ref_image, box, return_heatmap: showHeatmap, threshold: thrLT, search_pad: pad, scales, signal: abortRef.current?.signal, image_max_side: maxSide>0?maxSide:undefined, heatmap_cmap: hmCmap });
         setTrackId(out.track_id);
         setStatus(out.status || 'locked');
         const b = out.init_box;
         setLastBox(b);
         setBoxes?.([{ x1: b.x, y1: b.y, x2: b.x + b.w, y2: b.y + b.h, score: typeof out.score==='number'? out.score : 1.0, label: `lock` }]);
         setPromptInfo(`Lock ${out.status}${typeof out.score==='number' ? `, score ${out.score.toFixed(2)}` : ''}`);
-        if (showHeatmap && out.heatmap) setLastHeatmap(`data:image/png;base64,${out.heatmap}`);
+        console.log('[LockTrack] Lock: server response', out);
+        if (showHeatmap && out.heatmap) {
+          const hm = `data:image/png;base64,${out.heatmap}`;
+          setLastHeatmap(hm);
+          setHeatmap?.(hm);
+        } else if (!showHeatmap) {
+          setHeatmap?.(null);
+        }
+        // Do not start free-look on lock
       } catch (e) {
         const msg = String(e instanceof Error ? e.message : e);
         console.warn('[VisionRT] lock failed:', e);
@@ -286,14 +304,40 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
     const doStep = async () => {
       try {
         if (!trackId) { setPromptInfo('no track_id; Lock-On first'); return; }
+        console.log('[LockTrack] Step: capturing snapshot');
+        setPromptInfo('step: sending snapshot...');
         const img = await getSnapshot();
-        const out = await lockTrackStep({ track_id: trackId, image: img, return_heatmap: showHeatmap, signal: abortRef.current?.signal, image_max_side: maxSide>0?maxSide:undefined });
+        abortRef.current = new AbortController();
+        const out = await lockTrackStep({ track_id: trackId, image: img, return_heatmap: showHeatmap, signal: abortRef.current?.signal, image_max_side: maxSide>0?maxSide:undefined, heatmap_cmap: hmCmap });
+        console.log('[LockTrack] Step: server response', out);
         const b = out.box;
         setLastBox(b);
         setStatus(out.status);
         setBoxes?.([{ x1: b.x, y1: b.y, x2: b.x + b.w, y2: b.y + b.h, score: out.score, label: `lock` }]);
         setPromptInfo(`step: ${out.status}, score ${out.score.toFixed(2)}`);
-        if (showHeatmap && out.heatmap) setLastHeatmap(`data:image/png;base64,${out.heatmap}`);
+        if (showHeatmap && out.heatmap) {
+          const hm = `data:image/png;base64,${out.heatmap}`;
+          setLastHeatmap(hm);
+          setHeatmap?.(hm);
+        } else if (!showHeatmap) {
+          setHeatmap?.(null);
+        }
+        // Gimbal control to center on candidate
+        const cx = b.x + b.w * 0.5; const cy = b.y + b.h * 0.5;
+        if (trackMode === 'look_at' && (window as any).electronAPI) {
+          try { await (window as any).electronAPI.sendBridgeCommand({ type: 'gimbal_tap_target', data: { x: cx, y: cy } }); } catch {}
+        } else if (trackMode === 'free_look' && (window as any).electronAPI) {
+          const dx = cx - 0.5, dy = cy - 0.5;
+          const applyDZ = (v:number) => Math.abs(v) < deadZone ? 0 : v;
+          const vx = Math.max(-1, Math.min(1, applyDZ(dx) * vxGain * 2));
+          const vy = Math.max(-1, Math.min(1, applyDZ(dy) * vxGain * 2));
+          try {
+            // one-shot free look per step
+            await (window as any).electronAPI.sendBridgeCommand({ type: 'gimbal_free_look_start', data: { source: 'locktrack' } });
+            await (window as any).electronAPI.sendBridgeCommand({ type: 'gimbal_free_look_update', data: { vx, vy } });
+            await (window as any).electronAPI.sendBridgeCommand({ type: 'gimbal_free_look_stop' });
+          } catch {}
+        }
       } catch (e) {
         const msg = String(e instanceof Error ? e.message : e);
         console.warn('[VisionRT] step failed:', e);
@@ -350,6 +394,9 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
     React.useEffect(()=>{ try { localStorage.setItem('locktrack.labels', ltClassesText); } catch {} }, [ltClassesText]);
     React.useEffect(()=>{ try { localStorage.setItem('locktrack.scanThr', JSON.stringify(ltScanThr)); } catch {} }, [ltScanThr]);
     React.useEffect(()=>{ try { localStorage.setItem('locktrack.maxSide', JSON.stringify(maxSide)); } catch {} }, [maxSide]);
+    React.useEffect(()=>{ try { localStorage.setItem('locktrack.trackMode', trackMode); } catch {} }, [trackMode]);
+    React.useEffect(()=>{ try { localStorage.setItem('locktrack.vxGain', JSON.stringify(vxGain)); } catch {} }, [vxGain]);
+    React.useEffect(()=>{ try { localStorage.setItem('locktrack.deadZone', JSON.stringify(deadZone)); } catch {} }, [deadZone]);
     return (
       <div className="flex flex-col gap-2 relative z-30">
         <div className="text-[10px] text-gray-400">Pick reference: select a detection and Extract, or Upload an image. Then Lock‑On, Step to track, Add View to update descriptor.</div>
@@ -381,9 +428,19 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
             <img src={lastHeatmap} alt="heatmap" className="max-w-full max-h-40 border border-gray-600" />
           </div>
         )}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <label className="flex items-center gap-2">
             <input type="checkbox" checked={showHeatmap} onChange={(e)=>setShowHeatmap(e.target.checked)} /> show heatmap
+          </label>
+          <label className="flex items-center gap-2">cmap
+            <select className="bg-gray-800 text-xs px-2 py-1 rounded" value={hmCmap} onChange={(e)=>{ setHmCmap(e.target.value); try { localStorage.setItem('locktrack.hmCmap', e.target.value); } catch {} }}>
+              <option value="jet">jet</option>
+              <option value="gray">gray</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-1">opacity
+            <input type="range" min={0} max={1} step={0.01} value={hmOpacity} onChange={(e)=>{ const v = parseFloat(e.target.value); setHmOpacity(v); setHeatmapOpacity?.(v); try { localStorage.setItem('locktrack.hmOpacity', JSON.stringify(v)); } catch {} }} />
+            <span className="text-gray-400">{hmOpacity.toFixed(2)}</span>
           </label>
           <label className="flex items-center gap-1">scan thr
             <input type="range" min={0.01} max={0.99} step={0.01} value={ltScanThr} onChange={(e)=>setLtScanThr(parseFloat(e.target.value))} />
@@ -402,6 +459,26 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
           <label className="flex items-center gap-1">scales
             <input type="text" value={scalesText} onChange={(e)=>setScalesText(e.target.value)} className="w-36 bg-gray-800 px-2 py-1 rounded" />
           </label>
+        </div>
+        <div className="flex items-center gap-3 mt-1">
+          <label className="flex items-center gap-2">track mode
+            <select className="bg-gray-800 text-xs px-2 py-1 rounded" value={trackMode} onChange={(e)=>setTrackMode(e.target.value as any)}>
+              <option value="free_look">Free Look (smooth)</option>
+              <option value="look_at">Look At (tap)</option>
+            </select>
+          </label>
+          {trackMode === 'free_look' && (
+            <>
+              <label className="flex items-center gap-1">vx gain
+                <input type="range" min={0.1} max={3} step={0.05} value={vxGain} onChange={(e)=>setVxGain(parseFloat(e.target.value))} />
+                <span className="text-gray-400">{vxGain.toFixed(2)}</span>
+              </label>
+              <label className="flex items-center gap-1">dead zone
+                <input type="range" min={0} max={0.25} step={0.01} value={deadZone} onChange={(e)=>setDeadZone(parseFloat(e.target.value))} />
+                <span className="text-gray-400">{deadZone.toFixed(2)}</span>
+              </label>
+            </>
+          )}
           <span className="text-[10px] text-gray-400">status: {status}</span>
         </div>
         {promptInfo && <div className="text-[10px] text-gray-400">{promptInfo}</div>}
