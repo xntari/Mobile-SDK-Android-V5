@@ -76,6 +76,12 @@ export const Panel: React.FC<PanelProps> = ({
   const dragRef = React.useRef<{ dx: number; dy: number } | null>(null);
   const panelRef = React.useRef<HTMLDivElement | null>(null);
 
+  // Ensure the panel starts above potential overlays on first mount
+  React.useEffect(() => {
+    setZIndex(getNextZIndex());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Persist state changes
   React.useEffect(() => {
     try {
