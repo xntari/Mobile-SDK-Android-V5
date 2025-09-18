@@ -33,6 +33,7 @@ from typing import List, Dict, Any, Optional
 import base64
 import io
 import os
+import torch  # type: ignore
 
 from fastapi import FastAPI, Request
 import tempfile
@@ -43,6 +44,28 @@ from pydantic import BaseModel
 from PIL import Image
 
 import argparse
+
+# Set PyTorch defaults to float32 for MPS compatibility
+torch.set_default_dtype(torch.float32)
+# Allow CPU fallback for operations not implemented on MPS
+if torch.backends.mps.is_available():
+    torch.backends.mps.allow_tf32 = False  # Ensure float32 precision
+    os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+
+# Override numpy default float type to avoid float64
+# Handle both NumPy 1.x and 2.x
+try:
+    # NumPy 1.x
+    original_numpy_float = np.float_
+    np.float_ = np.float32
+except AttributeError:
+    # NumPy 2.x - float_ was removed, use float64 instead
+    original_numpy_float = np.float64
+    # Can't override float64 directly in NumPy 2.x, but we can set default dtype
+    pass
+
+# Set numpy default dtype to float32
+np.seterr(all='ignore')  # Suppress numpy warnings during dtype conversion
 
 
 # ------------------------- Server config -------------------------
@@ -59,14 +82,20 @@ _DEFAULT_PORT: int = int(os.environ.get("REALTIME_PORT", "9004"))
 _DEFAULT_IMGSZ: int = int(os.environ.get("Y_IMGSZ", "640"))
 _DEFAULT_THRESH: float = float(os.environ.get("Y_THRESH", "0.25"))
 _DEVICE: str = os.environ.get("Y_DEVICE", "auto")  # 'auto' | 'cpu' | 'mps' | 'cuda'
+_USE_HALF: bool = False  # Use FP16 half precision
 
 _CLI_OV_MODEL_SPEC: Optional[str] = None
 _HAVE_YOLOE: bool = False
 _yoloe_model = None
+_yoloe_model_cpu = None  # CPU copy for generating embeddings
 _YOLOE_API: str = 'unknown'  # 'YOLOE' or 'YOLO'
 _ULTRA_VER: str = getattr(_ultra, '__version__', 'unknown')
 _HAVE_YOLOE_PF: bool = False
 _yoloe_pf_model = None
+_yoloe_pf_model_cpu = None  # CPU copy for generating embeddings
+
+# Cache for text embeddings to avoid recomputation
+_EMBEDDINGS_CACHE: Dict[tuple, torch.Tensor] = {}
 
 # Per-session display ID mapping: track_id -> per-class small id
 _DISPLAY_MAP: Dict[str, Dict[str, Dict[str, Any]]] = {}
@@ -138,6 +167,222 @@ def _assign_seg_ids(sid: str, instances: List[Dict[str, Any]], iou_thr: float = 
     return instances
 
 # ------------------------- Utils -------------------------
+def dtype_of(module):
+    """Get the dtype of a module's parameters"""
+    try:
+        return next(module.parameters()).dtype
+    except StopIteration:
+        return torch.float32
+
+def device_of(module):
+    """Get the device of a module's parameters"""
+    try:
+        return next(module.parameters()).device
+    except StopIteration:
+        return torch.device('cpu')
+
+def sanitize_module_fp(module, target_dtype=None):
+    """Force every param/buffer to target_dtype (fp32 by default)."""
+    if target_dtype is None:
+        target_dtype = torch.float32
+
+    for name, p in module.named_parameters(recurse=True):
+        if p.dtype != target_dtype:
+            p.data = p.data.to(dtype=target_dtype)
+
+    for name, buf in module.named_buffers(recurse=True):
+        if buf.dtype != target_dtype:
+            # Need to get parent module and attribute name to set buffer
+            parent = module
+            parts = name.split('.')
+            for part in parts[:-1]:
+                parent = getattr(parent, part)
+            setattr(parent, parts[-1], buf.to(dtype=target_dtype))
+
+    return module
+
+def assert_no_fp64(module, where="(unknown)"):
+    """Assert that no parameters or buffers are float64"""
+    for name, p in module.named_parameters(recurse=True):
+        assert p.dtype != torch.float64, f"found fp64 param {name} {where}"
+    for name, b in module.named_buffers(recurse=True):
+        assert b.dtype != torch.float64, f"found fp64 buffer {name} {where}"
+
+def safe_set_classes_yoloe(model, classes):
+    """
+    Safe wrapper for YOLO-E set_classes that enforces fp32/fp16 throughout.
+    Works around MPS float64 limitations by using a CPU copy for embeddings.
+    """
+    if not classes:
+        return
+
+    try:
+        # Create cache key from sorted classes
+        cache_key = tuple(sorted(classes))
+
+        # Check if we have cached embeddings
+        if cache_key in _EMBEDDINGS_CACHE:
+            print(f'[realtime] Using cached embeddings for: {classes}')
+            emb = _EMBEDDINGS_CACHE[cache_key]
+            # Move to model device and dtype
+            mdev = device_of(model.model)
+            mdtype = dtype_of(model.model)
+            emb = emb.to(device=mdev, dtype=mdtype)
+            model.set_classes(classes, embeddings=emb)
+            return
+
+        # Get model device and dtype
+        mdev = device_of(model.model)
+        mdtype = dtype_of(model.model)
+
+        # For MPS, use the CPU copy to generate embeddings
+        if 'mps' in str(mdev):
+            # Determine which CPU model to use
+            global _yoloe_model_cpu, _yoloe_pf_model_cpu
+
+            # Check if this is the prompt-free model
+            is_pf = (model is _yoloe_pf_model) if _yoloe_pf_model else False
+            cpu_model = _yoloe_pf_model_cpu if is_pf else _yoloe_model_cpu
+
+            if cpu_model is None:
+                print(f'[realtime] WARNING: No CPU model available for embeddings generation')
+                # Fallback to moving model temporarily
+                with torch.no_grad():
+                    original_device = mdev
+                    model.model = model.model.cpu()
+                    emb = model.get_text_pe(classes)
+                    if emb.dtype == torch.float64:
+                        emb = emb.float()
+                    model.set_classes(classes, embeddings=emb)
+                    model.model = model.model.to(original_device)
+                    sanitize_module_fp(model.model, target_dtype=mdtype)
+                return
+
+            print(f'[realtime] Using CPU model for embeddings generation: {classes}')
+
+            with torch.no_grad():
+                # Generate embeddings on CPU model
+                emb = cpu_model.get_text_pe(classes)
+
+                # Ensure float32
+                if emb.dtype == torch.float64:
+                    emb = emb.float()
+
+                # Cache the embeddings on CPU
+                if len(_EMBEDDINGS_CACHE) < 100:  # Limit cache size
+                    _EMBEDDINGS_CACHE[cache_key] = emb.cpu()
+
+                # Move to MPS device with correct dtype
+                emb = emb.to(device=mdev, dtype=mdtype)
+
+                # Set classes on both models to keep them in sync
+                cpu_model.set_classes(classes, embeddings=emb.cpu())
+                model.set_classes(classes, embeddings=emb)
+
+                print(f'[realtime] YOLOE set_classes success using CPU model: {classes}')
+
+        else:
+            # Non-MPS devices can use normal flow
+            with torch.no_grad():
+                emb = model.get_text_pe(classes)
+
+                if emb.dtype == torch.float64:
+                    emb = emb.float()
+
+                # Cache the embeddings
+                if len(_EMBEDDINGS_CACHE) < 100:
+                    _EMBEDDINGS_CACHE[cache_key] = emb.cpu()
+
+                emb = emb.to(device=mdev, dtype=mdtype)
+                model.set_classes(classes, embeddings=emb)
+
+                print(f'[realtime] YOLOE set_classes success: {classes}')
+
+        # Final sanitization
+        sanitize_module_fp(model.model, target_dtype=mdtype)
+
+    except Exception as e:
+        print(f'[realtime] safe_set_classes_yoloe failed: {e}')
+        import traceback
+        traceback.print_exc()
+        print(f'[realtime] WARNING: Custom classes disabled due to error')
+
+
+class ForceCPUTensors:
+    """Context manager to force tensor creation on CPU with float32"""
+    def __init__(self):
+        self.originals = {}
+
+    def __enter__(self):
+        # Save all original tensor creation functions
+        self.originals = {
+            'empty': torch.empty,
+            'zeros': torch.zeros,
+            'ones': torch.ones,
+            'tensor': torch.tensor,
+            'as_tensor': torch.as_tensor,
+            'from_numpy': torch.from_numpy,
+            'randn': torch.randn,
+            'rand': torch.rand,
+            'arange': torch.arange,
+            'linspace': torch.linspace,
+            'full': torch.full,
+            'eye': torch.eye,
+        }
+
+        # Create wrapper that forces CPU and float32
+        def make_wrapper(orig_func):
+            def wrapper(*args, **kwargs):
+                # Remove or override device argument
+                if 'device' in kwargs:
+                    device = kwargs.get('device')
+                    # Force CPU if MPS or CUDA is specified
+                    if device is not None and ('mps' in str(device) or 'cuda' in str(device)):
+                        kwargs['device'] = 'cpu'
+                else:
+                    kwargs['device'] = 'cpu'
+
+                # Force float32 for float64
+                if 'dtype' in kwargs:
+                    if kwargs['dtype'] in (torch.float64, torch.double):
+                        kwargs['dtype'] = torch.float32
+
+                result = orig_func(*args, **kwargs)
+
+                # Double-check result is on CPU with float32
+                if hasattr(result, 'dtype') and result.dtype == torch.float64:
+                    result = result.float()
+                if hasattr(result, 'device') and result.device.type != 'cpu':
+                    result = result.cpu()
+
+                return result
+            return wrapper
+
+        # Apply patches to all functions
+        for name, orig in self.originals.items():
+            if name == 'from_numpy':
+                # Special handling for from_numpy
+                def from_numpy_wrapper(array):
+                    tensor = self.originals['from_numpy'](array)
+                    if tensor.dtype == torch.float64:
+                        tensor = tensor.float()
+                    if tensor.device.type != 'cpu':
+                        tensor = tensor.cpu()
+                    return tensor
+                setattr(torch, name, from_numpy_wrapper)
+            else:
+                setattr(torch, name, make_wrapper(orig))
+
+        return self
+
+    def __exit__(self, *args):
+        # Restore all original functions
+        for name, orig in self.originals.items():
+            setattr(torch, name, orig)
+
+
+
+
 def decode_image_to_pil(image_b64_or_dataurl: str) -> Image.Image:
     data = image_b64_or_dataurl
     if data.startswith("data:"):
@@ -192,7 +437,7 @@ def _scale_image(img: Image.Image, max_side: int) -> Image.Image:
 
 # ------------------------- YOLO‑E loaders -------------------------
 def _lazy_load_yoloe():
-    global _HAVE_YOLOE, _yoloe_model
+    global _HAVE_YOLOE, _yoloe_model, _yoloe_model_cpu
     if _HAVE_YOLOE:
         return
     try:
@@ -206,27 +451,54 @@ def _lazy_load_yoloe():
         model_spec = _canonicalize_model_spec(_CLI_OV_MODEL_SPEC or os.environ.get("YOLOE_MODEL"))
         if not model_spec:
             model_spec = 'yoloe.pt'
+
+        # Load model for inference
         if YOLOEClass is not None:
             _yoloe_model = YOLOEClass(model_spec)
             api = 'YOLOE'
         else:
             _yoloe_model = YOLO(model_spec)
             api = 'YOLO'
+
+        # For MPS, create a separate CPU copy for embeddings generation
+        if _DEVICE == "mps":
+            print(f"[realtime] Creating CPU copy of YOLO‑E for embeddings generation")
+            if YOLOEClass is not None:
+                _yoloe_model_cpu = YOLOEClass(model_spec)
+            else:
+                _yoloe_model_cpu = YOLO(model_spec)
+            # Keep CPU model on CPU with float32
+            if hasattr(_yoloe_model_cpu, 'model'):
+                _yoloe_model_cpu.model = _yoloe_model_cpu.model.cpu().float()
+                sanitize_module_fp(_yoloe_model_cpu.model, target_dtype=torch.float32)
+
+        # Move inference model to device and apply half precision if requested
         try:
             if _DEVICE in ("mps", "cuda"):
                 _yoloe_model.to(_DEVICE)
-        except Exception:
-            pass
+
+            # Apply half precision and sanitize dtype
+            if _USE_HALF and hasattr(_yoloe_model, 'model'):
+                _yoloe_model.model = _yoloe_model.model.half()
+                sanitize_module_fp(_yoloe_model.model, target_dtype=torch.float16)
+                print(f"[realtime] Applied FP16 half precision to YOLO‑E model")
+            elif hasattr(_yoloe_model, 'model'):
+                # Ensure FP32 and no FP64
+                sanitize_module_fp(_yoloe_model.model, target_dtype=torch.float32)
+                assert_no_fp64(_yoloe_model.model, where="after loading YOLO‑E")
+        except Exception as e:
+            print(f'[realtime] Model device/dtype setup warning: {e}')
+
         _HAVE_YOLOE = True
         globals()['_YOLOE_API'] = api
-        print(f"[realtime] YOLO‑E loaded: {model_spec} api={api} ultralytics={_ULTRA_VER}")
+        print(f"[realtime] YOLO‑E loaded: {model_spec} api={api} ultralytics={_ULTRA_VER} dtype={dtype_of(_yoloe_model.model) if hasattr(_yoloe_model, 'model') else 'unknown'}")
     except Exception as e:
         print('[realtime] yoloe load failed:', e)
         _HAVE_YOLOE = False
 
 
 def _lazy_load_yoloe_pf():
-    global _HAVE_YOLOE_PF, _yoloe_pf_model
+    global _HAVE_YOLOE_PF, _yoloe_pf_model, _yoloe_pf_model_cpu
     if _HAVE_YOLOE_PF:
         return
     try:
@@ -234,13 +506,35 @@ def _lazy_load_yoloe_pf():
         base_spec = _canonicalize_model_spec(_CLI_OV_MODEL_SPEC or os.environ.get("YOLOE_MODEL")) or 'yoloe.pt'
         pf_spec = _derive_pf_spec(base_spec)
         _yoloe_pf_model = YOLO(pf_spec)
+
+        # For MPS, create a separate CPU copy for embeddings generation
+        if _DEVICE == "mps":
+            print(f"[realtime] Creating CPU copy of YOLO‑E PF for embeddings generation")
+            _yoloe_pf_model_cpu = YOLO(pf_spec)
+            # Keep CPU model on CPU with float32
+            if hasattr(_yoloe_pf_model_cpu, 'model'):
+                _yoloe_pf_model_cpu.model = _yoloe_pf_model_cpu.model.cpu().float()
+                sanitize_module_fp(_yoloe_pf_model_cpu.model, target_dtype=torch.float32)
+
+        # Move inference model to device and apply half precision if requested
         try:
             if _DEVICE in ("mps", "cuda"):
                 _yoloe_pf_model.to(_DEVICE)
-        except Exception:
-            pass
+
+            # Apply half precision and sanitize dtype
+            if _USE_HALF and hasattr(_yoloe_pf_model, 'model'):
+                _yoloe_pf_model.model = _yoloe_pf_model.model.half()
+                sanitize_module_fp(_yoloe_pf_model.model, target_dtype=torch.float16)
+                print(f"[realtime] Applied FP16 half precision to YOLO‑E PF model")
+            elif hasattr(_yoloe_pf_model, 'model'):
+                # Ensure FP32 and no FP64
+                sanitize_module_fp(_yoloe_pf_model.model, target_dtype=torch.float32)
+                assert_no_fp64(_yoloe_pf_model.model, where="after loading YOLO‑E PF")
+        except Exception as e:
+            print(f'[realtime] PF model device/dtype setup warning: {e}')
+
         _HAVE_YOLOE_PF = True
-        print(f"[realtime] YOLO‑E PF loaded: {pf_spec}")
+        print(f"[realtime] YOLO‑E PF loaded: {pf_spec} dtype={dtype_of(_yoloe_pf_model.model) if hasattr(_yoloe_pf_model, 'model') else 'unknown'}")
     except Exception as e:
         print('[realtime] yoloe‑pf load failed:', e)
         _HAVE_YOLOE_PF = False
@@ -249,6 +543,9 @@ def _lazy_load_yoloe_pf():
 # ------------------------- Inference helpers -------------------------
 def _safe_predict(model, img: Image.Image, imgsz: int, conf: float, extra: Optional[Dict[str, Any]] = None):
     extra = extra or {}
+    # Add half precision flag if enabled
+    if _USE_HALF:
+        extra['half'] = True
     try:
         return model.predict(img, imgsz=imgsz, conf=conf, verbose=False, **extra)  # type: ignore
     except Exception as e:
@@ -429,11 +726,9 @@ def realtime_detect(req: RTDetectRequest, request: Request):
             if not _HAVE_YOLOE:
                 return {'boxes': []}
             # set textual classes and single predict per docs
-            try:
-                if hasattr(_yoloe_model, 'set_classes') and req.ov_labels:
-                    _yoloe_model.set_classes(req.ov_labels)  # type: ignore
-            except Exception as e:
-                print('[realtime] yolo-e set_classes failed:', e)
+            # Set textual classes using safe helper for MPS compatibility
+            if req.ov_labels:
+                safe_set_classes_yoloe(_yoloe_model, req.ov_labels)
             res = _safe_predict(_yoloe_model, img2, size, thr)
         if res:
             # Use Ultralytics built‑in tracker to get IDs
@@ -444,13 +739,10 @@ def realtime_detect(req: RTDetectRequest, request: Request):
                 if not model:
                     raise RuntimeError('model not loaded')
                 # For OV, ensure classes are set before tracking as well
+                # For OV, ensure classes are set before tracking
                 if (not use_pf) and req.ov_labels:
-                    try:
-                        if hasattr(model, 'set_classes'):
-                            model.set_classes(req.ov_labels)  # type: ignore
-                    except Exception:
-                        pass
-                track_res = model.track(img2, imgsz=size, conf=thr, verbose=False, persist=True, tracker='botsort-reid.yaml')  # type: ignore
+                    safe_set_classes_yoloe(model, req.ov_labels)
+                track_res = model.track(img2, imgsz=size, conf=thr, verbose=False, persist=True, tracker='botsort-reid.yaml', half=_USE_HALF)  # type: ignore
                 if track_res:
                     r = track_res[0]
                 else:
@@ -556,16 +848,14 @@ def realtime_segment(req: RTSegmentRequest, request: Request):
             if not _HAVE_YOLOE:
                 return {'instances': []}
             model = _yoloe_model
-            try:
-                if hasattr(model, 'set_classes') and req.ov_labels:
-                    model.set_classes(req.ov_labels)  # type: ignore
-            except Exception as e:
-                print('[realtime] yolo-e set_classes failed:', e)
+            # Set textual classes using safe helper for MPS compatibility
+            if req.ov_labels:
+                safe_set_classes_yoloe(model, req.ov_labels)
 
         # Use track() instead of predict() to get consistent tracking IDs
         try:
             # Track with ByteTrack + ReID for consistent IDs across detect/segment
-            track_res = model.track(img2, imgsz=size, conf=thr, verbose=False, persist=True, tracker='botsort-reid.yaml')  # type: ignore
+            track_res = model.track(img2, imgsz=size, conf=thr, verbose=False, persist=True, tracker='botsort-reid.yaml', half=_USE_HALF)  # type: ignore
             if track_res:
                 r = track_res[0]
             else:
@@ -884,6 +1174,7 @@ if __name__ == '__main__':
     parser.add_argument('--imgsz', type=int, default=_DEFAULT_IMGSZ)
     parser.add_argument('--threshold', type=float, default=_DEFAULT_THRESH)
     parser.add_argument('--device', type=str, default=_DEVICE, choices=['auto', 'cpu', 'mps', 'cuda'])
+    parser.add_argument('--half', action='store_true', help='Use FP16 half precision (can help with MPS/CUDA)')
     args = parser.parse_args()
 
     _CLI_OV_MODEL_SPEC = args.ov_model
@@ -891,6 +1182,18 @@ if __name__ == '__main__':
     _DEFAULT_IMGSZ = int(args.imgsz)
     _DEFAULT_THRESH = float(args.threshold)
     _DEVICE = args.device
+    _USE_HALF = args.half
+
+    # Verify MPS setup if using MPS
+    if _DEVICE == 'mps' or (_DEVICE == 'auto' and torch.backends.mps.is_available()):
+        print(f"[realtime] PyTorch version: {torch.__version__}")
+        print(f"[realtime] MPS available: {torch.backends.mps.is_available()}")
+        print(f"[realtime] MPS built: {torch.backends.mps.is_built()}")
+        print(f"[realtime] Default dtype: {torch.get_default_dtype()}")
+        print(f"[realtime] Half precision (FP16): {_USE_HALF}")
+        if _DEVICE == 'auto':
+            _DEVICE = 'mps'
+            print("[realtime] Auto-detected MPS device")
 
     # Preload both models so the first call is responsive
     _lazy_load_yoloe()
