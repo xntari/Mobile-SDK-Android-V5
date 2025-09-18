@@ -38,7 +38,7 @@ class DJIControllerApp {
       frame: true,
       resizable: true,
       alwaysOnTop: false,
-      title: 'DJI Controller Interface',
+      title: 'Controller Interface',
       backgroundColor: '#0D1117',
       show: false, // Don't show until ready
     });
@@ -87,7 +87,7 @@ class DJIControllerApp {
       });
 
       this.wsClient.on('open', () => {
-        console.log('✅ Connected to DJI Bridge'); // Essential bridge log
+        console.log('✅ Connected to Android Bridge'); // Essential bridge log
         this.quickRestartPending = false;
         this.connectionStatus = 'connected';
         this.sendConnectionStatus();
@@ -147,13 +147,13 @@ class DJIControllerApp {
             }
           }
         } catch (error) {
-          console.error('❌ Error processing DJI Bridge message:', error); // Essential bridge log
+          console.error('❌ Error processing Android Bridge message:', error); // Essential bridge log
         }
       });
 
       this.wsClient.on('close', () => {
         if (!this.suppressNextCloseLog) {
-          console.log('❌ Disconnected from DJI Bridge'); // Essential bridge log
+          console.log('❌ Disconnected from Android Bridge'); // Essential bridge log
         }
         this.suppressNextCloseLog = false;
         if (this.suppressNextCloseStatus || this.quickRestartPending) {
@@ -176,7 +176,7 @@ class DJIControllerApp {
         const msg = String(error && (error as any).message || '');
         if (code === 'WS_ERR_UNEXPECTED_RSV_1' || code === 'WS_ERR_UNEXPECTED_RSV_2_3' || msg.includes('Invalid WebSocket frame')) {
           // Gracefully recover from sporadic RSV1 framing errors without user-visible disconnect churn
-          console.warn('⚠️ DJI Bridge framing issue; restarting WebSocket quietly');
+          console.warn('WARNING: Android Bridge framing issue; restarting WebSocket quietly');
           // Keep UI as is; optionally mark as 'reconnecting' without hiding UI
           this.connectionStatus = 'reconnecting';
           this.sendConnectionStatus();
@@ -187,13 +187,13 @@ class DJIControllerApp {
           setTimeout(() => this.setupWebSocketConnection(), 200);
           return;
         }
-        console.error('❌ DJI Bridge WebSocket error:', error); // Essential bridge log
+        console.error('Error: Android Bridge WebSocket error:', error); // Essential bridge log
         this.connectionStatus = 'error';
         this.sendConnectionStatus();
       });
 
     } catch (error) {
-      console.error('❌ Failed to create DJI Bridge WebSocket connection:', error); // Essential bridge log
+      console.error('Error: Failed to create Android Bridge WebSocket connection:', error); // Essential bridge log
       this.connectionStatus = 'error';
       this.sendConnectionStatus();
     }

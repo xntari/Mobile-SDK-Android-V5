@@ -12,10 +12,6 @@ Endpoints
   -> { instances: [{points:[{x,y}...], score?, label?}] }
   - Uses prompt‑free YOLO‑E; returns masks polygons if available, else box quads
 
-- POST /realtime/prompt  { image, boxes:[{x1,y1,x2,y2}], ov_labels?, threshold?, img_size? }
-  -> { boxes: [{x1,y1,x2,y2,score?,label?}] }
-  - Visual prompt: tries native prompt API, else crops per box and refines
-
 - POST /realtime/classify { image, top_k?, img_size? }
   -> { classes: [{label, score}] }
   - Derives classes from prompt‑free detections by aggregating scores per label
@@ -694,12 +690,7 @@ class RTSegmentRequest(BaseModel):
     ov_labels: list[str] | None = None
 
 
-class RTPromptDetectRequest(BaseModel):
-    image: str
-    boxes: List[Dict[str, float]]  # [{x1,y1,x2,y2}] normalized
-    threshold: float | None = None
-    img_size: int | None = None
-    ov_labels: list[str] | None = None
+## (Removed) Image Prompt request schemas and endpoints were deprecated in favor of LockTrack
 
 
 class RTClassifyRequest(BaseModel):
@@ -993,153 +984,10 @@ def realtime_segment(req: RTSegmentRequest, request: Request):
         return {'instances': []}
 
 
-@app.post('/realtime/prompt')
-def realtime_prompt(req: RTPromptDetectRequest):
-    try:
-        img = decode_image_to_pil(req.image)
-    except Exception:
-        return {'boxes': []}
+## (Removed) /realtime/prompt endpoint deprecated — use /realtime/locktrack on LockTrack server
 
 
-class RTPromptImageRequest(BaseModel):
-    image: str
-    prompt_image: str
-    threshold: float | None = None
-    img_size: int | None = None
-
-
-@app.post('/realtime/prompt_image')
-def realtime_prompt_image(req: RTPromptImageRequest, request: Request):
-    sid = request.headers.get('x-client-session') or 'no-sid'
-    used_kw = 'none'
-    pw = ph = 0
-    out: List[Dict[str, Any]] = []
-    try:
-        try:
-            img = decode_image_to_pil(req.image)
-            prompt_img = decode_image_to_pil(req.prompt_image)
-            pw, ph = prompt_img.size
-        except Exception as e0:
-            print(f"[realtime][PROMPT_IMG][sid={sid}] decode error: {e0}")
-            return {'boxes': []}
-        thr = float(req.threshold) if req.threshold is not None else _DEFAULT_THRESH
-        size = int(req.img_size) if req.img_size else _DEFAULT_IMGSZ
-        if not _HAVE_YOLOE:
-            _lazy_load_yoloe()
-        if not _HAVE_YOLOE:
-            print(f"[realtime][PROMPT_IMG][sid={sid}] yolo-e not available")
-            return {'boxes': []}
-        # Write both target and prompt to temp files; predictor expects file paths
-        target_tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg'); target_tmp.close()
-        refer_tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg'); refer_tmp.close()
-        # Do NOT downscale the target for prompt matching; keep original snapshot pixels
-        img_to_save = img
-        img_to_save.save(target_tmp.name, format='JPEG', quality=95)
-        prompt_img.save(refer_tmp.name, format='JPEG', quality=95)
-        res = None
-        try:
-            try:
-                from ultralytics.models.yolo.yoloe.predict_vp import YOLOEVPSegPredictor  # type: ignore
-                predictor_src = 'ultralytics.models.yolo.yoloe.predict_vp.YOLOEVPSegPredictor'
-            except Exception:
-                from ultralytics.models.yolo.yoloe import YOLOEVPSegPredictor  # type: ignore
-                predictor_src = 'ultralytics.models.yolo.yoloe.YOLOEVPSegPredictor'
-            vp = {
-                'bboxes': np.array([[0.0, 0.0, float(pw), float(ph)]], dtype=np.float32),
-                'cls': np.array([0], dtype=np.int64),
-            }
-            thr_vp = max(0.01, min(0.10, thr))
-            try:
-                tsz = os.path.getsize(target_tmp.name); rsz = os.path.getsize(refer_tmp.name)
-                print(f"[realtime][PROMPT_IMG][sid={sid}] files target={target_tmp.name}({tsz}B) refer={refer_tmp.name}({rsz}B)")
-            except Exception:
-                pass
-            print(f"[realtime][PROMPT_IMG][sid={sid}] predictor={predictor_src} ultralytics={_ULTRA_VER} api={_YOLOE_API} vp_cls={vp['cls'].tolist()} vp_box={vp['bboxes'].tolist()[0]}")
-            res = _yoloe_model.predict(target_tmp.name, imgsz=size, conf=thr_vp, verbose=False, refer_image=refer_tmp.name, visual_prompts=vp, predictor=YOLOEVPSegPredictor)  # type: ignore
-            used_kw = 'refer_image(file)+visual_prompts+YOLOEVPSegPredictor'
-        except Exception as e_vp:
-            try:
-                # Fallback older APIs (less ideal)
-                res = _yoloe_model.predict(target_tmp.name, imgsz=size, conf=thr, verbose=False, prompts={'images': [refer_tmp.name]})  # type: ignore
-                used_kw = 'prompts.images(file)'
-            except Exception as e1:
-                try:
-                    res = _yoloe_model.predict(target_tmp.name, imgsz=size, conf=thr, verbose=False, image_prompts=[refer_tmp.name])  # type: ignore
-                    used_kw = 'image_prompts(file)'
-                except Exception as e2:
-                    used_kw = 'none'
-                    res = _yoloe_model.predict(target_tmp.name, imgsz=size, conf=thr, verbose=False)
-        # Parse result
-        r = res[0] if res else None
-        if not r:
-            print(f"[realtime][PROMPT_IMG][sid={sid}] no result r (kw={used_kw})")
-            return {'boxes': []}
-        W, H = img_to_save.size
-        names = getattr(r, 'names', {})
-        b = getattr(r, 'boxes', None)
-        if b is not None and getattr(b, 'xyxy', None) is not None:
-            xyxy = b.xyxy.cpu().numpy().tolist()
-            conf = b.conf.cpu().numpy().tolist() if getattr(b, 'conf', None) is not None else []
-            cls = b.cls.cpu().numpy().tolist() if getattr(b, 'cls', None) is not None else []
-            ids_raw = getattr(b, 'id', None)
-            ids = []
-            if ids_raw is not None:
-                try:
-                    ids = ids_raw.int().cpu().numpy().tolist()
-                    ids = [int(v[0] if isinstance(v, (list, tuple)) else v) for v in ids]
-                except Exception:
-                    ids = []
-            for i, p in enumerate(xyxy):
-                try:
-                    x1,y1,x2,y2 = p
-                except Exception:
-                    continue
-                sc = float(conf[i]) if i < len(conf) else None
-                cid = None
-                if i < len(cls):
-                    try:
-                        raw = cls[i]
-                        cid = int(raw[0] if isinstance(raw,(list,tuple)) else raw)
-                    except Exception:
-                        cid = None
-                lbl = None
-                try:
-                    if isinstance(names, dict) and isinstance(cid, int) and cid in names:
-                        lbl = str(names[cid])
-                    elif isinstance(names, (list, tuple)) and isinstance(cid, int) and 0 <= cid < len(names):
-                        lbl = str(names[cid])
-                except Exception:
-                    lbl = None
-                tid = ids[i] if i < len(ids) else None
-                if tid is not None and lbl:
-                    disp = _display_id_for(sid, lbl, tid)
-                    if disp is not None:
-                        lbl = f"{lbl}_{disp}"
-                out.append({
-                    'x1': max(0.0, min(1.0, float(x1)/W)),
-                    'y1': max(0.0, min(1.0, float(y1)/H)),
-                    'x2': max(0.0, min(1.0, float(x2)/W)),
-                    'y2': max(0.0, min(1.0, float(y2)/H)),
-                    **({'score': sc} if sc is not None else {}),
-                    **({'label': lbl} if lbl else {}),
-                    **({'track_id': tid} if tid is not None else {}),
-                })
-        return {'boxes': out}
-    except Exception as e:
-        print('[realtime] prompt_image error:', e)
-        return {'boxes': []}
-    finally:
-        try:
-            print(f"[realtime][PROMPT_IMG][sid={sid}] size={req.img_size or _DEFAULT_IMGSZ} prompt=({pw}x{ph}) kw={used_kw} -> {len(out)} boxes")
-            # cleanup
-            for p in (locals().get('target_tmp'), locals().get('refer_tmp')):
-                try:
-                    if p and os.path.isfile(p.name):
-                        os.unlink(p.name)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+## (Removed) /realtime/prompt_image endpoint deprecated — use /realtime/locktrack on LockTrack server
 
 
 @app.post('/realtime/classify')

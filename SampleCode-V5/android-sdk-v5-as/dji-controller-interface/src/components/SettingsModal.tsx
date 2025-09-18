@@ -5,6 +5,7 @@ type Endpoints = {
   visionDescribe: string;
   visionGeneral: string;
   visionRealtime: string;
+  locktrack: string; // base URL (host:port), client adds /realtime/locktrack
   planner: string;
 };
 
@@ -21,6 +22,7 @@ function loadEndpoints(): Endpoints {
     visionDescribe: (globalThis as any).__DESCRIBE_URL__ || 'http://127.0.0.1:9001/describe',
     visionGeneral: (globalThis as any).__GENERAL_URL__ || 'http://127.0.0.1:9003/general/analyze',
     visionRealtime: (globalThis as any).__REALTIME_URL__ || 'http://127.0.0.1:9004/realtime/detect',
+    locktrack: (globalThis as any).__LOCKTRACK_BASE__ || 'http://127.0.0.1:9010',
     planner: (globalThis as any).__PLANNER_URL__ || 'http://127.0.0.1:9002/plan',
   };
 }
@@ -31,6 +33,7 @@ function saveEndpoints(e: Endpoints) {
   (globalThis as any).__DESCRIBE_URL__ = e.visionDescribe;
   (globalThis as any).__GENERAL_URL__ = e.visionGeneral;
   (globalThis as any).__REALTIME_URL__ = e.visionRealtime;
+  (globalThis as any).__LOCKTRACK_BASE__ = e.locktrack;
   (globalThis as any).__PLANNER_URL__ = e.planner;
 }
 
@@ -41,7 +44,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, ini
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/50 z-50 flex items-start justify-center">
+    <div className="fixed inset-0 bg-black/50 z-[9999] flex items-start justify-center">
       <div className="glass-panel mt-10 w-[560px] p-3">
         <div className="flex items-center justify-between mb-2">
           <div className="text-sm text-gray-300">Settings</div>
@@ -65,6 +68,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, ini
             </label>
             <label className="block">Realtime Vision URL (YOLO)
               <input className="w-full bg-gray-800 text-xs px-2 py-1 rounded mt-1" value={ep.visionRealtime} onChange={e=>setEp({...ep, visionRealtime:e.target.value})} />
+            </label>
+            <label className="block">LockTrack Base URL (host:port)
+              <input className="w-full bg-gray-800 text-xs px-2 py-1 rounded mt-1" value={ep.locktrack} onChange={e=>setEp({...ep, locktrack:e.target.value})} />
+              <div className="text-[10px] text-gray-500 mt-1">Client uses <code className="px-1 bg-gray-800 rounded">/realtime/locktrack</code> on this base.</div>
             </label>
             <label className="block">Planner URL
               <input className="w-full bg-gray-800 text-xs px-2 py-1 rounded mt-1" value={ep.planner} onChange={e=>setEp({...ep, planner:e.target.value})} />
