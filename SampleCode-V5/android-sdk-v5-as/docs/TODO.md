@@ -9,6 +9,8 @@ Immediate (validate with user after each):
 - Dual‑camera PiP + side‑by‑side with persisted PiP position/size; overlay routing
 - Live Map robustness (drone/home even if home unknown); add Set Home action (bridge)
 - Frame Bus + Core ML detector/tracker spike (YOLOv11n/s + Vision tracker) for one camera; live lock‑on boxes
+- LockTrack: add /realtime/locktrack server (heatmap‑first, single view)
+- LockTrack UI: replace broken "Image Prompt" with Lock‑On flow; heatmap toggle
+- LockTrack perf: enforce float32 on MPS; tune threshold/pad/scales for 3–5 FPS
 
 Always keep this in sync with `docs/ROADMAP.md` during PRs.
-
