@@ -224,6 +224,8 @@ python tools/vision_realtime_server.py --model ./yolov8n.pt --seg-model ./yolov8
 # POST /realtime/pose      -> { poses: [{keypoints:[{x,y,conf?}]}] }
 # POST /realtime/obb       -> { obb: [{points:[{x,y}x4], score?, label?}] }
 # POST /realtime/classify  -> { classes: [{label, score}] }
+
+Note: legacy image-prompt endpoints (`/realtime/prompt`, `/realtime/prompt_image`) are removed. Use the LockTrack server.
 ```
 
 In the app: open Components → Vision Realtime (YOLO), select a Mode (Detect | Segment | Pose | Classify | Oriented Box), and click Start. Overlays draw on the selected Snapshot Camera (FPV or H20N). Leave Classes blank to detect all YOLO labels. In Oriented Box mode, the Classes list filters OBB results the same way.
@@ -233,6 +235,32 @@ In the app: open Components → Vision Realtime (YOLO), select a Mode (Detect | 
 pip install fastapi uvicorn pillow ultralytics
 python tools/vision_general_server.py
 ```
+
+### Start the LockTrack server (visual lock‑on)
+```
+python -m venv .venv && source .venv/bin/activate
+pip install --upgrade pip
+pip install fastapi uvicorn pillow torch torchvision numpy
+
+# Default
+python tools/vision_locktrack_server.py
+
+# Custom port / device
+LOCKTRACK_PORT=9010 LOCKTRACK_DEVICE=mps python tools/vision_locktrack_server.py
+
+# Endpoints
+# POST /realtime/locktrack/lock  -> { track_id, init_box, score, status, heatmap? }
+# POST /realtime/locktrack/step  -> { box, score, status, heatmap? }
+# POST /realtime/locktrack/add_view -> { num_views:1 }
+# POST /realtime/locktrack/unlock -> { ack:true }
+
+# Example (lock with box)
+curl -s -X POST http://127.0.0.1:9010/realtime/locktrack/lock \
+  -H 'Content-Type: application/json' \
+  -d '{"image":"<base64>", "box": {"x":0.4,"y":0.3,"w":0.2,"h":0.2}, "return_heatmap":true}' | jq
+```
+
+See LOCKTRACK.md for design and roadmap.
 
 ### UI features relevant to planner/vision
 - Agent panel: free‑floating, resizable, selectable text; panes persist sizes (Program/Execution/Plan)
