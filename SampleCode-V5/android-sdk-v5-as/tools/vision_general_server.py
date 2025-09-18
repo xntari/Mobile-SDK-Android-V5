@@ -82,7 +82,7 @@ def _lazy_load_qwen():
         _HAVE_QWEN = False
 
 
-def _scale_image(img: Image.Image, max_side: int = 1024) -> Image.Image:
+def _scale_image(img: Image.Image, max_side: int = 320) -> Image.Image:
     if max(img.size) <= max_side:
         return img
     scale = max_side / max(img.size)

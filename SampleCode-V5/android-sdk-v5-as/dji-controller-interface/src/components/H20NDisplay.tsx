@@ -1144,8 +1144,9 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
               const palette = ['#10B981','#60A5FA','#F59E0B','#EF4444','#8B5CF6','#14B8A6','#F472B6','#22C55E',
                               '#FBBF24', '#A78BFA', '#34D399', '#FB7185', '#94A3B8', '#C084FC', '#2DD4BF', '#FCA5A5'];
 
-              // Use global ID for unique colors across all objects
-              const color = colorizeById ? palette[globalIdCounter % palette.length] : '#10B981';
+              // Use track_id from server for persistent tracking colors
+              const colorIndex = (m as any).track_id !== undefined ? (m as any).track_id : globalIdCounter;
+              const color = colorizeById ? palette[colorIndex % palette.length] : '#10B981';
 
               allLabels.push({
                 type: 'mask',
@@ -1171,8 +1172,9 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
               const palette = ['#10B981','#60A5FA','#F59E0B','#EF4444','#8B5CF6','#14B8A6','#F472B6','#22C55E',
                               '#FBBF24', '#A78BFA', '#34D399', '#FB7185', '#94A3B8', '#C084FC', '#2DD4BF', '#FCA5A5'];
 
-              // Use global ID for unique colors across all objects
-              const color = colorizeById ? palette[globalIdCounter % palette.length] : '#10B981';
+              // Use track_id from server for persistent tracking colors
+              const colorIndex = d.track_id !== undefined ? d.track_id : globalIdCounter;
+              const color = colorizeById ? palette[colorIndex % palette.length] : '#10B981';
 
               allLabels.push({
                 type: 'detection',

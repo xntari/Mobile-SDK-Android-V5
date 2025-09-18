@@ -183,6 +183,7 @@ export type Mask = {
   points: Array<{ x: number; y: number }>; // normalized [0,1]
   score?: number;
   label?: string;
+  track_id?: number;
 };
 
 export interface RealtimeSegmentRequest {
@@ -213,7 +214,8 @@ export async function analyzeRealtimeSegment(req: RealtimeSegmentRequest & { sig
     const masks: Mask[] = instances.map((ins: any) => ({
       points: Array.isArray(ins.points) ? ins.points.map((p: any) => ({ x: clamp01(p.x), y: clamp01(p.y) })) : [],
       score: typeof ins.score === 'number' ? ins.score : undefined,
-      label: typeof ins.label === 'string' ? ins.label : undefined
+      label: typeof ins.label === 'string' ? ins.label : undefined,
+      track_id: typeof ins.track_id === 'number' ? ins.track_id : undefined
     })).filter((m: Mask) => m.points.length >= 3);
     return { masks, meta: { backend: 'http', url } };
   } catch (e) {

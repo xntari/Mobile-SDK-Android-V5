@@ -4,9 +4,9 @@
 tracker_type: botsort # tracker type, ['botsort', 'bytetrack']
 # With erratic motion, good detections can dip in score; ByteTrack/BoT-SORT logic uses two-stage association with a lower secondary threshold—tune these so you don’t drop tracks during fast slews. 
 track_high_thresh: 0.4 # (0.35–0.45) threshold for the first association
-track_low_thresh: 0.1 # ( 0.05–0.10) threshold for the second association
-new_track_thresh: 0.55 # (0.5–0.6) -Be stricter about spawning new tracks to avoid ID switches while the target re-appears post-blur/occlusion. (Raise only if you have enough confident detections.) threshold for init new track if the detection does not match any tracks
-track_buffer: 100 # buffer to calculate the time when to remove tracks (90–150 Keeps tracks “alive” longer through brief drops/occlusions caused by violent camera motion so IDs can be re-acquired. Ultralytics track docs also note the buffer as a key knob.
+track_low_thresh: 0.05 # ( 0.05–0.10) threshold for the second association
+new_track_thresh: 0.6 # (0.5–0.6) -Be stricter about spawning new tracks to avoid ID switches while the target re-appears post-blur/occlusion. (Raise only if you have enough confident detections.) threshold for init new track if the detection does not match any tracks
+track_buffer: 250 # buffer to calculate the time when to remove tracks (90–150 Keeps tracks “alive” longer through brief drops/occlusions caused by violent camera motion so IDs can be re-acquired. Ultralytics track docs also note the buffer as a key knob.
 match_thresh: 0.75 # threshold for matching tracks Slightly loosen IoU gating so the association can rely more on appearance when motion blur or GMC error hurts box overlap. BoT-SORT explicitly fuses IoU with cosine distance. (0.75–0.85)
 fuse_score: True # Whether to fuse confidence scores with the iou distances before matching
 # min_box_area: 10  # threshold for min box areas(for tracker evaluation, not used for now)
@@ -16,7 +16,7 @@ fuse_score: True # Whether to fuse confidence scores with the iou distances befo
 gmc_method: orb # method of global motion compensation ORB tends to hold up better than KLT sparse optical flow under fast pans/zoom/roll, which are common on gimbal footage. (Community trackers often use ORB or full videostab modules for large motion.)
 # ReID model related thresh (not supported yet)
 proximity_thresh: 0.25
-appearance_thresh: 0.25
+appearance_thresh: 0.15
 with_reid: True
 # Make sure appearance cues really participate in the association (IoU ⊕ cosine). This is core to BoT-SORT’s robustness.  
 fuse_score: True
