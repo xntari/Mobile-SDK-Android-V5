@@ -78,6 +78,21 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
   const FREE_LOOK_STEP_TIMEOUT_MS = 700;
   const [hmCmap, setHmCmap] = React.useState<string>(()=>{ try { return localStorage.getItem('locktrack.hmCmap') || 'jet'; } catch {} return 'jet'; });
   const [hmOpacity, setHmOpacity] = React.useState<number>(()=>{ try { const v = JSON.parse(localStorage.getItem('locktrack.hmOpacity')||'0.35'); if (typeof v==='number') return v; } catch {} return 0.35; });
+  const trackingActiveRef = React.useRef<boolean>(false);
+  const [trackingActive, setTrackingActive] = React.useState<boolean>(false);
+
+  React.useEffect(() => {
+    if (!trackId && trackingActiveRef.current) {
+      trackingActiveRef.current = false;
+      setTrackingActive(false);
+    }
+  }, [trackId]);
+
+  React.useEffect(() => () => {
+    trackingActiveRef.current = false;
+  }, []);
+
+  const delay = React.useCallback((ms: number) => new Promise(resolve => setTimeout(resolve, ms)), []);
 
   const sendBridge = React.useCallback(async (command: any) => {
     try {
@@ -255,25 +270,39 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
     }
   };
 
-  const doStep = async () => {
-    console.log('[LockTrack] Step button pressed', { trackId });
-    setPromptInfo('step: pressed');
-    try {
-      if (!trackId) { setPromptInfo('no track_id; Lock-On first'); return; }
+  const performStep = React.useCallback(async (origin: 'manual' | 'loop'): Promise<boolean> => {
+    if (!trackId) {
+      if (origin === 'manual') setPromptInfo('no track_id; Lock-On first');
+      return false;
+    }
+
+    if (origin === 'manual') {
+      console.log('[LockTrack] Step button pressed', { trackId });
+    }
+    if (origin === 'manual') {
       console.log('[LockTrack] Step: capturing snapshot', { trackId });
-      setPromptInfo('step: sending snapshot...');
+    }
+
+    setPromptInfo(`${origin === 'manual' ? 'step' : 'tracking'}: sending snapshot...`);
+
+    try {
       const img = await getSnapshot();
       const controller = new AbortController();
       abortRef.current = controller;
       const out = await lockTrackStep({ track_id: trackId, image: img, return_heatmap: showHeatmap, signal: controller.signal, image_max_side: maxSide>0?maxSide:undefined, heatmap_cmap: hmCmap });
-      console.log('[LockTrack] Step: server response', out);
+      if (origin === 'manual') {
+        console.log('[LockTrack] Step: server response', out);
+      }
+
       const b = out.box;
       setLastBox(b);
       setStatus(out.status);
       setBoxes?.([{ x1: b.x, y1: b.y, x2: b.x + b.w, y2: b.y + b.h, score: out.score, label: `lock` }]);
+
       const cx = b.x + b.w * 0.5;
       const cy = b.y + b.h * 0.5;
       let promptExtra = '';
+
       if (trackMode === 'look_at') {
         const now = Date.now();
         if (now - lookAtCooldownRef.current < 550) {
@@ -333,7 +362,8 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
           promptExtra = ' (centered)';
         }
       }
-      setPromptInfo(`step: ${out.status}, score ${out.score.toFixed(2)}${promptExtra}`);
+
+      setPromptInfo(`${origin === 'manual' ? 'step' : 'tracking'}: ${out.status}, score ${out.score.toFixed(2)}${promptExtra}`);
       if (showHeatmap && out.heatmap) {
         const hm = `data:image/png;base64,${out.heatmap}`;
         setLastHeatmap(hm);
@@ -341,10 +371,42 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
       } else if (!showHeatmap) {
         setHeatmap?.(null);
       }
+      return true;
     } catch (e) {
       const msg = String(e instanceof Error ? e.message : e);
       console.warn('[VisionRT] step failed:', e);
-      setPromptInfo(`step error: ${msg}`);
+      setPromptInfo(`${origin === 'manual' ? 'step' : 'tracking'} error: ${msg}`);
+      return false;
+    }
+  }, [trackId, getSnapshot, showHeatmap, maxSide, hmCmap, setLastBox, setStatus, setBoxes, trackMode, ensureFreeLookSession, stopFreeLookSession, deadZone, vxGain, sendBridge, scheduleFreeLookStop, setHeatmap, setPromptInfo]);
+
+  const doStep = async () => {
+    await performStep('manual');
+  };
+
+  const runTrackingLoop = React.useCallback(async () => {
+    while (trackingActiveRef.current) {
+      const ok = await performStep('loop');
+      if (!trackingActiveRef.current) break;
+      await delay(ok ? 200 : 500);
+    }
+  }, [performStep, delay]);
+
+  const toggleTracking = () => {
+    if (!trackId) {
+      setPromptInfo('no track_id; Lock-On first');
+      return;
+    }
+    if (trackingActiveRef.current) {
+      trackingActiveRef.current = false;
+      setTrackingActive(false);
+      setPromptInfo('tracking stopped');
+      try { abortRef.current?.abort(); } catch {}
+    } else {
+      trackingActiveRef.current = true;
+      setTrackingActive(true);
+      setPromptInfo('tracking started');
+      runTrackingLoop().catch(err => console.warn('[LockTrack] tracking loop error', err));
     }
   };
 
@@ -427,7 +489,15 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
           <input type="file" accept="image/*" className="hidden" onChange={onUploadFile} /> Upload image
         </label>
         <button className="px-2 py-1 rounded bg-teal-700 hover:bg-teal-600" onClick={doLock}>Lock‑On</button>
-        <button type="button" className="px-2 py-1 rounded bg-blue-700 hover:bg-blue-600" onClick={doStep} disabled={!trackId}>Step</button>
+        <button type="button" className="px-2 py-1 rounded bg-blue-700 hover:bg-blue-600" onClick={doStep} disabled={!trackId || trackingActive}>Step</button>
+        <button
+          type="button"
+          className={`px-2 py-1 rounded ${trackingActive ? 'bg-orange-700 hover:bg-orange-600' : 'bg-green-700 hover:bg-green-600'}`}
+          onClick={toggleTracking}
+          disabled={!trackId}
+        >
+          {trackingActive ? 'Stop Tracking' : 'Track On'}
+        </button>
         <button type="button" className="px-2 py-1 rounded bg-amber-700 hover:bg-amber-600" onClick={doAddView} disabled={!trackId}>Add View</button>
         <button type="button" className="px-2 py-1 rounded bg-red-700 hover:bg-red-600" onClick={doUnlock} disabled={!trackId}>Unlock</button>
       </div>
