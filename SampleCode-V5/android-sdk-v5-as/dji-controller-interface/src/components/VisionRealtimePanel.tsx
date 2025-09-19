@@ -1,11 +1,18 @@
 import React from 'react';
 import { Panel, createPanelControls } from './Panel';
 import { analyzeRealtime, analyzeRealtimeSegment, getRealtimeVisionUrl } from '../agent/visionClient';
-import { lockTrackLock, lockTrackStep, lockTrackAddView, lockTrackUnlock, getLocktrackBase } from '../agent/locktrackClient';
+import { lockTrackLock, lockTrackStep, lockTrackAddView, lockTrackUnlock, lockTrackRemoveView, getLocktrackBase } from '../agent/locktrackClient';
 import type { Detection } from '../agent/visionClient';
 import { bridgeManager } from '../bridgeManager';
 
 export const visionRTPanelControls = createPanelControls('visionrt.panel', 'visionrtPanelVisibilityChange');
+
+const MAX_LOCKTRACK_VIEWS = 5;
+
+interface LockTrackView {
+  id: number;
+  thumb: string;
+}
 
 export interface VisionRealtimePanelProps {
   getSnapshot: () => Promise<string>;
@@ -34,6 +41,8 @@ interface LockTrackSectionProps {
   setHeatmapOpacity?: (value: number) => void;
   imgSize: number;
   abortRef: React.MutableRefObject<AbortController | null>;
+  views: LockTrackView[];
+  setViews: React.Dispatch<React.SetStateAction<LockTrackView[]>>;
 }
 
 const LockTrackSection: React.FC<LockTrackSectionProps> = ({
@@ -51,6 +60,8 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
   setHeatmapOpacity,
   imgSize,
   abortRef,
+  views,
+  setViews,
 }) => {
   const [trackId, setTrackId] = React.useState<string | null>(null);
   const [status, setStatus] = React.useState<string>('idle');
@@ -80,6 +91,45 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
   const [hmOpacity, setHmOpacity] = React.useState<number>(()=>{ try { const v = JSON.parse(localStorage.getItem('locktrack.hmOpacity')||'0.35'); if (typeof v==='number') return v; } catch {} return 0.35; });
   const trackingActiveRef = React.useRef<boolean>(false);
   const [trackingActive, setTrackingActive] = React.useState<boolean>(false);
+
+  const clamp01 = React.useCallback((v: number) => Math.max(0, Math.min(1, v)), []);
+
+  const createThumbFromBox = React.useCallback(async (imageDataUrl: string, box: { x: number; y: number; w: number; h: number }): Promise<string | null> => {
+    if (!imageDataUrl) return null;
+    const norm = {
+      x: clamp01(box.x ?? 0),
+      y: clamp01(box.y ?? 0),
+      w: clamp01(box.w ?? 1),
+      h: clamp01(box.h ?? 1),
+    };
+    if (norm.w <= 0 || norm.h <= 0) return null;
+    return await new Promise<string | null>((resolve) => {
+      const imgEl = new Image();
+      imgEl.onload = () => {
+        try {
+          const sx = Math.max(0, Math.floor(norm.x * imgEl.width));
+          const sy = Math.max(0, Math.floor(norm.y * imgEl.height));
+          const sw = Math.max(1, Math.floor(norm.w * imgEl.width));
+          const sh = Math.max(1, Math.floor(norm.h * imgEl.height));
+          const canvas = document.createElement('canvas');
+          canvas.width = sw;
+          canvas.height = sh;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(null);
+            return;
+          }
+          ctx.drawImage(imgEl, sx, sy, sw, sh, 0, 0, sw, sh);
+          resolve(canvas.toDataURL('image/jpeg', 0.95));
+        } catch (err) {
+          console.warn('[LockTrack] thumbnail crop failed:', err);
+          resolve(null);
+        }
+      };
+      imgEl.onerror = () => resolve(null);
+      imgEl.src = imageDataUrl;
+    });
+  }, [clamp01]);
 
   React.useEffect(() => {
     if (!trackId && trackingActiveRef.current) {
@@ -254,7 +304,25 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
       const b = out.init_box;
       setLastBox(b);
       setBoxes?.([{ x1: b.x, y1: b.y, x2: b.x + b.w, y2: b.y + b.h, score: typeof out.score==='number'? out.score : 1.0, label: `lock` }]);
-      setPromptInfo(`Lock ${out.status}${typeof out.score==='number' ? `, score ${out.score.toFixed(2)}` : ''}`);
+      let initialThumb: string | null = ref_image || null;
+      if (!initialThumb) {
+        if (box) {
+          initialThumb = await createThumbFromBox(img, box);
+        }
+        if (!initialThumb) {
+          initialThumb = await createThumbFromBox(img, b);
+        }
+      }
+      if (initialThumb) {
+        setViews([{ id: 0, thumb: initialThumb }]);
+        if (!promptImage) {
+          try { setPromptImage(initialThumb); } catch {}
+        }
+      } else {
+        setViews([]);
+      }
+      const viewInfo = typeof out?.num_views === 'number' ? ` (${out.num_views}/${MAX_LOCKTRACK_VIEWS} views)` : '';
+      setPromptInfo(`Lock ${out.status}${typeof out.score==='number' ? `, score ${out.score.toFixed(2)}` : ''}${viewInfo}`);
       console.log('[LockTrack] Lock: server response', out);
       if (showHeatmap && out.heatmap) {
         const hm = `data:image/png;base64,${out.heatmap}`;
@@ -262,6 +330,10 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
         setHeatmap?.(hm);
       } else if (!showHeatmap) {
         setHeatmap?.(null);
+      }
+      if (trackingActiveRef.current) {
+        trackingActiveRef.current = false;
+        setTrackingActive(false);
       }
     } catch (e) {
       const msg = String(e instanceof Error ? e.message : e);
@@ -278,6 +350,7 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
 
     if (origin === 'manual') {
       console.log('[LockTrack] Step button pressed', { trackId });
+      setPromptInfo('step: pressed');
     }
     if (origin === 'manual') {
       console.log('[LockTrack] Step: capturing snapshot', { trackId });
@@ -402,6 +475,7 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
       setTrackingActive(false);
       setPromptInfo('tracking stopped');
       try { abortRef.current?.abort(); } catch {}
+      void stopFreeLookSession();
     } else {
       trackingActiveRef.current = true;
       setTrackingActive(true);
@@ -417,14 +491,41 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
       if (promptImage) {
         const controller = new AbortController();
         abortRef.current = controller;
-        await lockTrackAddView({ track_id: trackId, ref_image: promptImage, signal: controller.signal });
-        setPromptInfo('added view (image)');
+        const res = await lockTrackAddView({ track_id: trackId, ref_image: promptImage, signal: controller.signal });
+        const newId = typeof res?.view_id === 'number' ? res.view_id : Date.now();
+        setViews(prev => {
+          const removed = Array.isArray(res?.removed_view_ids) ? new Set(res.removed_view_ids) : null;
+          let next = removed ? prev.filter(v => !removed.has(v.id)) : [...prev];
+          next = [...next, { id: newId, thumb: promptImage }];
+          const target = typeof res?.num_views === 'number' ? res.num_views : MAX_LOCKTRACK_VIEWS;
+          while (next.length > target) next.shift();
+          while (next.length > MAX_LOCKTRACK_VIEWS) next.shift();
+          return next;
+        });
+        const viewsInfo = typeof res?.num_views === 'number' ? ` (${res.num_views}/${MAX_LOCKTRACK_VIEWS} views)` : '';
+        setPromptInfo(`added view (image)${viewsInfo}`);
       } else if (lastBox) {
         const img = await getSnapshot();
         const controller = new AbortController();
         abortRef.current = controller;
-        await lockTrackAddView({ track_id: trackId, image: img, box: lastBox, signal: controller.signal });
-        setPromptInfo('added view (current box)');
+        const res = await lockTrackAddView({ track_id: trackId, image: img, box: lastBox, signal: controller.signal });
+        const thumb = await createThumbFromBox(img, lastBox);
+        const newId = typeof res?.view_id === 'number' ? res.view_id : Date.now();
+        if (thumb) {
+          setViews(prev => {
+            const removed = Array.isArray(res?.removed_view_ids) ? new Set(res.removed_view_ids) : null;
+            let next = removed ? prev.filter(v => !removed.has(v.id)) : [...prev];
+            next = [...next, { id: newId, thumb }];
+            const target = typeof res?.num_views === 'number' ? res.num_views : MAX_LOCKTRACK_VIEWS;
+            while (next.length > target) next.shift();
+            while (next.length > MAX_LOCKTRACK_VIEWS) next.shift();
+            return next;
+          });
+        } else if (Array.isArray(res?.removed_view_ids)) {
+          setViews(prev => prev.filter(v => !res.removed_view_ids.includes(v.id)));
+        }
+        const viewsInfo = typeof res?.num_views === 'number' ? ` (${res.num_views}/${MAX_LOCKTRACK_VIEWS} views)` : '';
+        setPromptInfo(`added view (current box)${viewsInfo}`);
       } else {
         setPromptInfo('provide a reference or lock first');
       }
@@ -432,6 +533,23 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
       const msg = String(e instanceof Error ? e.message : e);
       console.warn('[VisionRT] add_view failed:', e);
       setPromptInfo(`add_view error: ${msg}`);
+    }
+  };
+
+  const handleRemoveView = async (viewId: number) => {
+    if (!trackId) { setPromptInfo('no track_id; Lock-On first'); return; }
+    if (views.length <= 1) { setPromptInfo('keep at least one view'); return; }
+    try {
+      const controller = new AbortController();
+      abortRef.current = controller;
+      const res = await lockTrackRemoveView({ track_id: trackId, view_id: viewId, signal: controller.signal });
+      setViews(prev => prev.filter(v => v.id !== viewId));
+      const viewsInfo = typeof res?.num_views === 'number' ? ` (${res.num_views}/${MAX_LOCKTRACK_VIEWS} views)` : '';
+      setPromptInfo(`removed view${viewsInfo}`);
+    } catch (e) {
+      const msg = String(e instanceof Error ? e.message : e);
+      console.warn('[VisionRT] remove_view failed:', e);
+      setPromptInfo(`remove view error: ${msg}`);
     }
   };
 
@@ -449,6 +567,12 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
     setLastBox(null);
     setBoxes?.([]);
     setPromptInfo('unlocked');
+    setViews([]);
+    if (trackingActiveRef.current) {
+      trackingActiveRef.current = false;
+      setTrackingActive(false);
+      void stopFreeLookSession();
+    }
   };
 
   const onUploadFile: React.ChangeEventHandler<HTMLInputElement> = async (e) => {
@@ -511,6 +635,28 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
         <div>
           <div className="text-[10px] text-gray-400 mb-1">Heatmap (debug)</div>
           <img src={lastHeatmap} alt="heatmap" className="max-w-full max-h-40 border border-gray-600" />
+        </div>
+      )}
+      {views.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <div className="text-[10px] text-gray-400">Views ({views.length}/{MAX_LOCKTRACK_VIEWS})</div>
+          <div className="flex flex-wrap gap-2">
+            {views.map((view, idx) => (
+              <div key={`${view.id}-${idx}`} className="relative border border-gray-600 rounded overflow-hidden">
+                <img src={view.thumb} alt={`view-${idx + 1}`} className="w-16 h-16 object-cover" />
+                <button
+                  type="button"
+                  className="absolute top-0 right-0 bg-black bg-opacity-60 text-white text-[10px] px-1"
+                  onClick={() => handleRemoveView(view.id)}
+                  disabled={views.length <= 1}
+                  title={views.length <= 1 ? 'Keep at least one view' : 'Remove view'}
+                >
+                  ✕
+                </button>
+                <div className="text-[9px] text-gray-300 text-center w-16">V{idx + 1}</div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
       <div className="flex items-center gap-3 flex-wrap">
@@ -599,6 +745,7 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
     try { const raw = localStorage.getItem('visionrt.mode'); if (raw) return JSON.parse(raw); } catch {}
     return 'detect';
   });
+  const [lockViews, setLockViews] = React.useState<LockTrackView[]>([]);
 
   React.useEffect(() => {
     try { localStorage.setItem('visionrt.running', JSON.stringify(running)); } catch {}
@@ -677,6 +824,7 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
     setSelectedIndex(-1);
     setPromptImage(null);
     setPromptInfo('');
+    setLockViews([]);
   };
 
   // Store refs for values that need to be accessed in the loop
@@ -833,6 +981,8 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
           setHeatmapOpacity={setHeatmapOpacity}
           imgSize={imgSize}
           abortRef={abortRef}
+          views={lockViews}
+          setViews={setLockViews}
         />
       )}
 

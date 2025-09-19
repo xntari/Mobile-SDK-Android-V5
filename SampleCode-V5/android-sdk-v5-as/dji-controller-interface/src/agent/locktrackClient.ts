@@ -4,6 +4,7 @@ export type LockTrackLockResponse = {
   score?: number;
   status: 'locked' | 'searching';
   heatmap?: string; // base64 PNG
+  num_views?: number;
 };
 
 export type LockTrackStepResponse = {
@@ -11,6 +12,7 @@ export type LockTrackStepResponse = {
   score: number;
   status: 'tracking' | 'searching' | 'lost';
   heatmap?: string;
+  num_views?: number;
 };
 
 function deriveLocktrackUrl(): string {
@@ -103,7 +105,7 @@ export async function lockTrackAddView(params: {
   image?: string;
   box?: { x: number; y: number; w: number; h: number };
   signal?: AbortSignal;
-}): Promise<{ num_views: number } & Record<string, any>> {
+}): Promise<{ num_views: number; view_id?: number } & Record<string, any>> {
   const url = getLocktrackBase() + '/add_view';
   const res = await fetch(url, {
     method: 'POST',
@@ -127,6 +129,18 @@ export async function lockTrackUnlock(track_id: string, signal?: AbortSignal): P
     headers: { 'Content-Type': 'application/json' },
     signal,
     body: JSON.stringify({ track_id }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();
+}
+
+export async function lockTrackRemoveView(params: { track_id: string; view_id: number; signal?: AbortSignal }): Promise<{ num_views: number } & Record<string, any>> {
+  const url = getLocktrackBase() + '/remove_view';
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal: params.signal,
+    body: JSON.stringify({ track_id: params.track_id, view_id: params.view_id }),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return await res.json();
