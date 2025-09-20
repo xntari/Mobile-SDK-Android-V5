@@ -1,3 +1,5 @@
+export type LockTrackBoxSource = 'detector' | 'heatmap' | 'manual' | 'init' | 'none' | 'fused';
+
 export type LockTrackLockResponse = {
   track_id: string;
   init_box: { x: number; y: number; w: number; h: number };
@@ -5,6 +7,12 @@ export type LockTrackLockResponse = {
   status: 'locked' | 'searching';
   heatmap?: string; // base64 PNG
   num_views?: number;
+  box_source?: LockTrackBoxSource;
+  detector_track_id?: number | string;
+  detector_label?: string;
+  detector_score?: number;
+  similarity?: number;
+  miss_streak?: number;
 };
 
 export type LockTrackStepResponse = {
@@ -13,6 +21,14 @@ export type LockTrackStepResponse = {
   status: 'tracking' | 'searching' | 'lost';
   heatmap?: string;
   num_views?: number;
+  box_source?: LockTrackBoxSource;
+  detector_track_id?: number | string;
+  detector_label?: string;
+  detector_score?: number;
+  similarity?: number;
+  miss_streak?: number;
+  hint_similarity?: number;
+  hint_iou?: number;
 };
 
 function deriveLocktrackUrl(): string {
@@ -51,6 +67,9 @@ export async function lockTrackLock(params: {
   scales?: number[];
   image_max_side?: number;
   heatmap_cmap?: string;
+  det_track_id?: number | string;
+  det_score?: number;
+  det_label?: string;
   signal?: AbortSignal;
 }): Promise<LockTrackLockResponse> {
   const url = getLocktrackBase() + '/lock';
@@ -68,6 +87,9 @@ export async function lockTrackLock(params: {
       scales: params.scales,
       image_max_side: params.image_max_side,
       heatmap_cmap: params.heatmap_cmap,
+      det_track_id: params.det_track_id,
+      det_score: params.det_score,
+      det_label: params.det_label,
     }),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -80,6 +102,10 @@ export async function lockTrackStep(params: {
   return_heatmap?: boolean;
   image_max_side?: number;
   heatmap_cmap?: string;
+  hint_box?: { x: number; y: number; w: number; h: number };
+  hint_track_id?: number | string;
+  hint_score?: number;
+  hint_label?: string;
   signal?: AbortSignal;
 }): Promise<LockTrackStepResponse> {
   const url = getLocktrackBase() + '/step';
@@ -93,6 +119,10 @@ export async function lockTrackStep(params: {
       return_heatmap: !!params.return_heatmap,
       image_max_side: params.image_max_side,
       heatmap_cmap: params.heatmap_cmap,
+      hint_box: params.hint_box,
+      hint_track_id: params.hint_track_id,
+      hint_score: params.hint_score,
+      hint_label: params.hint_label,
     }),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);

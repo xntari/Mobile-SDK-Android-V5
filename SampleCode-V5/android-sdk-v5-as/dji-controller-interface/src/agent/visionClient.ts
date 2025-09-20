@@ -9,7 +9,11 @@ export type Detection = {
   y2: number; // normalized [0,1]
   score: number; // 0..1
   label?: string;
-  track_id?: number;
+  track_id?: number | string;
+  memory_label?: string;
+  memory_cluster_id?: string;
+  memory_similarity?: number;
+  yolo_label?: string;
 };
 
 export interface AnalyzeRequest {
@@ -141,6 +145,7 @@ export interface RealtimeDetectRequest {
   threshold?: number;
   classes?: string[];   // optional allowlist
   img_size?: number;    // optional server downscale control
+  searchDb?: boolean;
   signal?: AbortSignal; // optional abort
 }
 
@@ -158,6 +163,7 @@ export async function analyzeRealtime(req: RealtimeDetectRequest): Promise<Analy
         image: req.imageBase64,
         threshold: req.threshold ?? getThreshold(),
         img_size: req.img_size ?? 640,
+        ...(req.searchDb ? { search_db: true } : {}),
         ...(Array.isArray(req.classes) && req.classes.length > 0
           ? { ov_labels: req.classes }
           : {})
@@ -169,7 +175,11 @@ export async function analyzeRealtime(req: RealtimeDetectRequest): Promise<Analy
     const detections: Detection[] = boxes.map((b: any) => ({
       x1: clamp01(b.x1), y1: clamp01(b.y1), x2: clamp01(b.x2), y2: clamp01(b.y2),
       score: Number(b.score ?? 0), label: b.label ? String(b.label) : undefined,
-      track_id: typeof b.track_id === 'number' ? b.track_id : undefined
+      track_id: typeof b.track_id === 'number' || typeof b.track_id === 'string' ? b.track_id : undefined,
+      memory_label: b.memory_label ? String(b.memory_label) : undefined,
+      memory_cluster_id: b.memory_cluster_id ? String(b.memory_cluster_id) : undefined,
+      memory_similarity: typeof b.memory_similarity === 'number' ? Number(b.memory_similarity) : undefined,
+      yolo_label: b.yolo_label ? String(b.yolo_label) : undefined,
     }));
     return { detections, meta: { backend: 'http', url, httpBoxes: boxes.length } };
   } catch (e) {

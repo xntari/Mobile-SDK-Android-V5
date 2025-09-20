@@ -14,6 +14,7 @@ import { ConnectionStatus } from './ConnectionStatus';
 import { VisionPanel } from './VisionPanel';
 import { VisionRealtimePanel } from './VisionRealtimePanel';
 import { AgentPanel } from './AgentPanel';
+import { ObjectMemoryPanel } from './ObjectMemoryPanel';
 import { CameraPanel } from './CameraPanel';
 import { Panel } from './Panel';
 import { mapPanelControls, hsiPanelControls, controllerPanelControls } from './panelControls';
@@ -180,6 +181,8 @@ export const App: React.FC = () => {
               standalone={false}
             />
           </Panel>
+
+          <ObjectMemoryPanel defaultPosition={{ x: 20, y: 600 }} defaultSize={{ w: 420, h: 320 }} />
           
 
           {/* Controller HUD Panel */}

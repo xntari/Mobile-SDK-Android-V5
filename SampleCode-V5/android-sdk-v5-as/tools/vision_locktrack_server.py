@@ -211,6 +211,13 @@ PEAK_WINDOW_RADIUS_FRACTION = 0.5
 PEAK_REFINE_SHARPEN_POWER = 2.5
 MAX_VIEWS = 5
 
+DET_ACCEPT_MIN_SIM = float(os.environ.get('LOCKTRACK_DET_MIN_SIM', '0.35'))
+DET_ACCEPT_MIN_IOU = float(os.environ.get('LOCKTRACK_DET_MIN_IOU', '0.1'))
+MISS_STREAK_LIMIT = int(os.environ.get('LOCKTRACK_MISS_LIMIT', '6'))
+MISS_PAD_PER_STREAK = int(os.environ.get('LOCKTRACK_MISS_PAD_PX', '48'))
+MISS_THRESHOLD_DECAY = float(os.environ.get('LOCKTRACK_MISS_THRESH_DECAY', '0.04'))
+MIN_TRACK_THRESHOLD = float(os.environ.get('LOCKTRACK_MIN_THRESH', '0.2'))
+
 
 @dataclass
 class DescriptorEntry:
@@ -420,6 +427,31 @@ def make_search_mask(Hf: int, Wf: int, last_box_abs: Tuple[int, int, int, int], 
     return m
 
 
+def box_iou_abs(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+    """Compute IoU between two boxes in absolute pixel coordinates (x, y, w, h)."""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    if aw <= 0 or ah <= 0 or bw <= 0 or bh <= 0:
+        return 0.0
+    ax2 = ax + aw
+    ay2 = ay + ah
+    bx2 = bx + bw
+    by2 = by + bh
+    ix1 = max(ax, bx)
+    iy1 = max(ay, by)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    iw = max(0, ix2 - ix1)
+    ih = max(0, iy2 - iy1)
+    inter = float(iw * ih)
+    if inter <= 0.0:
+        return 0.0
+    area_a = float(max(0, aw) * max(0, ah))
+    area_b = float(max(0, bw) * max(0, bh))
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
 # ------------------------- Server state -------------------------
 class LockReq(BaseModel):
     image: str
@@ -431,12 +463,19 @@ class LockReq(BaseModel):
     search_pad: Optional[int] = 0  # pixels
     # Accept list of numbers or omit entirely
     scales: Optional[List[float]] = Field(default_factory=lambda: [0.85, 1.0, 1.2])
+    det_track_id: Optional[Any] = None
+    det_score: Optional[float] = None
+    det_label: Optional[str] = None
 
 
 class StepReq(BaseModel):
     track_id: str
     image: str
     return_heatmap: Optional[bool] = False
+    hint_box: Optional[Dict[str, Any]] = None
+    hint_track_id: Optional[Any] = None
+    hint_score: Optional[float] = None
+    hint_label: Optional[str] = None
 
 
 class AddViewReq(BaseModel):
@@ -453,7 +492,11 @@ class UnlockReq(BaseModel):
 class TrackState:
     def __init__(self, track_id: str, img_size: Tuple[int, int], init_box_abs: Tuple[int, int, int, int],
                  threshold: float, search_pad: int, scale_options: List[float], descriptors: List[DescriptorEntry],
-                 max_views: int = MAX_VIEWS, next_view_id: int = 1, view_order: Optional[List[int]] = None):
+                 max_views: int = MAX_VIEWS, next_view_id: int = 1, view_order: Optional[List[int]] = None,
+                 detector_track_id: Optional[str] = None, detector_label: Optional[str] = None,
+                 detector_score: Optional[float] = None, miss_streak: int = 0,
+                 last_box_source: str = 'init', last_similarity: float = 0.0,
+                 last_hint_score: Optional[float] = None):
         self.track_id = track_id
         self.img_size = img_size  # (W,H)
         self.box_abs = init_box_abs  # (x,y,w,h) integers
@@ -478,6 +521,13 @@ class TrackState:
                     self.view_order.append(entry.view_id)
         self.next_view_id = max(next_view_id, (max(self.view_order) + 1 if self.view_order else 1))
         self.last_score: float = 0.0
+        self.last_similarity: float = float(last_similarity)
+        self.miss_streak: int = max(0, int(miss_streak))
+        self.last_box_source: str = str(last_box_source or 'init')
+        self.detector_track_id: Optional[str] = None if detector_track_id in (None, '') else str(detector_track_id)
+        self.detector_label: Optional[str] = None if detector_label in (None, '') else str(detector_label)
+        self.detector_score: Optional[float] = float(detector_score) if detector_score is not None else None
+        self.last_hint_score: Optional[float] = float(last_hint_score) if last_hint_score is not None else None
         # persistence
         self.cache_path = os.path.join("data", "locktrack", f"{track_id}.npz")
 
@@ -576,6 +626,13 @@ def _save_state(ts: TrackState, ref_crop: Optional[Image.Image] = None, view_id:
             max_views=int(ts.max_views),
             next_view_id=int(ts.next_view_id),
             view_order=np.array(ts.view_order, dtype=np.int32),
+            detector_track_id=np.array(ts.detector_track_id or '', dtype=np.str_),
+            detector_label=np.array(ts.detector_label or '', dtype=np.str_),
+            detector_score=np.array([ts.detector_score if ts.detector_score is not None else np.nan], dtype=np.float32),
+            miss_streak=int(ts.miss_streak),
+            last_box_source=np.array(ts.last_box_source or '', dtype=np.str_),
+            last_similarity=float(ts.last_similarity),
+            last_hint_score=np.array([ts.last_hint_score if ts.last_hint_score is not None else np.nan], dtype=np.float32),
         )
         if ref_crop is not None:
             suffix = f"_view{view_id}" if view_id is not None else "_ref"
@@ -621,7 +678,51 @@ def _load_state(track_id: str) -> Optional[TrackState]:
             max_views = MAX_VIEWS
             view_order = [0] if descriptors else []
             next_view_id = 1
-        ts = TrackState(track_id, (W, H), (x, y, w, h), threshold, search_pad, scale_options, descriptors, max_views=max_views, next_view_id=next_view_id, view_order=view_order)
+        det_track_val: Optional[str] = None
+        if 'detector_track_id' in data:
+            try:
+                raw_det = data['detector_track_id']
+                det_track_val = str(raw_det.item()) if hasattr(raw_det, 'item') else str(raw_det)
+                if det_track_val == '' or det_track_val.lower() == 'none':
+                    det_track_val = None
+            except Exception:
+                det_track_val = None
+        det_label_val: Optional[str] = None
+        if 'detector_label' in data:
+            try:
+                raw_label = data['detector_label']
+                det_label_val = str(raw_label.item()) if hasattr(raw_label, 'item') else str(raw_label)
+                if det_label_val == '' or det_label_val.lower() == 'none':
+                    det_label_val = None
+            except Exception:
+                det_label_val = None
+        det_score_val: Optional[float] = None
+        if 'detector_score' in data:
+            try:
+                raw_score = data['detector_score']
+                score_item = float(raw_score.flat[0]) if hasattr(raw_score, 'flat') else float(raw_score)
+                if not np.isnan(score_item):
+                    det_score_val = score_item
+            except Exception:
+                det_score_val = None
+        miss_streak = int(data['miss_streak']) if 'miss_streak' in data else 0
+        last_box_source = str(data['last_box_source'].item()) if 'last_box_source' in data else 'init'
+        last_similarity = float(data['last_similarity']) if 'last_similarity' in data else 0.0
+        last_hint_score: Optional[float] = None
+        if 'last_hint_score' in data:
+            try:
+                raw_hint = data['last_hint_score']
+                hint_val = float(raw_hint.flat[0]) if hasattr(raw_hint, 'flat') else float(raw_hint)
+                if not np.isnan(hint_val):
+                    last_hint_score = hint_val
+            except Exception:
+                last_hint_score = None
+        ts = TrackState(track_id, (W, H), (x, y, w, h), threshold, search_pad, scale_options, descriptors,
+                        max_views=max_views, next_view_id=next_view_id, view_order=view_order,
+                        detector_track_id=det_track_val, detector_label=det_label_val,
+                        detector_score=det_score_val, miss_streak=miss_streak,
+                        last_box_source=last_box_source, last_similarity=last_similarity,
+                        last_hint_score=last_hint_score)
         TRACKS[track_id] = ts
         return ts
     except Exception as e:
@@ -690,6 +791,24 @@ async def lock_endpoint(request: Request):
     search_pad = int(payload.get('search_pad', 0))
     scales = payload.get('scales', [0.85, 1.0, 1.2])
     image_max_side = int(payload.get('image_max_side', os.environ.get('LOCKTRACK_MAX_SIDE', '0')))
+    det_track_raw = payload.get('det_track_id')
+    det_score_raw = payload.get('det_score')
+    det_label_raw = payload.get('det_label')
+    det_track_id = None
+    if det_track_raw not in (None, ''):
+        try:
+            det_track_id = str(det_track_raw)
+        except Exception:
+            det_track_id = None
+    det_label = None
+    if isinstance(det_label_raw, str) and det_label_raw.strip():
+        det_label = det_label_raw.strip()
+    det_score: Optional[float] = None
+    if det_score_raw not in (None, ''):
+        try:
+            det_score = float(det_score_raw)
+        except Exception:
+            det_score = None
     try:
         scales = [float(x) for x in (scales or [1.0])]
     except Exception:
@@ -763,7 +882,11 @@ async def lock_endpoint(request: Request):
         entries.append(DescriptorEntry(d, float(s), (ref_w0, ref_h0), view_id=0))
 
     tid = uuid.uuid4().hex[:12]
-    ts = TrackState(tid, (W, H), box_abs, threshold, search_pad, scale_list, entries, max_views=MAX_VIEWS, next_view_id=1, view_order=[0])
+    ts = TrackState(tid, (W, H), box_abs, threshold, search_pad, scale_list, entries,
+                    max_views=MAX_VIEWS, next_view_id=1, view_order=[0],
+                    detector_track_id=det_track_id, detector_label=det_label,
+                    detector_score=det_score, last_box_source='detector' if det_track_id else 'init',
+                    last_hint_score=det_score)
     TRACKS[tid] = ts
     _save_state(ts, ref_crop=ref_crop, view_id=0)
 
@@ -774,7 +897,15 @@ async def lock_endpoint(request: Request):
         'score': None,
         'status': 'locked',
         'num_views': ts.num_views(),
+        'box_source': ts.last_box_source,
+        'miss_streak': ts.miss_streak,
     }
+    if ts.detector_track_id is not None:
+        resp['detector_track_id'] = ts.detector_track_id
+    if ts.detector_label:
+        resp['detector_label'] = ts.detector_label
+    if ts.detector_score is not None:
+        resp['detector_score'] = ts.detector_score
 
     try:
         with torch.inference_mode():
@@ -801,6 +932,7 @@ async def lock_endpoint(request: Request):
             score = float(val.item())
             ts.last_score = score
             resp['score'] = score
+            ts.last_similarity = score
             # Snap initial box to heatmap peak with adaptive refinement
             cx = float(ts.box_abs[0] + ts.box_abs[2] * 0.5)
             cy = float(ts.box_abs[1] + ts.box_abs[3] * 0.5)
@@ -832,6 +964,8 @@ async def lock_endpoint(request: Request):
                 ts.box_abs = (x_new, y_new, w_det, h_det)
                 ts.img_size = (W, H)
                 resp['init_box'] = ts.to_rel_box()
+                ts.last_box_source = 'heatmap'
+                _save_state(ts)
 
             if return_heatmap:
                 hm_np = out.squeeze(0).squeeze(0).detach().to('cpu').numpy()
@@ -839,6 +973,8 @@ async def lock_endpoint(request: Request):
                 # Draw crosshair at peak
                 cross = (int(max(0, min(W - 1, round(cx)))), int(max(0, min(H - 1, round(cy)))))
                 resp['heatmap'] = make_heatmap_png(hm_np, (W, H), cmap=cmap, cross_xy=cross)
+            resp['box_source'] = ts.last_box_source
+            resp['similarity'] = ts.last_similarity
     except Exception as e:
         print(f"[locktrack] heatmap on lock failed: {e}")
 
@@ -883,18 +1019,67 @@ async def step_endpoint(request: Request):
         sy = Hp / float(H)
 
     with torch.inference_mode():
+        # Optional hint from detector
+        hint_box_rel = payload.get('hint_box') if isinstance(payload.get('hint_box'), dict) else None
+        hint_track_raw = payload.get('hint_track_id')
+        hint_label_raw = payload.get('hint_label')
+        hint_score_raw = payload.get('hint_score')
+
+        det_box_abs: Optional[Tuple[int, int, int, int]] = None
+        det_similarity: Optional[float] = None
+        det_track_id: Optional[str] = None
+        det_label: Optional[str] = None
+        det_score: Optional[float] = None
+        hint_iou = 0.0
+        hint_ok = False
+
+        if hint_box_rel is not None:
+            det_box_rel = norm_box(hint_box_rel)
+            det_box_abs = abs_from_rel(det_box_rel, (W, H))
+            if hint_track_raw not in (None, ''):
+                try:
+                    det_track_id = str(hint_track_raw)
+                except Exception:
+                    det_track_id = None
+            if isinstance(hint_label_raw, str) and hint_label_raw.strip():
+                det_label = hint_label_raw.strip()
+            if hint_score_raw not in (None, ''):
+                try:
+                    det_score = float(hint_score_raw)
+                except Exception:
+                    det_score = None
+            try:
+                hint_crop = crop_pil(img, det_box_abs)
+                hint_desc = compute_descriptor(BACKBONE, hint_crop, DEVICE)
+                sims = [float(torch.dot(hint_desc, entry.tensor).item()) for entry in ts.descriptors]
+                det_similarity = max(sims) if sims else None
+            except Exception as e_desc:
+                print(f"[locktrack] hint descriptor failed: {e_desc}")
+                det_similarity = None
+            hint_iou = box_iou_abs(ts.box_abs, det_box_abs)
+            matches_track = True
+            if ts.detector_track_id and det_track_id:
+                matches_track = (ts.detector_track_id == det_track_id)
+            sim_ok = det_similarity is not None and det_similarity >= DET_ACCEPT_MIN_SIM
+            iou_ok = hint_iou >= DET_ACCEPT_MIN_IOU
+            if sim_ok and (matches_track or iou_ok):
+                hint_ok = True
+
         fmap = compute_feature_map(BACKBONE, img_proc, DEVICE)
         Hf, Wf = int(fmap.shape[2]), int(fmap.shape[3])
 
-        # Optional search region gating
-        xb, yb, wb, hb = ts.box_abs
-        xb_p = int(round(xb * sx)); yb_p = int(round(yb * sy))
-        wb_p = max(1, int(round(wb * sx))); hb_p = max(1, int(round(hb * sy)))
-        pad_p = int(round(ts.search_pad * 0.5 * (sx + sy)))
-        search_mask = make_search_mask(Hf, Wf, (xb_p, yb_p, wb_p, hb_p), (Wp, Hp), pad_p)
-        # Per-scale maps to recover best scale at peak
         if not ts.descriptors:
             return {'error': 'descriptor pool empty'}
+
+        # Adaptive search padding
+        pad_pixels = max(0, ts.search_pad + MISS_PAD_PER_STREAK * max(0, ts.miss_streak))
+        seed_box = det_box_abs if det_box_abs is not None else ts.box_abs
+        xb, yb, wb, hb = seed_box
+        xb_p = int(round(xb * sx)); yb_p = int(round(yb * sy))
+        wb_p = max(1, int(round(wb * sx))); hb_p = max(1, int(round(hb * sy)))
+        pad_p = int(round(pad_pixels * 0.5 * (sx + sy)))
+        search_mask = make_search_mask(Hf, Wf, (xb_p, yb_p, wb_p, hb_p), (Wp, Hp), pad_p)
+
         maps: List[torch.Tensor] = []
         for entry in ts.descriptors:
             w = entry.tensor.view(1, -1, 1, 1)
@@ -903,11 +1088,11 @@ async def step_endpoint(request: Request):
         out = maps[0]
         for i in range(1, len(maps)):
             out = torch.maximum(out, maps[i])
+
         val, idx = torch.max(out.view(-1), dim=0)
-        score = float(val.item())
+        heatmap_score = float(val.item())
         iy = int(idx.item()) // Wf
         ix = int(idx.item()) - iy * Wf
-        # Snap peak to image coords with adaptive refinement
         cx = float(ts.box_abs[0] + ts.box_abs[2] * 0.5)
         cy = float(ts.box_abs[1] + ts.box_abs[3] * 0.5)
         best_si = 0
@@ -931,34 +1116,85 @@ async def step_endpoint(request: Request):
             cy = cy_p / max(1e-6, sy)
         x_new = int(round(cx - w_det / 2))
         y_new = int(round(cy - h_det / 2))
-        # Clamp
         x_new = max(0, min(W - w_det, x_new))
         y_new = max(0, min(H - h_det, y_new))
-        box_new = (x_new, y_new, w_det, h_det)
+        heatmap_box_abs = (x_new, y_new, w_det, h_det)
 
-    status = 'tracking' if score >= ts.threshold else 'searching'
-    if status == 'tracking':
-        ts.box_abs = box_new
-        ts.img_size = (W, H)  # update size in case input changed
-        ts.last_score = score
-        _save_state(ts)
+    threshold_eff = max(MIN_TRACK_THRESHOLD, ts.threshold - MISS_THRESHOLD_DECAY * ts.miss_streak)
+    heatmap_success = heatmap_score >= threshold_eff
+    status = 'tracking' if heatmap_success else 'searching'
+
+    if heatmap_success:
+        ts.box_abs = heatmap_box_abs
+        ts.img_size = (W, H)
+        ts.last_score = heatmap_score
+        ts.miss_streak = 0
     else:
-        # Do not update box; if repeatedly below threshold, caller may treat as lost
-        ts.last_score = score
+        ts.last_score = heatmap_score
+        ts.miss_streak = min(ts.miss_streak + 1, MISS_STREAK_LIMIT + 5)
+        if ts.miss_streak >= MISS_STREAK_LIMIT:
+            status = 'lost'
 
-    # Return the candidate box even when searching so UI can visualize motion
+    final_box_abs = heatmap_box_abs
+    final_score = heatmap_score
+    final_similarity = heatmap_score
+    final_source = 'heatmap'
+
+    if hint_ok and det_box_abs is not None:
+        final_box_abs = det_box_abs
+        if det_similarity is not None:
+            final_score = det_similarity
+            final_similarity = det_similarity
+        status = 'tracking'
+        final_source = 'detector'
+        ts.box_abs = det_box_abs
+        ts.img_size = (W, H)
+        ts.last_score = final_score
+        ts.miss_streak = 0
+        ts.detector_track_id = det_track_id or ts.detector_track_id
+        ts.detector_label = det_label or ts.detector_label
+        if det_score is not None:
+            ts.detector_score = det_score
+            ts.last_hint_score = det_score
+    else:
+        # Preserve latest hint score even if not accepted
+        if det_score is not None:
+            ts.last_hint_score = det_score
+
+    ts.last_similarity = final_similarity
+    ts.last_box_source = final_source if status != 'lost' else 'none'
+
+    if status == 'tracking':
+        _save_state(ts)
+
+    box_rel = rel_from_abs(*final_box_abs, (W, H))
     resp: Dict[str, Any] = {
-        'box': rel_from_abs(*box_new, (W, H)),
-        'score': score,
+        'box': box_rel,
+        'score': final_score,
         'status': status,
         'num_views': ts.num_views(),
+        'box_source': final_source if status != 'lost' else 'none',
+        'similarity': final_similarity,
+        'miss_streak': ts.miss_streak,
     }
+    if det_similarity is not None:
+        resp['hint_similarity'] = det_similarity
+    if det_box_abs is not None:
+        resp['hint_iou'] = hint_iou
+
+    if ts.detector_track_id is not None:
+        resp['detector_track_id'] = ts.detector_track_id
+    if ts.detector_label:
+        resp['detector_label'] = ts.detector_label
+    if ts.detector_score is not None:
+        resp['detector_score'] = ts.detector_score
 
     if return_heatmap:
         hm_np = out.squeeze(0).squeeze(0).detach().to('cpu').numpy()
         cmap = str(payload.get('heatmap_cmap', 'jet'))
-        cross = (int(max(0, min(W - 1, round(cx)))), int(max(0, min(H - 1, round(cy)))))
-        resp['heatmap'] = make_heatmap_png(hm_np, (W, H), cmap=cmap, cross_xy=cross)
+        cx_final = int(max(0, min(W - 1, round(final_box_abs[0] + final_box_abs[2] * 0.5))))
+        cy_final = int(max(0, min(H - 1, round(final_box_abs[1] + final_box_abs[3] * 0.5))))
+        resp['heatmap'] = make_heatmap_png(hm_np, (W, H), cmap=cmap, cross_xy=(cx_final, cy_final))
 
     return resp
 

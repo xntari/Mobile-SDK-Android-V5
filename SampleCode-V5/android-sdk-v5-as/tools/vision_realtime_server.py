@@ -25,10 +25,13 @@ Run
 """
 from __future__ import annotations
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 import base64
 import io
 import os
+import json
+import urllib.request
+import time
 import torch  # type: ignore
 
 from fastapi import FastAPI, Request
@@ -79,6 +82,9 @@ _DEFAULT_IMGSZ: int = int(os.environ.get("Y_IMGSZ", "640"))
 _DEFAULT_THRESH: float = float(os.environ.get("Y_THRESH", "0.25"))
 _DEVICE: str = os.environ.get("Y_DEVICE", "auto")  # 'auto' | 'cpu' | 'mps' | 'cuda'
 _USE_HALF: bool = False  # Use FP16 half precision
+_OBJECT_MEMORY_URL: Optional[str] = os.environ.get("OBJECT_MEMORY_URL", "http://127.0.0.1:9012")
+_OBJECT_MEMORY_LABEL_THRESHOLD: float = float(os.environ.get("OBJECT_MEMORY_LABEL_THRESHOLD", "0.82"))
+_OBJECT_MEMORY_TRACK_TTL: float = float(os.environ.get("OBJECT_MEMORY_TRACK_TTL", "120"))
 
 _CLI_OV_MODEL_SPEC: Optional[str] = None
 _HAVE_YOLOE: bool = False
@@ -95,6 +101,26 @@ _EMBEDDINGS_CACHE: Dict[tuple, torch.Tensor] = {}
 
 # Per-session display ID mapping: track_id -> per-class small id
 _DISPLAY_MAP: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+_TRACK_LAST_SAVED: Dict[str, float] = {}
+
+
+def _should_store_track(track_key: Optional[str]) -> bool:
+    if not track_key:
+        return False
+    now = time.time()
+    cutoff = now - _OBJECT_MEMORY_TRACK_TTL
+    for key, ts in list(_TRACK_LAST_SAVED.items()):
+        if ts < cutoff:
+            del _TRACK_LAST_SAVED[key]
+    last = _TRACK_LAST_SAVED.get(track_key)
+    return last is None or (now - last) >= _OBJECT_MEMORY_TRACK_TTL
+
+
+def _mark_track_stored(track_key: Optional[str]) -> None:
+    if not track_key:
+        return
+    _TRACK_LAST_SAVED[track_key] = time.time()
 
 # Color assignment now handled by UI based on track_id
 
@@ -173,6 +199,7 @@ def _assign_seg_ids(sid: str, instances: List[Dict[str, Any]], iou_thr: float = 
 # ------------------------- Utils -------------------------
 def dtype_of(module):
     """Get the dtype of a module's parameters"""
+    memory_hits = 0
     try:
         return next(module.parameters()).dtype
     except StopIteration:
@@ -439,6 +466,29 @@ def _scale_image(img: Image.Image, max_side: int) -> Image.Image:
     return img.resize(new_size)
 
 
+def _pil_to_data_url(img: Image.Image) -> str:
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', quality=90)
+    return 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode('ascii')
+
+
+def _object_memory_post(path: str, payload: Dict[str, Any], timeout: float = 0.5) -> Optional[Dict[str, Any]]:
+    if not _OBJECT_MEMORY_URL:
+        return None
+    url = f"{_OBJECT_MEMORY_URL.rstrip('/')}{path}"
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            if not raw:
+                return None
+            return json.loads(raw.decode('utf-8'))
+    except Exception as e:
+        print(f"[realtime] object memory request failed: {e}")
+        return None
+
+
 # ------------------------- YOLO‑E loaders -------------------------
 def _lazy_load_yoloe():
     global _HAVE_YOLOE, _yoloe_model, _yoloe_model_cpu
@@ -681,6 +731,7 @@ class RTDetectRequest(BaseModel):
     threshold: float | None = None
     img_size: int | None = None
     ov_labels: list[str] | None = None
+    search_db: bool | None = None
 
 
 class RTSegmentRequest(BaseModel):
@@ -712,6 +763,7 @@ def realtime_detect(req: RTDetectRequest, request: Request):
 
     use_pf = not (req.ov_labels and len(req.ov_labels) > 0)
     boxes: List[Dict[str, Any]] = []
+    memory_hits = 0
     try:
         if use_pf:
             if not _HAVE_YOLOE_PF:
@@ -806,6 +858,72 @@ def realtime_detect(req: RTDetectRequest, request: Request):
                         **({'label': lbl} if lbl else {}),
                         **({'track_id': tid} if tid is not None else {}),
                     })
+        # Optional object memory search to reuse labels
+        seen_tracks: Set[str] = set()
+
+        def ingest_track(track_key: Optional[str], data_url: str, label: Optional[str] = None) -> None:
+            if not track_key:
+                return
+            if track_key in seen_tracks:
+                return
+            if not _should_store_track(track_key):
+                return
+            payload = {'image': data_url, 'track_id': track_key}
+            if label:
+                payload['label'] = label
+            try:
+                _object_memory_post('/memory/ingest', payload, timeout=0.3)
+            except Exception:
+                # Allow retry on next frame when ingest fails
+                raise
+            else:
+                _mark_track_stored(track_key)
+                seen_tracks.add(track_key)
+
+        if _OBJECT_MEMORY_URL and boxes:
+            for b in boxes:
+                try:
+                    x1_px = int(max(0.0, min(1.0, b['x1'])) * W)
+                    y1_px = int(max(0.0, min(1.0, b['y1'])) * H)
+                    x2_px = int(max(0.0, min(1.0, b['x2'])) * W)
+                    y2_px = int(max(0.0, min(1.0, b['y2'])) * H)
+                    if x2_px <= x1_px or y2_px <= y1_px:
+                        continue
+                    crop = img2.crop((x1_px, y1_px, x2_px, y2_px))
+                    data_url = _pil_to_data_url(crop)
+                    track_key = None
+                    if b.get('track_id') is not None:
+                        track_key = str(b['track_id'])
+
+                    resp = _object_memory_post('/memory/search', {'image': data_url}) if req.search_db else None
+                    if not resp or 'match' not in resp:
+                        ingest_track(track_key, data_url)
+                        continue
+                    match = resp['match']
+                    if not match:
+                        ingest_track(track_key, data_url)
+                        continue
+                    similarity = float(match.get('similarity', 0.0) or 0.0)
+                    if similarity < _OBJECT_MEMORY_LABEL_THRESHOLD:
+                        ingest_track(track_key, data_url)
+                        continue
+                    cluster = match.get('cluster') or {}
+                    label = cluster.get('label')
+                    if not label:
+                        ingest_track(track_key, data_url)
+                        continue
+                    original_label = b.get('label')
+                    if original_label and str(original_label) != label:
+                        b['yolo_label'] = original_label
+                    b['memory_label'] = label
+                    b['memory_similarity'] = similarity
+                    if 'cluster_id' in cluster:
+                        b['memory_cluster_id'] = cluster['cluster_id']
+                    b['label'] = label
+                    memory_hits += 1
+                    ingest_track(track_key, data_url, label if original_label and str(original_label).lower() == label.lower() else None)
+                except Exception as e_mem:
+                    print(f"[realtime] memory lookup failed: {e_mem}")
         # No fallbacks in detect path
     except Exception as e:
         print('[realtime] detect error:', e)
@@ -817,7 +935,7 @@ def realtime_detect(req: RTDetectRequest, request: Request):
                 lab_counts[lbl] = lab_counts.get(lbl, 0) + 1
         top = sorted(lab_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
         sid = request.headers.get('x-client-session') or 'no-sid'
-        print(f"[realtime][DETECT][sid={sid}] thr={thr} size={size} mode={'PF' if use_pf else 'OV'} labels={(req.ov_labels or [])} -> {len(boxes)} boxes; top: {top}")
+        print(f"[realtime][DETECT][sid={sid}] thr={thr} size={size} mode={'PF' if use_pf else 'OV'} labels={(req.ov_labels or [])} -> {len(boxes)} boxes; memory_hits={memory_hits}; top: {top}")
     except Exception:
         pass
     return {'boxes': boxes}

@@ -2,12 +2,110 @@ import React from 'react';
 import { Panel, createPanelControls } from './Panel';
 import { analyzeRealtime, analyzeRealtimeSegment, getRealtimeVisionUrl } from '../agent/visionClient';
 import { lockTrackLock, lockTrackStep, lockTrackAddView, lockTrackUnlock, lockTrackRemoveView, getLocktrackBase } from '../agent/locktrackClient';
+import { ingestSample as ingestObjectMemorySample, searchSample as searchObjectMemorySample } from '../agent/objectMemoryClient';
 import type { Detection } from '../agent/visionClient';
 import { bridgeManager } from '../bridgeManager';
 
 export const visionRTPanelControls = createPanelControls('visionrt.panel', 'visionrtPanelVisibilityChange');
 
 const MAX_LOCKTRACK_VIEWS = 5;
+const MAX_HISTORY_ENTRIES = 24;
+const MEMORY_INGEST_INTERVAL_MS = 2000;
+const MEMORY_LABEL_THRESHOLD = 0.82;
+
+type NormalizedBox = { x: number; y: number; w: number; h: number };
+
+interface LockReferenceInfo {
+  trackId?: number | string;
+  label?: string;
+  baseLabel?: string;
+  score?: number;
+  box?: NormalizedBox;
+  historyId?: string;
+  customLabel?: string;
+}
+
+interface LockHistoryRecord {
+  historyId: string;
+  trackIds: Set<string>;
+  baseLabel?: string;
+  label?: string;
+  customLabel?: string;
+  lastBox?: NormalizedBox;
+  lastUpdated: number;
+}
+
+const clamp01Value = (v: number) => Math.max(0, Math.min(1, v));
+
+const sanitizeLabel = (label?: string | null): string | undefined => {
+  if (!label) return undefined;
+  return String(label).replace(/_[0-9]+$/, '');
+};
+
+const detectionToBox = (det: Detection): NormalizedBox => {
+  const x1 = clamp01Value(det.x1);
+  const y1 = clamp01Value(det.y1);
+  const x2 = clamp01Value(det.x2);
+  const y2 = clamp01Value(det.y2);
+  const w = clamp01Value(x2 - x1);
+  const h = clamp01Value(y2 - y1);
+  return {
+    x: x1,
+    y: y1,
+    w: Math.max(1e-4, w),
+    h: Math.max(1e-4, h),
+  };
+};
+
+const iouBoxes = (a?: NormalizedBox | null, b?: NormalizedBox | null): number => {
+  if (!a || !b) return 0;
+  const ax2 = a.x + a.w;
+  const ay2 = a.y + a.h;
+  const bx2 = b.x + b.w;
+  const by2 = b.y + b.h;
+  const ix1 = Math.max(a.x, b.x);
+  const iy1 = Math.max(a.y, b.y);
+  const ix2 = Math.min(ax2, bx2);
+  const iy2 = Math.min(ay2, by2);
+  const iw = Math.max(0, ix2 - ix1);
+  const ih = Math.max(0, iy2 - iy1);
+  const inter = iw * ih;
+  if (inter <= 0) return 0;
+  const aArea = Math.max(0, a.w) * Math.max(0, a.h);
+  const bArea = Math.max(0, b.w) * Math.max(0, b.h);
+  const union = aArea + bArea - inter;
+  return union > 0 ? inter / union : 0;
+};
+
+const selectDetectionForHint = (
+  detections: Detection[],
+  reference: LockReferenceInfo | null,
+  fallbackBox: NormalizedBox | null,
+  minIou = 0.1,
+): Detection | null => {
+  if (!detections.length) return null;
+  const refTrack = reference?.trackId;
+  if (refTrack !== undefined && refTrack !== null) {
+    const match = detections.find((det) => det.track_id !== undefined && String(det.track_id) === String(refTrack));
+    if (match) return match;
+  }
+  const targetBox = fallbackBox || reference?.box || null;
+  if (!targetBox) return null;
+  let best: Detection | null = null;
+  let bestIou = 0;
+  for (const det of detections) {
+    const box = detectionToBox(det);
+    const iou = iouBoxes(targetBox, box);
+    if (iou > bestIou) {
+      bestIou = iou;
+      best = det;
+    }
+  }
+  if (best && bestIou >= minIou) {
+    return best;
+  }
+  return null;
+};
 
 interface LockTrackView {
   id: number;
@@ -74,12 +172,15 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
   const [scalesText, setScalesText] = React.useState<string>(() => { try { const raw = localStorage.getItem('locktrack.scales'); if (raw) return String(raw); } catch {} return '0.85,1.0,1.2'; });
   const [lastBox, setLastBox] = React.useState<{x:number;y:number;w:number;h:number} | null>(null);
   const [lastHeatmap, setLastHeatmap] = React.useState<string | null>(null);
+  const [lockRef, setLockRef] = React.useState<LockReferenceInfo | null>(null);
+  const [lastBoxSource, setLastBoxSource] = React.useState<string | null>(null);
   const [ltClassesText, setLtClassesText] = React.useState<string>(()=>{ try { return localStorage.getItem('locktrack.labels') || ''; } catch {} return ''; });
   const [ltScanThr, setLtScanThr] = React.useState<number>(()=>{ try { const raw = localStorage.getItem('locktrack.scanThr'); if (raw) return JSON.parse(raw); } catch {} return 0.25; });
   const [maxSide, setMaxSide] = React.useState<number>(()=>{ try { const raw = localStorage.getItem('locktrack.maxSide'); if (raw) return JSON.parse(raw); } catch {} return 0; });
   const [trackMode, setTrackMode] = React.useState<'free_look'|'look_at'>(()=>{ try { return (localStorage.getItem('locktrack.trackMode') as any) || 'free_look'; } catch {} return 'free_look'; });
   const [vxGain, setVxGain] = React.useState<number>(()=>{ try { const v = JSON.parse(localStorage.getItem('locktrack.vxGain')||'1.0'); if (typeof v==='number') return v; } catch {} return 1.0; });
   const [deadZone, setDeadZone] = React.useState<number>(()=>{ try { const v = JSON.parse(localStorage.getItem('locktrack.deadZone')||'0.05'); if (typeof v==='number') return v; } catch {} return 0.05; });
+  const [customLabelInput, setCustomLabelInput] = React.useState<string>('');
   const freeLookStartedRef = React.useRef<boolean>(false);
   const freeLookVelocityRef = React.useRef<{ vx: number; vy: number }>({ vx: 0, vy: 0 });
   const freeLookIntervalRef = React.useRef<number | null>(null);
@@ -91,8 +192,116 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
   const [hmOpacity, setHmOpacity] = React.useState<number>(()=>{ try { const v = JSON.parse(localStorage.getItem('locktrack.hmOpacity')||'0.35'); if (typeof v==='number') return v; } catch {} return 0.35; });
   const trackingActiveRef = React.useRef<boolean>(false);
   const [trackingActive, setTrackingActive] = React.useState<boolean>(false);
+  const lockHistoryRef = React.useRef<Map<string, LockHistoryRecord>>(new Map());
+  const lockHistoryByDetIdRef = React.useRef<Map<string, string>>(new Map());
+  const lastMemoryIngestRef = React.useRef<number>(0);
+
 
   const clamp01 = React.useCallback((v: number) => Math.max(0, Math.min(1, v)), []);
+
+  const linkDetTrackId = React.useCallback((record: LockHistoryRecord, trackId?: number | string | null) => {
+    if (trackId === undefined || trackId === null) return;
+    const key = String(trackId);
+    if (!record.trackIds.has(key)) {
+      record.trackIds.add(key);
+    }
+    lockHistoryByDetIdRef.current.set(key, record.historyId);
+  }, []);
+
+  const pruneHistory = React.useCallback(() => {
+    const map = lockHistoryRef.current;
+    if (map.size <= MAX_HISTORY_ENTRIES) return;
+    const entries = Array.from(map.values()).sort((a, b) => a.lastUpdated - b.lastUpdated);
+    const removeCount = Math.max(0, map.size - MAX_HISTORY_ENTRIES);
+    for (let i = 0; i < removeCount; i += 1) {
+      const rec = entries[i];
+      map.delete(rec.historyId);
+      for (const tid of rec.trackIds) {
+        if (lockHistoryByDetIdRef.current.get(tid) === rec.historyId) {
+          lockHistoryByDetIdRef.current.delete(tid);
+        }
+      }
+    }
+  }, []);
+
+  const mutateHistory = React.useCallback((historyId: string, mutator: (rec: LockHistoryRecord) => void) => {
+    const rec = lockHistoryRef.current.get(historyId);
+    if (!rec) return;
+    mutator(rec);
+    rec.lastUpdated = Date.now();
+  }, []);
+
+  const rememberHistoryRecord = React.useCallback((record: LockHistoryRecord) => {
+    lockHistoryRef.current.set(record.historyId, record);
+    record.lastUpdated = Date.now();
+    for (const tid of record.trackIds) {
+      lockHistoryByDetIdRef.current.set(tid, record.historyId);
+    }
+    pruneHistory();
+  }, [pruneHistory]);
+
+  const applyHistoryToDetections = React.useCallback((detections: Detection[]): Detection[] => {
+    if (!detections.length) return detections;
+    const historyMap = lockHistoryRef.current;
+    if (!historyMap.size) return detections;
+    const result: Detection[] = [];
+    for (const det of detections) {
+      let record: LockHistoryRecord | undefined;
+      if (det.track_id !== undefined && det.track_id !== null) {
+        const hid = lockHistoryByDetIdRef.current.get(String(det.track_id));
+        if (hid) {
+          record = historyMap.get(hid);
+        }
+      }
+      if (!record) {
+        let best: LockHistoryRecord | undefined;
+        let bestIou = 0;
+        const detBox = detectionToBox(det);
+        for (const rec of historyMap.values()) {
+          if (!rec.lastBox) continue;
+          const iou = iouBoxes(rec.lastBox, detBox);
+          if (iou > bestIou) {
+            bestIou = iou;
+            best = rec;
+          }
+        }
+        if (best && best.lastBox && bestIou >= 0.35) {
+          record = best;
+        }
+      }
+
+      let nextDet = det;
+      if (record) {
+        const detBox = detectionToBox(det);
+        mutateHistory(record.historyId, (rec) => {
+          rec.lastBox = detBox;
+          linkDetTrackId(rec, det.track_id);
+          if (!rec.label && det.label) {
+            rec.label = det.label;
+          }
+        });
+        const label = record.customLabel ?? record.label ?? record.baseLabel ?? det.label;
+        if (label && label !== det.label) {
+          nextDet = { ...det, label };
+        }
+      }
+      result.push(nextDet);
+    }
+    return result;
+  }, [linkDetTrackId, mutateHistory]);
+
+  const ingestObjectMemory = React.useCallback(async (dataUrl: string | null, trackHint?: string | number | null, labelHint?: string | null) => {
+    if (!dataUrl) return;
+    try {
+      await ingestObjectMemorySample({
+        image: dataUrl,
+        track_id: trackHint != null ? String(trackHint) : undefined,
+        ...(labelHint && labelHint.trim() ? { label: labelHint.trim() } : {}),
+      });
+    } catch (err) {
+      console.warn('[LockTrack] object memory ingest failed:', err);
+    }
+  }, []);
 
   const createThumbFromBox = React.useCallback(async (imageDataUrl: string, box: { x: number; y: number; w: number; h: number }): Promise<string | null> => {
     if (!imageDataUrl) return null;
@@ -132,11 +341,21 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
   }, [clamp01]);
 
   React.useEffect(() => {
-    if (!trackId && trackingActiveRef.current) {
-      trackingActiveRef.current = false;
-      setTrackingActive(false);
+    if (!trackId) {
+      if (trackingActiveRef.current) {
+        trackingActiveRef.current = false;
+        setTrackingActive(false);
+      }
+      setLockRef(null);
+      setLastBoxSource(null);
+      setCustomLabelInput('');
     }
   }, [trackId]);
+
+  React.useEffect(() => {
+    if (!lockRef?.historyId) return;
+    setCustomLabelInput(lockRef.customLabel ?? lockRef.label ?? lockRef.baseLabel ?? '');
+  }, [lockRef?.historyId]);
 
   React.useEffect(() => () => {
     trackingActiveRef.current = false;
@@ -236,7 +455,7 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
       const img = await getSnapshot();
       const scanClasses = ltClassesText.split(/\n|,|;/).map(s=>s.trim()).filter(Boolean).slice(0, 50);
       const out = await analyzeRealtime({ imageBase64: img, threshold: ltScanThr, classes: scanClasses, img_size: imgSize, signal: abortRef.current?.signal });
-      const det = out.detections || [];
+      const det = applyHistoryToDetections(out.detections || []);
       setBoxes?.(det);
       setLastDetections(det);
       setPromptInfo(`scan: ${det.length} objects (thr=${ltScanThr.toFixed(2)}, imgsz=${imgSize})`);
@@ -278,33 +497,89 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
     try {
       console.log('[LockTrack] Lock: capturing snapshot');
       const img = await getSnapshot();
-      let ref_image: string | undefined = undefined;
-      let box: {x:number;y:number;w:number;h:number} | undefined = undefined;
+      let ref_image: string | undefined;
+      let box: NormalizedBox | undefined;
+      let detectorInfo: LockReferenceInfo | null = null;
+      let detTrackId: number | string | undefined;
+      let detScore: number | undefined;
+      let detLabel: string | undefined;
       if (promptImage) {
         ref_image = promptImage;
       } else {
         if (selectedIndex >= 0 && selectedIndex < lastDetections.length) {
           const d = lastDetections[selectedIndex];
-          const x = Math.max(0, Math.min(1, d.x1));
-          const y = Math.max(0, Math.min(1, d.y1));
-          const w = Math.max(0, Math.min(1, d.x2 - d.x1));
-          const h = Math.max(0, Math.min(1, d.y2 - d.y1));
-          box = { x, y, w, h };
+          box = detectionToBox(d);
+          detTrackId = d.track_id !== undefined ? d.track_id : undefined;
+          detScore = typeof d.score === 'number' && Number.isFinite(d.score) ? d.score : undefined;
+          const sanitized = sanitizeLabel(d.label);
+          detLabel = sanitized || (d.label ? String(d.label) : undefined);
+          detectorInfo = {
+            trackId: detTrackId,
+            label: d.label,
+            baseLabel: sanitized,
+            score: detScore,
+            box,
+          };
         } else {
           setPromptInfo('Provide a reference: extract or upload an image, or select a detection.');
           return;
         }
       }
-      const scales = scalesText.split(/,|\s+/).map(s=>parseFloat(s)).filter(n=>!isNaN(n) && n>0).slice(0,5);
+      const scales = scalesText.split(/,|\s+/).map((s) => parseFloat(s)).filter((n) => !isNaN(n) && n > 0).slice(0, 5);
       const controller = new AbortController();
       abortRef.current = controller;
-      const out = await lockTrackLock({ image: img, ref_image, box, return_heatmap: showHeatmap, threshold: thrLT, search_pad: pad, scales, signal: controller.signal, image_max_side: maxSide>0?maxSide:undefined, heatmap_cmap: hmCmap });
+      const out = await lockTrackLock({
+        image: img,
+        ref_image,
+        box,
+        return_heatmap: showHeatmap,
+        threshold: thrLT,
+        search_pad: pad,
+        scales,
+        signal: controller.signal,
+        image_max_side: maxSide > 0 ? maxSide : undefined,
+        heatmap_cmap: hmCmap,
+        det_track_id: detTrackId,
+        det_score: detScore,
+        det_label: detLabel,
+      });
       setTrackId(out.track_id);
       setStatus(out.status || 'locked');
+      setLastBoxSource(out.box_source || null);
       const b = out.init_box;
       setLastBox(b);
-      setBoxes?.([{ x1: b.x, y1: b.y, x2: b.x + b.w, y2: b.y + b.h, score: typeof out.score==='number'? out.score : 1.0, label: `lock` }]);
+      const historyId = out.track_id;
+      const track = out.detector_track_id ?? detectorInfo?.trackId;
+      const baseLabel = sanitizeLabel(out.detector_label ?? detectorInfo?.label ?? undefined) ?? detectorInfo?.baseLabel;
+      const label = out.detector_label ?? detectorInfo?.label ?? baseLabel;
+      const score = typeof out.detector_score === 'number' && Number.isFinite(out.detector_score)
+        ? out.detector_score
+        : detectorInfo?.score;
+      let inherited: LockHistoryRecord | undefined;
+      if (detTrackId !== undefined && detTrackId !== null) {
+        const hid = lockHistoryByDetIdRef.current.get(String(detTrackId));
+        if (hid) {
+          inherited = lockHistoryRef.current.get(hid);
+        }
+      }
+      if (!inherited && box) {
+        let best: LockHistoryRecord | undefined;
+        let bestIou = 0;
+        for (const rec of lockHistoryRef.current.values()) {
+          if (!rec.lastBox) continue;
+          const iou = iouBoxes(rec.lastBox, box);
+          if (iou > bestIou) {
+            bestIou = iou;
+            best = rec;
+          }
+        }
+        if (best && best.lastBox && bestIou >= 0.4) {
+          inherited = best;
+        }
+      }
+      setBoxes?.([{ x1: b.x, y1: b.y, x2: b.x + b.w, y2: b.y + b.h, score: typeof out.score === 'number' ? out.score : 1.0, label: 'lock' }]);
       let initialThumb: string | null = ref_image || null;
+      let memoryMatchLabel: string | undefined;
       if (!initialThumb) {
         if (box) {
           initialThumb = await createThumbFromBox(img, box);
@@ -314,15 +589,68 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
         }
       }
       if (initialThumb) {
+        try {
+          const searchRes = await searchObjectMemorySample(initialThumb);
+          const match = searchRes?.match;
+          if (match && match.cluster && match.similarity >= MEMORY_LABEL_THRESHOLD && match.cluster.label) {
+            memoryMatchLabel = match.cluster.label;
+          }
+        } catch (err) {
+          console.warn('[LockTrack] object memory search failed:', err);
+        }
+      }
+
+      const resolvedLabel = memoryMatchLabel ?? inherited?.label ?? label ?? baseLabel ?? undefined;
+      const historyRecord: LockHistoryRecord = {
+        historyId,
+        trackIds: inherited ? new Set<string>(inherited.trackIds) : new Set<string>(),
+        baseLabel: inherited?.baseLabel ?? baseLabel ?? resolvedLabel ?? undefined,
+        label: resolvedLabel,
+        customLabel: inherited?.customLabel ?? undefined,
+        lastBox: b,
+        lastUpdated: Date.now(),
+      };
+      if (inherited) {
+        lockHistoryRef.current.delete(inherited.historyId);
+        for (const tid of inherited.trackIds) {
+          if (lockHistoryByDetIdRef.current.get(tid) === inherited.historyId) {
+            lockHistoryByDetIdRef.current.delete(tid);
+          }
+        }
+      }
+      linkDetTrackId(historyRecord, track);
+      rememberHistoryRecord(historyRecord);
+      setCustomLabelInput(historyRecord.customLabel ?? historyRecord.label ?? historyRecord.baseLabel ?? '');
+      setLockRef(() => ({
+        historyId,
+        trackId: track,
+        label: historyRecord.label,
+        baseLabel: historyRecord.baseLabel,
+        customLabel: historyRecord.customLabel,
+        score,
+        box: b,
+      }));
+      if (initialThumb) {
         setViews([{ id: 0, thumb: initialThumb }]);
         if (!promptImage) {
-          try { setPromptImage(initialThumb); } catch {}
+          try {
+            setPromptImage(initialThumb);
+          } catch {}
         }
+        const ingestLabel = historyRecord.customLabel ?? historyRecord.label ?? historyRecord.baseLabel ?? null;
+        void ingestObjectMemory(initialThumb, track ?? out.track_id ?? historyId, ingestLabel);
       } else {
         setViews([]);
       }
+      const infoBits: string[] = [`Lock ${out.status}`];
+      if (typeof out.score === 'number' && Number.isFinite(out.score)) infoBits.push(`score ${out.score.toFixed(2)}`);
+      if (out.box_source) infoBits.push(`via ${out.box_source}`);
+      if (typeof out.similarity === 'number' && Number.isFinite(out.similarity)) infoBits.push(`sim ${out.similarity.toFixed(2)}`);
+      if (out.detector_track_id !== undefined && out.detector_track_id !== null) infoBits.push(`det ${out.detector_track_id}`);
+      if (typeof out.detector_score === 'number' && Number.isFinite(out.detector_score)) infoBits.push(`detScore ${out.detector_score.toFixed(2)}`);
+      if (typeof out.miss_streak === 'number') infoBits.push(`miss ${out.miss_streak}`);
       const viewInfo = typeof out?.num_views === 'number' ? ` (${out.num_views}/${MAX_LOCKTRACK_VIEWS} views)` : '';
-      setPromptInfo(`Lock ${out.status}${typeof out.score==='number' ? `, score ${out.score.toFixed(2)}` : ''}${viewInfo}`);
+      setPromptInfo(`${infoBits.join(', ')}${viewInfo}`);
       console.log('[LockTrack] Lock: server response', out);
       if (showHeatmap && out.heatmap) {
         const hm = `data:image/png;base64,${out.heatmap}`;
@@ -351,18 +679,54 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
     if (origin === 'manual') {
       console.log('[LockTrack] Step button pressed', { trackId });
       setPromptInfo('step: pressed');
-    }
-    if (origin === 'manual') {
       console.log('[LockTrack] Step: capturing snapshot', { trackId });
     }
 
-    setPromptInfo(`${origin === 'manual' ? 'step' : 'tracking'}: sending snapshot...`);
+    setPromptInfo(`${origin === 'manual' ? 'step' : 'tracking'}: gathering data...`);
 
     try {
       const img = await getSnapshot();
       const controller = new AbortController();
       abortRef.current = controller;
-      const out = await lockTrackStep({ track_id: trackId, image: img, return_heatmap: showHeatmap, signal: controller.signal, image_max_side: maxSide>0?maxSide:undefined, heatmap_cmap: hmCmap });
+
+      let hintDetection: Detection | null = null;
+      if (lockRef) {
+        try {
+          const classes = lockRef.baseLabel ? [lockRef.baseLabel] : undefined;
+          const detRes = await analyzeRealtime({
+            imageBase64: img,
+            threshold: ltScanThr,
+            classes,
+            img_size: imgSize,
+            signal: controller.signal,
+          });
+          const detections = detRes.detections || [];
+          const mappedDetections = applyHistoryToDetections(detections);
+          setLastDetections(mappedDetections);
+          if (mappedDetections.length) {
+            hintDetection = selectDetectionForHint(mappedDetections, lockRef, lastBox);
+          }
+        } catch (detErr) {
+          console.warn('[LockTrack] hint detection failed:', detErr);
+        }
+      }
+
+      const hintBox = hintDetection ? detectionToBox(hintDetection) : undefined;
+      const hintLabel = hintDetection ? sanitizeLabel(hintDetection.label) || hintDetection.label : undefined;
+
+      const out = await lockTrackStep({
+        track_id: trackId,
+        image: img,
+        return_heatmap: showHeatmap,
+        signal: controller.signal,
+        image_max_side: maxSide > 0 ? maxSide : undefined,
+        heatmap_cmap: hmCmap,
+        hint_box: hintBox,
+        hint_track_id: hintDetection?.track_id,
+        hint_score: hintDetection?.score,
+        hint_label: hintLabel,
+      });
+
       if (origin === 'manual') {
         console.log('[LockTrack] Step: server response', out);
       }
@@ -370,11 +734,66 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
       const b = out.box;
       setLastBox(b);
       setStatus(out.status);
-      setBoxes?.([{ x1: b.x, y1: b.y, x2: b.x + b.w, y2: b.y + b.h, score: out.score, label: `lock` }]);
+      setLastBoxSource(out.box_source || null);
+      const historyId = lockRef?.historyId ?? trackId;
+      const nextBox = b || lockRef?.box || hintBox || undefined;
+      const track = out.detector_track_id ?? (hintDetection?.track_id !== undefined ? hintDetection.track_id : lockRef?.trackId);
+      const rawLabel = out.detector_label ?? hintDetection?.label ?? lockRef?.label;
+      const baseLabel = sanitizeLabel(out.detector_label ?? hintDetection?.label ?? lockRef?.label ?? undefined) ?? lockRef?.baseLabel;
+      const nextScore = typeof out.detector_score === 'number' && Number.isFinite(out.detector_score)
+        ? out.detector_score
+        : hintDetection && typeof hintDetection.score === 'number' && Number.isFinite(hintDetection.score)
+          ? hintDetection.score
+          : lockRef?.score;
+      const existingCustom = lockRef?.customLabel;
+      const resolvedLabel = existingCustom && existingCustom.trim()
+        ? existingCustom
+        : (rawLabel ?? baseLabel ?? undefined);
+      setLockRef((prev) => {
+        if (!nextBox && !track && !rawLabel && !nextScore) return null;
+        return {
+          historyId,
+          trackId: track,
+          label: resolvedLabel,
+          baseLabel,
+          customLabel: existingCustom,
+          score: nextScore,
+          box: nextBox,
+        };
+      });
+      if (historyId) {
+        mutateHistory(historyId, (rec) => {
+          rec.lastBox = nextBox ?? b;
+          if (baseLabel) rec.baseLabel = baseLabel;
+          if (resolvedLabel) rec.label = resolvedLabel;
+          if (existingCustom !== undefined) {
+            rec.customLabel = existingCustom && existingCustom.trim() ? existingCustom : undefined;
+          }
+          linkDetTrackId(rec, track);
+          linkDetTrackId(rec, hintDetection?.track_id);
+        });
+      }
+      setBoxes?.([{ x1: b.x, y1: b.y, x2: b.x + b.w, y2: b.y + b.h, score: out.score, label: 'lock' }]);
 
       const cx = b.x + b.w * 0.5;
       const cy = b.y + b.h * 0.5;
       let promptExtra = '';
+
+      if (out.status === 'tracking') {
+        const now = Date.now();
+        if (now - lastMemoryIngestRef.current >= MEMORY_INGEST_INTERVAL_MS) {
+          lastMemoryIngestRef.current = now;
+          try {
+            const boxDataUrl = await createThumbFromBox(img, b);
+            if (boxDataUrl) {
+              const ingestLabel = existingCustom && existingCustom.trim() ? existingCustom : (resolvedLabel ?? undefined);
+              void ingestObjectMemory(boxDataUrl, track ?? lockRef?.trackId ?? trackId, ingestLabel ?? null);
+            }
+          } catch (err) {
+            console.warn('[LockTrack] memory ingest (step) failed:', err);
+          }
+        }
+      }
 
       if (trackMode === 'look_at') {
         const now = Date.now();
@@ -436,7 +855,21 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
         }
       }
 
-      setPromptInfo(`${origin === 'manual' ? 'step' : 'tracking'}: ${out.status}, score ${out.score.toFixed(2)}${promptExtra}`);
+      const fmt = (v?: number) => (typeof v === 'number' && Number.isFinite(v) ? v.toFixed(2) : undefined);
+      const infoBits: string[] = [
+        `${origin === 'manual' ? 'step' : 'tracking'}: ${out.status}`,
+      ];
+      if (out.box_source) infoBits.push(`via ${out.box_source}`);
+      infoBits.push(`score ${fmt(out.score) ?? 'n/a'}`);
+      if (typeof out.similarity === 'number' && Number.isFinite(out.similarity)) infoBits.push(`sim ${fmt(out.similarity)}`);
+      if (out.detector_track_id !== undefined && out.detector_track_id !== null) infoBits.push(`det ${out.detector_track_id}`);
+      if (typeof out.detector_score === 'number' && Number.isFinite(out.detector_score)) infoBits.push(`detScore ${fmt(out.detector_score)}`);
+      if (typeof out.miss_streak === 'number') infoBits.push(`miss ${out.miss_streak}`);
+      if (hintDetection && hintDetection.track_id !== undefined) infoBits.push(`hint ${hintDetection.track_id}`);
+      if (typeof out.hint_similarity === 'number' && Number.isFinite(out.hint_similarity)) infoBits.push(`hintSim ${fmt(out.hint_similarity)}`);
+      if (typeof out.hint_iou === 'number' && Number.isFinite(out.hint_iou)) infoBits.push(`hintIoU ${fmt(out.hint_iou)}`);
+      setPromptInfo(`${infoBits.join(', ')}${promptExtra}`);
+
       if (showHeatmap && out.heatmap) {
         const hm = `data:image/png;base64,${out.heatmap}`;
         setLastHeatmap(hm);
@@ -451,7 +884,38 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
       setPromptInfo(`${origin === 'manual' ? 'step' : 'tracking'} error: ${msg}`);
       return false;
     }
-  }, [trackId, getSnapshot, showHeatmap, maxSide, hmCmap, setLastBox, setStatus, setBoxes, trackMode, ensureFreeLookSession, stopFreeLookSession, deadZone, vxGain, sendBridge, scheduleFreeLookStop, setHeatmap, setPromptInfo]);
+  }, [
+    trackId,
+    setPromptInfo,
+    getSnapshot,
+    lockRef,
+    ltScanThr,
+    imgSize,
+    setLastDetections,
+    lastBox,
+    showHeatmap,
+    maxSide,
+    hmCmap,
+    setLastBox,
+    setStatus,
+    setLastBoxSource,
+    setLockRef,
+    setBoxes,
+    applyHistoryToDetections,
+    trackMode,
+    lookAtCooldownRef,
+    stopFreeLookSession,
+    sendBridge,
+    deadZone,
+    vxGain,
+    ensureFreeLookSession,
+    FREE_LOOK_STEP_TIMEOUT_MS,
+    scheduleFreeLookStop,
+    setLastHeatmap,
+    setHeatmap,
+    mutateHistory,
+    linkDetTrackId,
+  ]);
 
   const doStep = async () => {
     await performStep('manual');
@@ -553,6 +1017,27 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
     }
   };
 
+  const handleCustomLabelChange = React.useCallback((value: string) => {
+    setCustomLabelInput(value);
+    const trimmed = value.trim();
+    const historyId = lockRef?.historyId;
+    setLockRef(prev => {
+      if (!prev) return prev;
+      const nextCustom = trimmed ? trimmed : undefined;
+      if (prev.customLabel === nextCustom) return prev;
+      return { ...prev, customLabel: nextCustom };
+    });
+    if (historyId) {
+      mutateHistory(historyId, (rec) => {
+        rec.customLabel = trimmed ? trimmed : undefined;
+        if (!rec.label && trimmed) {
+          rec.label = trimmed;
+        }
+      });
+    }
+    setLastDetections(prev => applyHistoryToDetections([...prev]));
+  }, [lockRef, setLockRef, mutateHistory, setLastDetections, applyHistoryToDetections]);
+
   const doUnlock = async () => {
     console.log('[LockTrack] Unlock button pressed', { trackId });
     try {
@@ -568,6 +1053,10 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
     setBoxes?.([]);
     setPromptInfo('unlocked');
     setViews([]);
+    setLockRef(null);
+    setLastDetections([]);
+    setLastBoxSource(null);
+    setCustomLabelInput('');
     if (trackingActiveRef.current) {
       trackingActiveRef.current = false;
       setTrackingActive(false);
@@ -710,7 +1199,24 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
             </label>
           </>
         )}
-        <span className="text-[10px] text-gray-400">status: {status}</span>
+        <span className="text-[10px] text-gray-400">
+          status: {status}
+          {lastBoxSource ? ` via ${lastBoxSource}` : ''}
+          {lockRef?.trackId !== undefined ? ` · det ${lockRef.trackId}` : ''}
+          {typeof lockRef?.score === 'number' && Number.isFinite(lockRef.score) ? ` · detScore ${lockRef.score.toFixed(2)}` : ''}
+          {lockRef?.customLabel ? ` · label ${lockRef.customLabel}` : lockRef?.label ? ` · label ${lockRef.label}` : ''}
+        </span>
+        {trackId && (
+          <label className="flex items-center gap-1 text-[10px] text-gray-400">
+            custom label
+            <input
+              className="bg-gray-800 text-xs px-2 py-1 rounded w-28"
+              value={customLabelInput}
+              onChange={(e)=>handleCustomLabelChange(e.target.value)}
+              placeholder="name"
+            />
+          </label>
+        )}
       </div>
       {promptInfo && <div className="text-[10px] text-gray-400">{promptInfo}</div>}
       <div className="text-[10px] text-gray-400 mt-2">Labels (optional; used for LockTrack scan; same format as Detect)</div>
@@ -735,6 +1241,7 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
     return 640;
   });
   const [classesText, setClassesText] = React.useState<string>(() => localStorage.getItem('visionrt.classes') || '');
+  const [useSearchDb, setUseSearchDb] = React.useState<boolean>(()=>{ try { const raw = localStorage.getItem('visionrt.searchDb'); if (raw) return JSON.parse(raw); } catch {} return false; });
   const [busy, setBusy] = React.useState<boolean>(false);
   const [lastDetections, setLastDetections] = React.useState<Detection[]>([]);
   const [selectedIndex, setSelectedIndex] = React.useState<number>(-1);
@@ -755,6 +1262,7 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
   React.useEffect(() => { try { localStorage.setItem('visionrt.thr', JSON.stringify(thr)); } catch {} }, [thr]);
   React.useEffect(() => { try { localStorage.setItem('visionrt.imgSize', JSON.stringify(imgSize)); } catch {} }, [imgSize]);
   React.useEffect(() => { try { localStorage.setItem('visionrt.classes', classesText); } catch {} }, [classesText]);
+  React.useEffect(()=>{ try { localStorage.setItem('visionrt.searchDb', JSON.stringify(useSearchDb)); } catch {} }, [useSearchDb]);
   React.useEffect(() => { try { localStorage.setItem('visionrt.mode', JSON.stringify(mode)); } catch {} }, [mode]);
 
   const parsedClasses = React.useMemo(() => classesText.split(/\n|,|;/).map(s=>s.trim()).filter(Boolean).slice(0, 50), [classesText]);
@@ -769,7 +1277,7 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
     try {
       const img = await getSnapshot();
       if (mode === 'detect') {
-        const out = await analyzeRealtime({ imageBase64: img, threshold: thr, classes: parsedClasses, img_size: imgSize, signal: abortRef.current?.signal });
+        const out = await analyzeRealtime({ imageBase64: img, threshold: thr, classes: parsedClasses, img_size: imgSize, searchDb: useSearchDb, signal: abortRef.current?.signal });
         setMasks?.([]);
         setPoses?.([]);
         setClassResults([]);
@@ -832,11 +1340,13 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
   const thrRef = React.useRef(thr);
   const imgSizeRef = React.useRef(imgSize);
   const parsedClassesRef = React.useRef(parsedClasses);
+  const searchDbRef = React.useRef(useSearchDb);
 
   React.useEffect(() => { modeRef.current = mode; }, [mode]);
   React.useEffect(() => { thrRef.current = thr; }, [thr]);
   React.useEffect(() => { imgSizeRef.current = imgSize; }, [imgSize]);
   React.useEffect(() => { parsedClassesRef.current = parsedClasses; }, [parsedClasses]);
+  React.useEffect(() => { searchDbRef.current = useSearchDb; }, [useSearchDb]);
   // Stop continuous loop if switching to LockTrack (prevent UI input contention)
   React.useEffect(() => { if (mode === 'locktrack' && runningRef.current) { stop(); } }, [mode]);
 
@@ -855,7 +1365,7 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
 
         if (currentMode === 'detect') {
           console.log('[VisionRT] Sending detect request...');
-          const out = await analyzeRealtime({ imageBase64: img, threshold: currentThr, classes: currentClasses, img_size: currentImgSize, signal: abortRef.current?.signal });
+          const out = await analyzeRealtime({ imageBase64: img, threshold: currentThr, classes: currentClasses, img_size: currentImgSize, searchDb: searchDbRef.current, signal: abortRef.current?.signal });
           console.log('[VisionRT] Detect response received:', out.detections?.length, 'detections');
           if (!runningRef.current) break;
           setMasks?.([]);
@@ -942,7 +1452,15 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
 
       {(mode === 'detect' || mode === 'segment') && (
         <div className="flex-1 overflow-auto">
-          <div className="text-[10px] text-gray-400 mb-1">Labels (optional; used for YOLO‑E open‑vocab {mode === 'segment' ? 'segmentation' : 'detection'}; leave blank for prompt‑free)</div>
+          <div className="flex items-center justify-between mb-1">
+            <div className="text-[10px] text-gray-400">Labels (optional; used for YOLO‑E open‑vocab {mode === 'segment' ? 'segmentation' : 'detection'}; leave blank for prompt‑free)</div>
+            {mode === 'detect' && (
+              <label className="flex items-center gap-1 text-[10px] text-gray-400">
+                <input type="checkbox" className="accent-dji-blue" checked={useSearchDb} onChange={(e)=>setUseSearchDb(e.target.checked)} />
+                search DB
+              </label>
+            )}
+          </div>
           <textarea className="w-full h-full bg-gray-800 text-gray-200 text-xs p-2 rounded"
             placeholder={"person\ncar\ntruck"}
             value={classesText}
