@@ -46,6 +46,7 @@ import dji.sdk.keyvalue.value.camera.ZoomRatiosRange
 import dji.sdk.keyvalue.value.common.CameraLensType
 import dji.sdk.keyvalue.value.gimbal.GimbalSpeedRotation
 import dji.sdk.keyvalue.value.gimbal.CtrlInfo
+import dji.sdk.keyvalue.value.common.EmptyMsg
 import dji.v5.et.createCamera
 import dji.v5.et.create
 import dji.v5.et.action
@@ -181,6 +182,110 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             if (laserInfo != null) {
                 result["laser_measurement"] = laserInfo.toString()
             }
+
+            // Calculate focal length and FOV based on active lens type
+            if (index == ComponentIndexType.LEFT_OR_MAIN) {
+                when (activeLens) {
+                    CameraLensType.CAMERA_LENS_WIDE -> {
+                        // Wide camera has fixed focal length
+                        val wideFocalLength = 24  // mm (35mm equivalent: ~24mm)
+                        result["focal_length"] = wideFocalLength
+                        result["zoom_ratio"] = 1.0  // Wide doesn't zoom
+
+                        // Wide camera sensor specs
+                        val sensorWidth = 11.1  // mm
+                        val sensorHeight = 6.2  // mm
+                        val cropFactor = 2.0
+
+                        val actualFocalLength = wideFocalLength / cropFactor
+                        val horizontalFov = Math.toDegrees(2 * Math.atan(sensorWidth / (2 * actualFocalLength)))
+                        val verticalFov = Math.toDegrees(2 * Math.atan(sensorHeight / (2 * actualFocalLength)))
+
+                        result["display_fov"] = mapOf(
+                            "horizontal" to horizontalFov,
+                            "vertical" to verticalFov
+                        )
+                    }
+                    CameraLensType.CAMERA_LENS_ZOOM -> {
+                        // Zoom camera: 25-400mm (35mm equivalent)
+                        if (zoomRatio != null) {
+                            val baseFocalLength = 25.0  // mm at 1x zoom
+                            val focalLength = baseFocalLength * zoomRatio
+                            result["focal_length"] = focalLength
+
+                            // Zoom camera sensor
+                            val sensorWidth = 11.1  // mm
+                            val sensorHeight = 6.2  // mm
+                            val cropFactor = 3.1
+
+                            val actualFocalLength = focalLength / cropFactor
+                            val horizontalFov = Math.toDegrees(2 * Math.atan(sensorWidth / (2 * actualFocalLength)))
+                            val verticalFov = Math.toDegrees(2 * Math.atan(sensorHeight / (2 * actualFocalLength)))
+
+                            result["display_fov"] = mapOf(
+                                "horizontal" to horizontalFov,
+                                "vertical" to verticalFov
+                            )
+                        }
+                    }
+                    CameraLensType.CAMERA_LENS_THERMAL -> {
+                        // Thermal camera has different specs
+                        // Get thermal zoom ratio if available
+                        val thermalZoomKey = KeyTools.createCameraKey<Double>(
+                            CameraKey.KeyThermalZoomRatios,
+                            index,
+                            CameraLensType.CAMERA_LENS_THERMAL
+                        )
+                        val thermalZoomRatio = try {
+                            keyManager.getValue(thermalZoomKey) as? Double ?: 1.0
+                        } catch (_: Exception) {
+                            1.0
+                        }
+
+                        // Thermal camera: typically 13.5mm focal length
+                        val thermalBaseFocalLength = 13.5
+                        val thermalFocalLength = thermalBaseFocalLength * thermalZoomRatio
+                        result["focal_length"] = thermalFocalLength
+                        result["zoom_ratio"] = thermalZoomRatio
+
+                        // Thermal sensor (typically smaller)
+                        val sensorWidth = 8.0  // mm (approximate)
+                        val sensorHeight = 6.0  // mm
+                        val cropFactor = 4.3
+
+                        val actualFocalLength = thermalFocalLength / cropFactor
+                        val horizontalFov = Math.toDegrees(2 * Math.atan(sensorWidth / (2 * actualFocalLength)))
+                        val verticalFov = Math.toDegrees(2 * Math.atan(sensorHeight / (2 * actualFocalLength)))
+
+                        result["display_fov"] = mapOf(
+                            "horizontal" to horizontalFov,
+                            "vertical" to verticalFov
+                        )
+                    }
+                    else -> {
+                        // Fallback: use zoom lens calculations
+                        if (zoomRatio != null) {
+                            val baseFocalLength = 25.0
+                            val focalLength = baseFocalLength * zoomRatio
+                            result["focal_length"] = focalLength
+
+                            val sensorWidth = 11.1
+                            val sensorHeight = 6.2
+                            val cropFactor = 3.1
+                            val actualFocalLength = focalLength / cropFactor
+
+                            val horizontalFov = Math.toDegrees(2 * Math.atan(sensorWidth / (2 * actualFocalLength)))
+                            val verticalFov = Math.toDegrees(2 * Math.atan(sensorHeight / (2 * actualFocalLength)))
+
+                            result["display_fov"] = mapOf(
+                                "horizontal" to horizontalFov,
+                                "vertical" to verticalFov
+                            )
+                        }
+                    }
+                }
+            }
+
             result
         } catch (e: Exception) {
             Log.w(TAG, "collectCameraOpticsSnapshot error for $index: ${e.message}")
@@ -764,22 +869,94 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             val data = command.optJSONObject("data") ?: JSONObject()
             val indexName = data.optString("index", "LEFT_OR_MAIN").uppercase()
             val component = try { ComponentIndexType.valueOf(indexName) } catch (_: Exception) { ComponentIndexType.LEFT_OR_MAIN }
-            val keyManager = KeyManager.getInstance()
-            val currentAttitude = keyManager.getValue(KeyTools.createKey(GimbalKey.KeyGimbalAttitude, component)) as? Attitude
-            val targetPitch = if (data.has("pitch")) data.optDouble("pitch", 0.0) else 0.0
-            val targetYaw = if (data.has("yaw")) data.optDouble("yaw", 0.0) else 0.0
-            val currentPitch = currentAttitude?.pitch?.toDouble() ?: 0.0
-            val currentYaw = currentAttitude?.yaw?.toDouble() ?: 0.0
-            val pitchDiff = (targetPitch - currentPitch).coerceIn(-FREELOOK_MAX_RATE, FREELOOK_MAX_RATE)
-            val yawDiff = (targetYaw - currentYaw).coerceIn(-FREELOOK_MAX_RATE, FREELOOK_MAX_RATE)
 
-            executeGimbalVelocityCommand(yawDiff, pitchDiff)
-            executor.schedule({ executeGimbalVelocityCommand(0.0, 0.0) }, 800, java.util.concurrent.TimeUnit.MILLISECONDS)
-            sendGimbalResponse(clientId, true, "Gimbal reset command sent", targetYaw, targetPitch)
+            // Target angles for reset (default to 0,0 to center gimbal relative to aircraft)
+            val targetPitch = data.optDouble("pitch", 0.0)
+            val targetYaw = data.optDouble("yaw", 0.0)
+
+            // Try to use SDK's built-in reset if available (for factory reset/calibration)
+            val useFactoryReset = data.optBoolean("factory_reset", false)
+
+            if (useFactoryReset) {
+                // Use KeyRestoreFactorySettings for complete reset
+                try {
+                    val resetKey = KeyTools.createKey(GimbalKey.KeyRestoreFactorySettings, component)
+                    resetKey.action(EmptyMsg(),
+                        { // Success callback
+                            Log.i(TAG, "Gimbal factory reset successful")
+                            sendGimbalResponse(clientId, true, "Gimbal factory reset successful", 0.0, 0.0)
+                        },
+                        { error -> // Error callback
+                            Log.e(TAG, "Gimbal factory reset failed: $error")
+                            // Fallback to manual reset
+                            performManualGimbalReset(clientId, component, targetPitch, targetYaw)
+                        }
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "Factory reset not available, using manual reset: ${e.message}")
+                    performManualGimbalReset(clientId, component, targetPitch, targetYaw)
+                }
+            } else {
+                // Direct manual reset to specified angles
+                performManualGimbalReset(clientId, component, targetPitch, targetYaw)
+            }
 
         } catch (e: Exception) {
             Log.e(TAG, "gimbal_reset error: ${e.message}", e)
             sendGimbalResponse(clientId, false, e.message ?: "gimbal_reset error", 0.0, 0.0)
+        }
+    }
+
+    private fun performManualGimbalReset(clientId: String, component: ComponentIndexType, targetPitch: Double, targetYaw: Double) {
+        try {
+            val keyManager = KeyManager.getInstance()
+            val currentAttitude = keyManager.getValue(KeyTools.createKey(GimbalKey.KeyGimbalAttitude, component)) as? Attitude
+            val currentPitch = currentAttitude?.pitch?.toDouble() ?: 0.0
+
+            // For yaw, we need to use the relative yaw to properly zero the gimbal
+            val currentYawRelative = keyManager.getValue(KeyTools.createKey(GimbalKey.KeyYawRelativeToAircraftHeading, component)) as? Double ?: 0.0
+
+            // When zeroing, we want relative yaw to be 0 (aligned with aircraft)
+            // If currentYawRelative is negative (gimbal pointing left), we need positive rotation to center
+            // If currentYawRelative is positive (gimbal pointing right), we need negative rotation to center
+            val pitchRotation = targetPitch - currentPitch
+            val yawRotation = -currentYawRelative  // Negate to rotate back to center (target is 0)
+
+            Log.i(TAG, "Gimbal reset: currentPitch=$currentPitch, currentYawRelative=$currentYawRelative")
+            Log.i(TAG, "Gimbal reset: targetPitch=$targetPitch, targetYaw=$targetYaw")
+            Log.i(TAG, "Gimbal reset: pitchRotation=$pitchRotation, yawRotation=$yawRotation")
+            Log.i(TAG, "Gimbal reset: To center gimbal, rotating yaw by ${yawRotation}°")
+
+            // Use MORE steps for better completion
+            val steps = 20  // Increased from 10 to 30 for better completion
+            val stepDelay = 50L // ms between steps
+
+            executor.execute {
+                for (i in 1..steps) {
+                    val progress = i.toDouble() / steps
+
+                    // Calculate velocity for this step
+                    val pitchVel = if (i < steps) (pitchRotation / steps) * 20 else 0.0  // Scale to reasonable velocity
+                    val yawVel = if (i < steps) (yawRotation / steps) * 20 else 0.0
+
+                    executeGimbalVelocityCommand(yawVel.coerceIn(-FREELOOK_MAX_RATE, FREELOOK_MAX_RATE),
+                                                 pitchVel.coerceIn(-FREELOOK_MAX_RATE, FREELOOK_MAX_RATE))
+
+                    if (i < steps) {
+                        Thread.sleep(stepDelay)
+                    }
+                }
+
+                // Stop gimbal movement
+                executeGimbalVelocityCommand(0.0, 0.0)
+
+                // Report success
+                sendGimbalResponse(clientId, true, "Gimbal reset to ($targetPitch, $targetYaw)", targetYaw, targetPitch)
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Manual gimbal reset error: ${e.message}", e)
+            sendGimbalResponse(clientId, false, "Manual reset failed: ${e.message}", 0.0, 0.0)
         }
     }
 

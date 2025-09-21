@@ -2,9 +2,20 @@ import React from 'react';
 import { Panel, createPanelControls } from './Panel';
 import { analyzeRealtime, analyzeRealtimeSegment, getRealtimeVisionUrl } from '../agent/visionClient';
 import { lockTrackLock, lockTrackStep, lockTrackAddView, lockTrackUnlock, lockTrackRemoveView, getLocktrackBase } from '../agent/locktrackClient';
-import { ingestSample as ingestObjectMemorySample, searchSample as searchObjectMemorySample } from '../agent/objectMemoryClient';
+import {
+  ingestSample as ingestObjectMemorySample,
+  searchSample as searchObjectMemorySample,
+  listClusters,
+  getCluster,
+  fetchSampleImage,
+  type ObjectMemoryCluster,
+  type ObjectMemorySample,
+  type SampleTelemetryPayload,
+} from '../agent/objectMemoryClient';
 import type { Detection } from '../agent/visionClient';
 import { bridgeManager } from '../bridgeManager';
+import { projectRayToGroundNormalized, geographicToENU, type GeographicPoint } from '../utils/rayProjection';
+import type { TelemetryData } from '../types';
 
 export const visionRTPanelControls = createPanelControls('visionrt.panel', 'visionrtPanelVisibilityChange');
 
@@ -14,6 +25,106 @@ const MEMORY_INGEST_INTERVAL_MS = 2000;
 const MEMORY_LABEL_THRESHOLD = 0.82;
 
 type NormalizedBox = { x: number; y: number; w: number; h: number };
+
+async function cropImageToBox(imageDataUrl: string, box: NormalizedBox): Promise<string | null> {
+  if (!imageDataUrl) return null;
+  const norm = {
+    x: clamp01Value(box.x ?? 0),
+    y: clamp01Value(box.y ?? 0),
+    w: clamp01Value(box.w ?? 1),
+    h: clamp01Value(box.h ?? 1),
+  };
+  if (norm.w <= 0 || norm.h <= 0) return null;
+  return await new Promise<string | null>((resolve) => {
+    const imgEl = new Image();
+    imgEl.onload = () => {
+      try {
+        const sx = Math.max(0, Math.floor(norm.x * imgEl.width));
+        const sy = Math.max(0, Math.floor(norm.y * imgEl.height));
+        const sw = Math.max(1, Math.floor(norm.w * imgEl.width));
+        const sh = Math.max(1, Math.floor(norm.h * imgEl.height));
+        const canvas = document.createElement('canvas');
+        canvas.width = sw;
+        canvas.height = sh;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(null);
+          return;
+        }
+        ctx.drawImage(imgEl, sx, sy, sw, sh, 0, 0, sw, sh);
+        resolve(canvas.toDataURL('image/jpeg', 0.95));
+      } catch (err) {
+        console.warn('[VisionRT] thumbnail crop failed:', err);
+        resolve(null);
+      }
+    };
+    imgEl.onerror = () => resolve(null);
+    imgEl.src = imageDataUrl;
+  });
+}
+
+type LaserResultListener = (payload: any) => void;
+const objectMapLaserListeners = new Set<LaserResultListener>();
+let objectMapLaserBridgeHooked = false;
+
+function registerLaserResultListener(listener: LaserResultListener): () => void {
+  objectMapLaserListeners.add(listener);
+  if (!objectMapLaserBridgeHooked && typeof window !== 'undefined' && window.electronAPI?.onBridgeData) {
+    window.electronAPI.onBridgeData((data: any) => {
+      if (data?.type === 'camera_laser_result') {
+        objectMapLaserListeners.forEach((cb) => {
+          try {
+            cb(data);
+          } catch (err) {
+            console.warn('[ObjectMap] laser listener error:', err);
+          }
+        });
+      }
+    });
+    objectMapLaserBridgeHooked = true;
+  }
+  return () => {
+    objectMapLaserListeners.delete(listener);
+  };
+}
+
+const parseMaybeNumber = (value: any): number | null => {
+  if (typeof value === 'number' && isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const n = parseFloat(value);
+    if (!Number.isNaN(n) && isFinite(n)) return n;
+  }
+  return null;
+};
+
+const extractLocation3D = (payload: any): { latitude: number; longitude: number; altitude?: number } | null => {
+  if (!payload || typeof payload !== 'object') return null;
+  const loc = payload.location3d || payload.location3D || payload.location_3d || payload.waypoint;
+  if (!loc || typeof loc !== 'object') return null;
+  const latitude = parseMaybeNumber(loc.latitude ?? loc.lat ?? loc.latitude_deg ?? loc.latDegrees);
+  const longitude = parseMaybeNumber(loc.longitude ?? loc.lon ?? loc.longitude_deg ?? loc.lonDegrees);
+  const altitude = parseMaybeNumber(loc.altitude ?? loc.alt ?? loc.altitude_m ?? loc.altitudeMeters ?? loc.alt_m ?? loc.height);
+  if (latitude === null || longitude === null) return null;
+  return {
+    latitude,
+    longitude,
+    ...(altitude !== null ? { altitude } : {}),
+  };
+};
+
+const extractScreenPoint = (payload: any): { x: number; y: number } | null => {
+  if (!payload || typeof payload !== 'object') return null;
+  const pt = payload.screen_point || payload.screenPoint || payload.screen_point_norm || payload.screenPointNorm || payload.target_point;
+  if (!pt || typeof pt !== 'object') return null;
+  let x = parseMaybeNumber(pt.x ?? pt.u ?? pt.col ?? pt.column ?? pt.cx);
+  let y = parseMaybeNumber(pt.y ?? pt.v ?? pt.row ?? pt.r ?? pt.cy);
+  if (x === null || y === null) return null;
+  if (Math.abs(x) > 1) x = x / 100;
+  if (Math.abs(y) > 1) y = y / 100;
+  x = clamp01Value(x);
+  y = clamp01Value(y);
+  return { x, y };
+};
 
 interface LockReferenceInfo {
   trackId?: number | string;
@@ -303,42 +414,14 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
     }
   }, []);
 
-  const createThumbFromBox = React.useCallback(async (imageDataUrl: string, box: { x: number; y: number; w: number; h: number }): Promise<string | null> => {
-    if (!imageDataUrl) return null;
-    const norm = {
-      x: clamp01(box.x ?? 0),
-      y: clamp01(box.y ?? 0),
-      w: clamp01(box.w ?? 1),
-      h: clamp01(box.h ?? 1),
-    };
-    if (norm.w <= 0 || norm.h <= 0) return null;
-    return await new Promise<string | null>((resolve) => {
-      const imgEl = new Image();
-      imgEl.onload = () => {
-        try {
-          const sx = Math.max(0, Math.floor(norm.x * imgEl.width));
-          const sy = Math.max(0, Math.floor(norm.y * imgEl.height));
-          const sw = Math.max(1, Math.floor(norm.w * imgEl.width));
-          const sh = Math.max(1, Math.floor(norm.h * imgEl.height));
-          const canvas = document.createElement('canvas');
-          canvas.width = sw;
-          canvas.height = sh;
-          const ctx = canvas.getContext('2d');
-          if (!ctx) {
-            resolve(null);
-            return;
-          }
-          ctx.drawImage(imgEl, sx, sy, sw, sh, 0, 0, sw, sh);
-          resolve(canvas.toDataURL('image/jpeg', 0.95));
-        } catch (err) {
-          console.warn('[LockTrack] thumbnail crop failed:', err);
-          resolve(null);
-        }
-      };
-      imgEl.onerror = () => resolve(null);
-      imgEl.src = imageDataUrl;
+  const createThumbFromBox = React.useCallback((imageDataUrl: string, box: { x: number; y: number; w: number; h: number }): Promise<string | null> => {
+    return cropImageToBox(imageDataUrl, {
+      x: box.x ?? 0,
+      y: box.y ?? 0,
+      w: box.w ?? 1,
+      h: box.h ?? 1,
     });
-  }, [clamp01]);
+  }, []);
 
   React.useEffect(() => {
     if (!trackId) {
@@ -1225,6 +1308,803 @@ const LockTrackSection: React.FC<LockTrackSectionProps> = ({
   );
 };
 
+type ObjectMapStepKey = 'select' | 'detect' | 'measure' | 'ingest';
+type ObjectMapStatus = 'pending' | 'running' | 'done' | 'error';
+
+type ObjectMapStep = {
+  key: ObjectMapStepKey;
+  label: string;
+  status: ObjectMapStatus;
+  detail?: string;
+};
+
+type ObjectMapLogEntry = {
+  ts: number;
+  message: string;
+  level: 'info' | 'success' | 'error';
+};
+
+interface ObjectMapSectionProps {
+  getSnapshot: () => Promise<string>;
+  setBoxes?: (boxes: Detection[]) => void;
+  setMasks?: (masks: any[]) => void;
+  setPoses?: (poses: any[]) => void;
+  clearClassifications: () => void;
+  imgSize: number;
+  sendBridge: (command: any) => Promise<any>;
+  threshold: number;
+  createThumbFromBox: (imageDataUrl: string, box: NormalizedBox) => Promise<string | null>;
+}
+
+const ObjectMapSection: React.FC<ObjectMapSectionProps> = ({
+  getSnapshot,
+  setBoxes,
+  setMasks,
+  setPoses,
+  clearClassifications,
+  imgSize,
+  sendBridge,
+  threshold,
+  createThumbFromBox,
+}) => {
+  const [clusters, setClusters] = React.useState<ObjectMemoryCluster[]>([]);
+  const [clustersLoading, setClustersLoading] = React.useState<boolean>(false);
+  const [selectedId, setSelectedId] = React.useState<string>('');
+  const [clusterDetail, setClusterDetail] = React.useState<{ cluster: ObjectMemoryCluster; samples: ObjectMemorySample[] } | null>(null);
+  const [previewImage, setPreviewImage] = React.useState<string | null>(null);
+  const [detectionPreview, setDetectionPreview] = React.useState<string | null>(null);
+  const [logEntries, setLogEntries] = React.useState<ObjectMapLogEntry[]>([]);
+  const [steps, setSteps] = React.useState<ObjectMapStep[]>([
+    { key: 'select', label: 'Select cluster', status: 'pending' },
+    { key: 'detect', label: 'Find object', status: 'pending' },
+    { key: 'measure', label: 'Measure range', status: 'pending' },
+    { key: 'ingest', label: 'Save sample', status: 'pending' },
+  ]);
+  const [busy, setBusy] = React.useState<boolean>(false);
+  const [detection, setDetection] = React.useState<Detection | null>(null);
+  const [detectionBox, setDetectionBox] = React.useState<NormalizedBox | null>(null);
+  const [snapshotData, setSnapshotData] = React.useState<string | null>(null);
+  const [imageDims, setImageDims] = React.useState<{ width: number; height: number } | null>(null);
+  const [measurement, setMeasurement] = React.useState<{
+    distance?: number;
+    raw?: any;
+    ts?: number;
+    coords?: { latitude: number; longitude: number; altitude?: number };
+    screen?: { x: number; y: number };
+    origin?: {
+      location?: { latitude: number; longitude: number; altitude?: number };
+      attitude?: { roll?: number; pitch?: number; yaw?: number };
+      gimbal?: { roll?: number; pitch?: number; yaw?: number };
+    };
+  } | null>(null);
+  const [targetPoint, setTargetPoint] = React.useState<GeographicPoint | null>(null);
+  const [targetEnu, setTargetEnu] = React.useState<{ east: number; north: number; up: number } | null>(null);
+  const [promptsUsed, setPromptsUsed] = React.useState<string[]>([]);
+  const [metaLabelsUsed, setMetaLabelsUsed] = React.useState<string[]>([]);
+  const [latestTelemetry, setLatestTelemetry] = React.useState<TelemetryData | null>(() => bridgeManager.getState().bridgeData.telemetry);
+  const measurementTimeoutRef = React.useRef<number | null>(null);
+  const stepsRef = React.useRef<ObjectMapStep[]>(steps);
+  const detectionBoxRef = React.useRef<NormalizedBox | null>(null);
+  const imageDimsRef = React.useRef<{ width: number; height: number } | null>(null);
+  const telemetryRef = React.useRef<TelemetryData | null>(latestTelemetry);
+  const detectionRef = React.useRef<Detection | null>(null);
+  const promptsRef = React.useRef<string[]>(promptsUsed);
+  const metaLabelsRef = React.useRef<string[]>(metaLabelsUsed);
+
+  const pushLog = React.useCallback((message: string, level: 'info' | 'success' | 'error' = 'info') => {
+    setLogEntries((prev) => [{ ts: Date.now(), message, level }, ...prev].slice(0, 60));
+  }, []);
+
+  const formatOffsetValue = React.useCallback((value?: number) => {
+    if (typeof value !== 'number' || !isFinite(value)) return '—';
+    const normalized = Math.abs(value) < 1e-3 ? 0 : value;
+    return `${normalized.toFixed(1)} m`;
+  }, []);
+
+  const formatAngleValue = React.useCallback((value?: number) => {
+    if (typeof value !== 'number' || !isFinite(value)) return '—';
+    const normalized = Math.abs(value) < 1e-3 ? 0 : value;
+    return `${normalized.toFixed(1)}°`;
+  }, []);
+
+  const updateStep = React.useCallback((key: ObjectMapStepKey, patch: Partial<ObjectMapStep>) => {
+    setSteps((prev) => prev.map((step) => (step.key === key ? { ...step, ...patch } : step)));
+  }, []);
+
+  const resetSteps = React.useCallback((selectedLabel?: string) => {
+    setSteps([
+      { key: 'select', label: 'Select cluster', status: selectedLabel ? 'done' : 'pending', detail: selectedLabel },
+      { key: 'detect', label: 'Find object', status: 'pending' },
+      { key: 'measure', label: 'Measure range', status: 'pending' },
+      { key: 'ingest', label: 'Save sample', status: 'pending' },
+    ]);
+  }, []);
+
+  const readImageSize = React.useCallback((dataUrl: string): Promise<{ width: number; height: number }> => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve({ width: img.width || 0, height: img.height || 0 });
+      img.onerror = (err) => reject(err);
+      img.src = dataUrl;
+    });
+  }, []);
+
+  const wait = React.useCallback((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)), []);
+
+  const clearMeasurementTimeout = React.useCallback(() => {
+    if (measurementTimeoutRef.current !== null) {
+      window.clearTimeout(measurementTimeoutRef.current);
+      measurementTimeoutRef.current = null;
+    }
+  }, []);
+
+  const refreshClusters = React.useCallback(async () => {
+    setClustersLoading(true);
+    try {
+      const res = await listClusters({ limit: 200 });
+      setClusters(res.clusters);
+      pushLog(`Loaded ${res.clusters.length} clusters`, 'info');
+    } catch (err) {
+      pushLog(`Cluster list error: ${String(err)}`, 'error');
+    } finally {
+      setClustersLoading(false);
+    }
+  }, [pushLog]);
+
+  const loadClusterDetail = React.useCallback(async (clusterId: string) => {
+    if (!clusterId) {
+      setClusterDetail(null);
+      setPreviewImage(null);
+      resetSteps();
+      setDetection(null);
+      setDetectionBox(null);
+      setSnapshotData(null);
+      setImageDims(null);
+      setMeasurement(null);
+      setTargetPoint(null);
+      setTargetEnu(null);
+      setPromptsUsed([]);
+      setMetaLabelsUsed([]);
+      setDetectionPreview(null);
+      setBoxes?.([]);
+      setMasks?.([]);
+      setPoses?.([]);
+      clearClassifications();
+      return;
+    }
+    setBusy(true);
+    try {
+      const detail = await getCluster(clusterId);
+      setClusterDetail(detail);
+      const label = detail.cluster.label || clusterId;
+      resetSteps(label);
+      setDetection(null);
+      setDetectionBox(null);
+      setSnapshotData(null);
+      setImageDims(null);
+      setMeasurement(null);
+      setTargetPoint(null);
+      setTargetEnu(null);
+      setPromptsUsed([]);
+      setMetaLabelsUsed([]);
+      setDetectionPreview(null);
+      setBoxes?.([]);
+      setMasks?.([]);
+      setPoses?.([]);
+      clearClassifications();
+      pushLog(`Selected cluster ${label}`, 'info');
+      const samples = detail.samples;
+      if (samples.length) {
+        const lastSample = samples[samples.length - 1];
+        try {
+          const img = await fetchSampleImage(lastSample.sample_id);
+          setPreviewImage(img);
+        } catch (err) {
+          pushLog(`Preview load failed: ${String(err)}`, 'error');
+          setPreviewImage(null);
+        }
+      } else {
+        setPreviewImage(null);
+      }
+    } catch (err) {
+      pushLog(`Load cluster error: ${String(err)}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  }, [clearClassifications, pushLog, resetSteps, setBoxes, setMasks, setPoses]);
+
+  React.useEffect(() => {
+    bridgeManager.init();
+    setLatestTelemetry(bridgeManager.getState().bridgeData.telemetry);
+    const unsubscribe = bridgeManager.subscribe(() => {
+      setLatestTelemetry(bridgeManager.getState().bridgeData.telemetry);
+    });
+    return unsubscribe;
+  }, []);
+
+  React.useEffect(() => {
+    setBoxes?.([]);
+    setMasks?.([]);
+    setPoses?.([]);
+    clearClassifications();
+    return () => {
+      setBoxes?.([]);
+      setMasks?.([]);
+      setPoses?.([]);
+      clearClassifications();
+    };
+  }, [setBoxes, setMasks, setPoses, clearClassifications]);
+
+  React.useEffect(() => { stepsRef.current = steps; }, [steps]);
+  React.useEffect(() => { detectionBoxRef.current = detectionBox; }, [detectionBox]);
+  React.useEffect(() => { imageDimsRef.current = imageDims; }, [imageDims]);
+  React.useEffect(() => { telemetryRef.current = latestTelemetry; }, [latestTelemetry]);
+  React.useEffect(() => { detectionRef.current = detection; }, [detection]);
+  React.useEffect(() => { promptsRef.current = promptsUsed; }, [promptsUsed]);
+  React.useEffect(() => { metaLabelsRef.current = metaLabelsUsed; }, [metaLabelsUsed]);
+
+  const parseLaserMeasurement = React.useCallback((payload: any) => {
+    const outer = payload?.data ?? payload;
+    const inner = outer?.data ?? outer;
+    const distance = parseMaybeNumber(inner?.distance_m ?? inner?.distanceMeters ?? inner?.distance);
+    const coords = extractLocation3D(inner);
+    const screen = extractScreenPoint(inner);
+    return { distance, coords, screen, raw: payload };
+  }, []);
+
+  const handleLaserResult = React.useCallback((data: any) => {
+    const isAwaiting = stepsRef.current.find((step) => step.key === 'measure')?.status === 'running';
+    if (!isAwaiting) {
+      return;
+    }
+    clearMeasurementTimeout();
+    const measurementInfo = parseLaserMeasurement(data);
+    const distance = measurementInfo.distance;
+    const telemetry = telemetryRef.current;
+    const box = detectionBoxRef.current;
+    const dims = imageDimsRef.current;
+    const originLocationRaw = telemetry?.location;
+    const originLat = parseMaybeNumber(originLocationRaw?.latitude);
+    const originLon = parseMaybeNumber(originLocationRaw?.longitude);
+    const originAltitude = parseMaybeNumber(originLocationRaw?.altitude)
+      ?? parseMaybeNumber(telemetry?.altitude_above_home)
+      ?? parseMaybeNumber(telemetry?.altitude_above_takeoff)
+      ?? parseMaybeNumber(telemetry?.altitude_barometric);
+    const originLocation = originLat !== null && originLon !== null
+      ? {
+          latitude: originLat,
+          longitude: originLon,
+          ...(originAltitude !== null ? { altitude: originAltitude } : {}),
+        }
+      : undefined;
+    const originAttitudeRaw = telemetry?.attitude;
+    const originAttitude = originAttitudeRaw
+      ? {
+          roll: parseMaybeNumber(originAttitudeRaw.roll) ?? undefined,
+          pitch: parseMaybeNumber(originAttitudeRaw.pitch) ?? undefined,
+          yaw: parseMaybeNumber(originAttitudeRaw.yaw) ?? undefined,
+        }
+      : undefined;
+    const originGimbalAttitudeRaw = telemetry?.gimbals?.find((g) => g.index === 'LEFT_OR_MAIN')?.attitude;
+    const originGimbalAttitude = originGimbalAttitudeRaw
+      ? {
+          roll: parseMaybeNumber(originGimbalAttitudeRaw.roll) ?? undefined,
+          pitch: parseMaybeNumber(originGimbalAttitudeRaw.pitch) ?? undefined,
+          yaw: parseMaybeNumber(originGimbalAttitudeRaw.yaw) ?? undefined,
+        }
+      : undefined;
+
+    setMeasurement({
+      distance: distance ?? undefined,
+      raw: data,
+      ts: Date.now(),
+      coords: measurementInfo.coords ?? undefined,
+      screen: measurementInfo.screen ?? undefined,
+      origin: {
+        location: originLocation,
+        attitude: originAttitude,
+        gimbal: originGimbalAttitude,
+      },
+    });
+
+    if (distance !== null && distance > 0) {
+      updateStep('measure', { status: 'done', detail: `${distance.toFixed(1)} m` });
+      pushLog(`Laser distance ${distance.toFixed(2)} m`, 'success');
+    } else if (measurementInfo.coords) {
+      updateStep('measure', { status: 'done', detail: 'coords only' });
+      pushLog('Laser reported coordinates without distance', 'info');
+    } else {
+      updateStep('measure', { status: 'error', detail: 'no distance' });
+      pushLog('Laser result missing distance', 'error');
+    }
+
+    let target: GeographicPoint | null = null;
+    if (measurementInfo.coords && isFinite(measurementInfo.coords.latitude) && isFinite(measurementInfo.coords.longitude)) {
+      target = {
+        latitude: measurementInfo.coords.latitude,
+        longitude: measurementInfo.coords.longitude,
+        altitude: measurementInfo.coords.altitude ?? originAltitude ?? 0,
+      };
+    }
+
+    if (!target && telemetry && box && dims && distance !== null && distance > 0) {
+      const cx = clamp01Value(box.x + box.w / 2);
+      const cy = clamp01Value(box.y + box.h / 2);
+      target = projectRayToGroundNormalized(telemetry, cx, cy, dims.width, dims.height, false, distance ?? undefined);
+    }
+
+    if (target) {
+      const altitude = parseMaybeNumber(target.altitude) ?? originAltitude ?? 0;
+      target = { ...target, altitude };
+    }
+
+    if (target) {
+      setTargetPoint(target);
+      if (originLocation) {
+        const enu = geographicToENU(target, {
+          latitude: originLocation.latitude,
+          longitude: originLocation.longitude,
+          altitude: originAltitude ?? 0,
+        });
+        if ([enu.east, enu.north, enu.up].every((v) => typeof v === 'number' && isFinite(v))) {
+          setTargetEnu(enu);
+          pushLog(`Target offset: E ${enu.east.toFixed(1)} m, N ${enu.north.toFixed(1)} m`, 'info');
+        } else {
+          setTargetEnu(null);
+        }
+      } else {
+        setTargetEnu(null);
+      }
+    } else {
+      setTargetPoint(null);
+      setTargetEnu(null);
+    }
+
+    sendBridge({ type: 'camera_laser_enable', data: { enabled: false } }).catch(() => {});
+  }, [clearMeasurementTimeout, parseLaserMeasurement, pushLog, sendBridge, updateStep]);
+
+  React.useEffect(() => {
+    const unsubscribe = registerLaserResultListener(handleLaserResult);
+    return unsubscribe;
+  }, [handleLaserResult]);
+
+  React.useEffect(() => {
+    void refreshClusters();
+  }, [refreshClusters]);
+
+  const handleSelectCluster = React.useCallback(async (clusterId: string) => {
+    setSelectedId(clusterId);
+    await loadClusterDetail(clusterId);
+  }, [loadClusterDetail]);
+
+  const handleDetect = React.useCallback(async () => {
+    if (!selectedId) {
+      pushLog('Select a cluster first', 'error');
+      return;
+    }
+    if (busy) return;
+    setBusy(true);
+    updateStep('detect', { status: 'running', detail: 'Detecting…' });
+    setBoxes?.([]);
+    setMasks?.([]);
+    setPoses?.([]);
+    clearClassifications();
+    setDetection(null);
+    setDetectionBox(null);
+    setMeasurement(null);
+    setTargetPoint(null);
+    setTargetEnu(null);
+    setDetectionPreview(null);
+    try {
+      const snapshot = await getSnapshot();
+      const dims = await readImageSize(snapshot).catch(() => ({ width: imgSize, height: imgSize }));
+      const labelStats = clusterDetail?.cluster.detect_label_stats || [];
+      const prompts = labelStats.map((s) => s.label).filter(Boolean);
+      let classes = prompts.slice(0, 6);
+      if (classes.length === 0 && clusterDetail?.cluster.label) {
+        classes = [clusterDetail.cluster.label];
+      }
+      setPromptsUsed(classes);
+      pushLog(`Detect prompts: ${classes.length ? classes.join(', ') : '(prompt-free)'}`);
+      const res = await analyzeRealtime({
+        imageBase64: snapshot,
+        threshold,
+        classes,
+        img_size: imgSize,
+        searchDb: true,
+        memoryClusterIds: [selectedId],
+      });
+      setMetaLabelsUsed(res.meta?.ovLabelsUsed || classes);
+      if (res.meta?.memoryLabelPrompts?.length) {
+        pushLog(`Memory hints: ${res.meta.memoryLabelPrompts.join(', ')}`);
+      }
+      const detections = res.detections || [];
+      if (!detections.length) {
+        updateStep('detect', { status: 'error', detail: 'no detections' });
+        pushLog('No detections found', 'error');
+        setBoxes?.([]);
+        return;
+      }
+      const preferred = detections.find((det) => det.memory_cluster_id && det.memory_cluster_id === selectedId);
+      const best = preferred || detections.slice().sort((a, b) => (b.score ?? 0) - (a.score ?? 0))[0];
+      const box = detectionToBox(best);
+      setDetection(best);
+      setDetectionBox(box);
+      setSnapshotData(snapshot);
+      setImageDims(dims);
+      setBoxes?.(detections);
+      setMasks?.([]);
+      setPoses?.([]);
+      clearClassifications();
+      try {
+        const thumb = await createThumbFromBox(snapshot, box);
+        setDetectionPreview(thumb);
+      } catch {
+        setDetectionPreview(null);
+      }
+      setMeasurement(null);
+      setTargetPoint(null);
+      setTargetEnu(null);
+      updateStep('detect', { status: 'done', detail: `${((best.score ?? 0) * 100).toFixed(1)}%` });
+      updateStep('measure', { status: 'pending', detail: undefined });
+      updateStep('ingest', { status: 'pending', detail: undefined });
+    } catch (err) {
+      updateStep('detect', { status: 'error', detail: String(err) });
+      pushLog(`Detect error: ${String(err)}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, clearClassifications, createThumbFromBox, getSnapshot, imgSize, analyzeRealtime, threshold, clusterDetail, pushLog, selectedId, setBoxes, setMasks, setPoses, updateStep, readImageSize]);
+
+  const handleMeasure = React.useCallback(async () => {
+    const box = detectionBoxRef.current;
+    const det = detectionRef.current;
+    if (!det || !box) {
+      pushLog('Run detection first', 'error');
+      return;
+    }
+    if (busy) return;
+    setBusy(true);
+    updateStep('measure', { status: 'running', detail: 'Centering…' });
+    clearMeasurementTimeout();
+    setMeasurement(null);
+    setTargetPoint(null);
+    setTargetEnu(null);
+    const cx = clamp01Value(box.x + box.w / 2);
+    const cy = clamp01Value(box.y + box.h / 2);
+    try {
+      //const tapRes = await sendBridge({ type: 'gimbal_tap_target', data: { x: cx, y: cy } });
+      //if (tapRes && tapRes.success === false) {
+      //  throw new Error(tapRes.error || 'tap_target failed');
+      //}
+      //await wait(400);
+      pushLog('Camera centering command sent', 'success');
+      updateStep('measure', { status: 'running', detail: 'Measuring…' });
+
+      await sendBridge({ type: 'camera_laser_enable', data: { enabled: true } });
+      await wait(150);
+      const res = await sendBridge({ type: 'camera_laser_measure', data: { x: cx, y: cy } });
+      if (res && res.success === false) {
+        throw new Error(res.error || 'measure failed');
+      }
+      pushLog('Laser measurement triggered', 'info');
+      measurementTimeoutRef.current = window.setTimeout(() => {
+        updateStep('measure', { status: 'error', detail: 'timeout' });
+        pushLog('Laser measurement timeout', 'error');
+        setMeasurement(null);
+        setTargetPoint(null);
+        setTargetEnu(null);
+      }, 4000);
+    } catch (err) {
+      updateStep('measure', { status: 'error', detail: String(err) });
+      pushLog(`Measure error: ${String(err)}`, 'error');
+      sendBridge({ type: 'camera_laser_enable', data: { enabled: false } }).catch(() => {});
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, pushLog, sendBridge, updateStep, wait, clearMeasurementTimeout]);
+
+  const handleIngest = React.useCallback(async () => {
+    const det = detectionRef.current;
+    const box = detectionBoxRef.current;
+    const snapshot = snapshotData;
+    const dims = imageDimsRef.current;
+    if (!selectedId || !det || !box || !snapshot || !dims) {
+      pushLog('Missing detection or snapshot data', 'error');
+      return;
+    }
+    const hasDistance = typeof measurement?.distance === 'number' && measurement.distance > 0;
+    const hasCoords = !!measurement?.coords;
+    if (!hasDistance && !hasCoords) {
+      pushLog('Measure distance before saving', 'error');
+      return;
+    }
+    const telemetry = telemetryRef.current;
+    if (!telemetry || !telemetry.location) {
+      pushLog('Telemetry unavailable', 'error');
+      return;
+    }
+    if (busy) return;
+    setBusy(true);
+    updateStep('ingest', { status: 'running', detail: 'Saving…' });
+    try {
+      const crop = await createThumbFromBox(snapshot, box);
+      if (!crop) throw new Error('Crop failed');
+      const rawLabel = det.memory_label || det.label || undefined;
+      const normalizedLabel = sanitizeLabel(rawLabel);
+      const gimbal = telemetry.gimbals?.find((g) => g.index === 'LEFT_OR_MAIN');
+      const sourceCamera = telemetry.camera_optics?.index || telemetry.camera_optics?.lens_type || telemetry.camera_optics?.lens;
+      const locationRaw = telemetry.location;
+      const originLat = parseMaybeNumber(locationRaw?.latitude);
+      const originLon = parseMaybeNumber(locationRaw?.longitude);
+      const originAltitude = parseMaybeNumber(locationRaw?.altitude)
+        ?? parseMaybeNumber(telemetry.altitude_above_home)
+        ?? parseMaybeNumber(telemetry.altitude_above_takeoff)
+        ?? parseMaybeNumber(telemetry.altitude_barometric);
+      const dronePosition = originLat !== null && originLon !== null ? {
+        latitude: originLat,
+        longitude: originLon,
+        ...(originAltitude !== null ? { altitude_m: originAltitude } : {}),
+      } : undefined;
+      const droneOrientation = telemetry.attitude ? {
+        yaw: parseMaybeNumber(telemetry.attitude.yaw) ?? undefined,
+        pitch: parseMaybeNumber(telemetry.attitude.pitch) ?? undefined,
+        roll: parseMaybeNumber(telemetry.attitude.roll) ?? undefined,
+      } : undefined;
+      const gimbalOrientation = gimbal?.attitude ? {
+        yaw: parseMaybeNumber(gimbal.attitude.yaw) ?? undefined,
+        pitch: parseMaybeNumber(gimbal.attitude.pitch) ?? undefined,
+        roll: parseMaybeNumber(gimbal.attitude.roll) ?? undefined,
+      } : undefined;
+      let target = targetPoint;
+      if (!target && measurement?.coords) {
+        target = {
+          latitude: measurement.coords.latitude,
+          longitude: measurement.coords.longitude,
+          altitude: measurement.coords.altitude ?? originAltitude ?? 0,
+        };
+      }
+      const objectPosition: SampleTelemetryPayload['object_position'] = target
+        ? {
+            latitude: target.latitude,
+            longitude: target.longitude,
+            altitude_m: target.altitude,
+          }
+        : {};
+      if (hasDistance && typeof measurement?.distance === 'number') {
+        objectPosition.distance_m = measurement.distance;
+      }
+      let enuOffset: { east: number; north: number; up: number } | undefined;
+      if (target && originLat !== null && originLon !== null) {
+        enuOffset = geographicToENU(target, {
+          latitude: originLat,
+          longitude: originLon,
+          altitude: originAltitude ?? 0,
+        });
+      }
+      const telemetryPayload: SampleTelemetryPayload = {
+        drone_position: dronePosition,
+        drone_orientation: droneOrientation,
+        gimbal_orientation: gimbalOrientation,
+        object_position: objectPosition,
+        source_camera: sourceCamera,
+        timestamp: Date.now() / 1000,
+        extra: {
+          object_map: {
+            prompts: promptsRef.current,
+            ov_labels_used: metaLabelsRef.current,
+            detection_score: det.score,
+            memory_label: det.memory_label,
+            memory_similarity: det.memory_similarity,
+            track_id: det.track_id ?? null,
+            enu_offset: enuOffset,
+            screen_point: measurement?.screen,
+            laser_location: measurement?.coords,
+            aircraft: {
+              location: measurement?.origin?.location,
+              attitude: measurement?.origin?.attitude,
+              gimbal: measurement?.origin?.gimbal,
+            },
+          },
+        },
+      };
+      await ingestObjectMemorySample({
+        image: crop,
+        track_id: det.track_id != null ? String(det.track_id) : undefined,
+        label: clusterDetail?.cluster.label || undefined,
+        telemetry: telemetryPayload,
+        detectLabel: normalizedLabel,
+        detectLabelRaw: rawLabel,
+      });
+      pushLog('Saved sample to object memory', 'success');
+      updateStep('ingest', { status: 'done', detail: 'saved' });
+      await refreshClusters();
+      await loadClusterDetail(selectedId);
+    } catch (err) {
+      updateStep('ingest', { status: 'error', detail: String(err) });
+      pushLog(`Save error: ${String(err)}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  }, [clusterDetail, createThumbFromBox, ingestObjectMemorySample, loadClusterDetail, measurement, pushLog, refreshClusters, selectedId, snapshotData, targetPoint, telemetryRef, updateStep, busy]);
+
+  const handleReset = React.useCallback(() => {
+    setDetection(null);
+    setDetectionBox(null);
+    setSnapshotData(null);
+    setImageDims(null);
+    setDetectionPreview(null);
+    setMeasurement(null);
+    setTargetPoint(null);
+    setTargetEnu(null);
+    setBoxes?.([]);
+    setMasks?.([]);
+    setPoses?.([]);
+    clearClassifications();
+    updateStep('detect', { status: 'pending', detail: undefined });
+    updateStep('measure', { status: 'pending', detail: undefined });
+    updateStep('ingest', { status: 'pending', detail: undefined });
+  }, [clearClassifications, setBoxes, setMasks, setPoses, updateStep]);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center gap-2">
+        <button className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded" onClick={() => refreshClusters()} disabled={clustersLoading || busy}>Refresh</button>
+        <select
+          className="bg-gray-800 text-xs px-2 py-1 rounded min-w-[200px]"
+          value={selectedId}
+          onChange={(e) => void handleSelectCluster(e.target.value)}
+        >
+          <option value="">Choose cluster…</option>
+          {clusters.map((c) => (
+            <option key={c.cluster_id} value={c.cluster_id}>
+              {(c.label || '(unlabeled)')} · {c.sample_count}
+            </option>
+          ))}
+        </select>
+        {clustersLoading && <span className="text-[10px] text-gray-500">loading…</span>}
+        {busy && <span className="text-[10px] text-gray-500">working…</span>}
+        <button className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded" onClick={handleReset} disabled={busy}>Clear</button>
+      </div>
+
+      {clusterDetail && (
+        <div className="border border-gray-700 rounded p-2 text-[10px] text-gray-300 bg-gray-900/40">
+          <div className="flex items-center justify-between">
+            <div className="font-semibold text-gray-100">{clusterDetail.cluster.label || '(unlabeled)'}</div>
+            <div className="text-gray-500">{clusterDetail.cluster.sample_count} samples · μ {(clusterDetail.cluster.mean_similarity ?? 0).toFixed(3)}</div>
+          </div>
+          {clusterDetail.cluster.detect_label_stats?.length ? (
+            <div className="text-gray-400 mt-1">YOLO labels: {clusterDetail.cluster.detect_label_stats.map((s) => `${s.label}(${s.count})`).join(', ')}</div>
+          ) : (
+            <div className="text-gray-500 mt-1">No detection labels recorded yet</div>
+          )}
+          {clusterDetail.cluster.latest_sample?.telemetry?.object_position?.distance_m && (
+            <div className="text-gray-500 mt-1">
+              Last range: {clusterDetail.cluster.latest_sample.telemetry.object_position.distance_m?.toFixed(2)} m
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="flex flex-col gap-2">
+          <div className="border border-gray-700 rounded p-2 text-[10px] text-gray-400 bg-gray-900/40">
+            {steps.map((step) => (
+              <div key={step.key} className="flex items-center justify-between py-0.5">
+                <span>{step.label}</span>
+                <span className={
+                  step.status === 'done'
+                    ? 'text-emerald-400'
+                    : step.status === 'running'
+                    ? 'text-blue-300'
+                    : step.status === 'error'
+                    ? 'text-red-400'
+                    : 'text-gray-500'
+                }>
+                  {step.status}{step.detail ? ` · ${step.detail}` : ''}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 text-[10px]">
+            <button className="px-2 py-1 bg-indigo-700 hover:bg-indigo-600 rounded" onClick={handleDetect} disabled={busy || !selectedId}>Find</button>
+            <button className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded" onClick={handleMeasure} disabled={busy || !detection}>Measure</button>
+            <button
+              className="px-2 py-1 bg-green-700 hover:bg-green-600 rounded disabled:opacity-50 disabled:hover:bg-green-700"
+              onClick={handleIngest}
+              disabled={busy || !detection || !(measurement?.distance || measurement?.coords)}
+            >
+              Save
+            </button>
+          </div>
+
+          <div className="border border-gray-700 rounded p-2 text-[10px] text-gray-400 bg-gray-900/40">
+            <div className="font-semibold text-gray-200 mb-1">Measurement</div>
+            <div>
+              Distance: {typeof measurement?.distance === 'number' && isFinite(measurement.distance)
+                ? `${measurement.distance.toFixed(2)} m`
+                : measurement?.coords ? '— (coords only)' : '—'}
+            </div>
+            {measurement?.coords && (
+              <div className="mt-1">
+                <div>Laser Lat: {measurement.coords.latitude.toFixed(6)}</div>
+                <div>Laser Lon: {measurement.coords.longitude.toFixed(6)}</div>
+                <div>Laser Alt: {typeof measurement.coords.altitude === 'number' && isFinite(measurement.coords.altitude) ? `${measurement.coords.altitude.toFixed(1)} m` : '–'}</div>
+              </div>
+            )}
+            {measurement?.screen && (
+              <div className="text-gray-500">Screen: ({measurement.screen.x.toFixed(3)}, {measurement.screen.y.toFixed(3)})</div>
+            )}
+            <div className="mt-1">
+              <div>Target Lat: {targetPoint ? targetPoint.latitude.toFixed(6) : '—'}</div>
+              <div>Target Lon: {targetPoint ? targetPoint.longitude.toFixed(6) : '—'}</div>
+              <div>Target Alt: {targetPoint ? `${targetPoint.altitude.toFixed(1)} m` : '—'}</div>
+            </div>
+            {measurement?.origin?.location && (
+              <div className="mt-1">
+                <div>Aircraft Lat: {measurement.origin.location.latitude?.toFixed(6) ?? '—'}</div>
+                <div>Aircraft Lon: {measurement.origin.location.longitude?.toFixed(6) ?? '—'}</div>
+                <div>Aircraft Alt: {typeof measurement.origin.location.altitude === 'number' && isFinite(measurement.origin.location.altitude)
+                  ? `${measurement.origin.location.altitude.toFixed(1)} m`
+                  : '—'}</div>
+              </div>
+            )}
+            {measurement?.origin?.attitude && (
+              <div className="mt-1">
+                <div>Aircraft Roll: {formatAngleValue(measurement.origin.attitude.roll)}</div>
+                <div>Aircraft Pitch: {formatAngleValue(measurement.origin.attitude.pitch)}</div>
+                <div>Aircraft Yaw: {formatAngleValue(measurement.origin.attitude.yaw)}</div>
+              </div>
+            )}
+            {measurement?.origin?.gimbal && (
+              <div className="mt-1">
+                <div>Gimbal Pitch: {formatAngleValue(measurement.origin.gimbal.pitch)}</div>
+                <div>Gimbal Yaw: {formatAngleValue(measurement.origin.gimbal.yaw)}</div>
+                <div>Gimbal Roll: {formatAngleValue(measurement.origin.gimbal.roll)}</div>
+              </div>
+            )}
+            {targetEnu && (
+              <div className="mt-1">
+                <div>Offset E: {formatOffsetValue(targetEnu.east)}</div>
+                <div>Offset N: {formatOffsetValue(targetEnu.north)}</div>
+                <div>Offset Up: {formatOffsetValue(targetEnu.up)}</div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <div className="grid grid-cols-2 gap-2">
+            {previewImage && (
+              <div className="border border-gray-700 rounded overflow-hidden">
+                <div className="bg-gray-800 text-[10px] text-gray-400 px-2 py-1">Cluster preview</div>
+                <img src={previewImage} alt="cluster-preview" className="w-full h-32 object-cover" />
+              </div>
+            )}
+            {detectionPreview && (
+              <div className="border border-gray-700 rounded overflow-hidden">
+                <div className="bg-gray-800 text-[10px] text-gray-400 px-2 py-1">Detection</div>
+                <img src={detectionPreview} alt="detection-preview" className="w-full h-32 object-cover" />
+              </div>
+            )}
+          </div>
+
+          <div className="border border-gray-700 rounded p-2 text-[10px] text-gray-400 bg-gray-900/40 max-h-40 overflow-y-auto">
+            <div className="font-semibold text-gray-200 mb-1">Activity</div>
+            {logEntries.length === 0 && <div className="text-gray-600">No activity yet</div>}
+            {logEntries.map((entry) => (
+              <div key={entry.ts} className={entry.level === 'error' ? 'text-red-400' : entry.level === 'success' ? 'text-emerald-400' : 'text-gray-400'}>
+                {new Date(entry.ts).toLocaleTimeString()} · {entry.message}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSnapshot, setBoxes, setMasks, setPoses, setMaskOpacity, setColorizeById, setDetectThickness, setHeatmap, setHeatmapOpacity }) => {
   const [running, setRunning] = React.useState<boolean>(() => {
     try { const raw = localStorage.getItem('visionrt.running'); if (raw) return JSON.parse(raw); } catch {}
@@ -1248,8 +2128,16 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
   const [promptImage, setPromptImage] = React.useState<string | null>(null);
   const [promptInfo, setPromptInfo] = React.useState<string>('');
   const abortRef = React.useRef<AbortController | null>(null);
-  const [mode, setMode] = React.useState<'detect'|'segment'|'locktrack'>(() => {
-    try { const raw = localStorage.getItem('visionrt.mode'); if (raw) return JSON.parse(raw); } catch {}
+  const [mode, setMode] = React.useState<'detect'|'segment'|'locktrack'|'objectmap'>(() => {
+    try {
+      const raw = localStorage.getItem('visionrt.mode');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed === 'detect' || parsed === 'segment' || parsed === 'locktrack' || parsed === 'objectmap') {
+          return parsed;
+        }
+      }
+    } catch {}
     return 'detect';
   });
   const [lockViews, setLockViews] = React.useState<LockTrackView[]>([]);
@@ -1335,6 +2223,16 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
     setLockViews([]);
   };
 
+  const sendBridgeCommand = React.useCallback(async (command: any) => {
+    try {
+      const res = await bridgeManager.sendBridgeCommand(command);
+      return res;
+    } catch (err) {
+      console.warn('[VisionRT] bridge send failed:', err);
+      return { success: false, error: String(err) };
+    }
+  }, []);
+
   // Store refs for values that need to be accessed in the loop
   const modeRef = React.useRef(mode);
   const thrRef = React.useRef(thr);
@@ -1348,7 +2246,11 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
   React.useEffect(() => { parsedClassesRef.current = parsedClasses; }, [parsedClasses]);
   React.useEffect(() => { searchDbRef.current = useSearchDb; }, [useSearchDb]);
   // Stop continuous loop if switching to LockTrack (prevent UI input contention)
-  React.useEffect(() => { if (mode === 'locktrack' && runningRef.current) { stop(); } }, [mode]);
+  React.useEffect(() => {
+    if ((mode === 'locktrack' || mode === 'objectmap') && runningRef.current) {
+      stop();
+    }
+  }, [mode]);
 
   // Continuous loop: wait for response before sending next request
   const runContinuous = async () => {
@@ -1408,10 +2310,11 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
   // Remove the useEffect that was starting multiple loops
 
   const [classResults, setClassResults] = React.useState<Array<{label:string; score:number}>>([]);
+  const clearClassificationResults = React.useCallback(() => setClassResults([]), []);
 
   const content = (
     <div className="flex flex-col gap-2 text-xs h-full">
-      {mode !== 'locktrack' ? (
+      {mode === 'detect' || mode === 'segment' ? (
         <div className="flex items-center justify-between">
           <div className="text-[10px] text-gray-400">Endpoint: {getRealtimeVisionUrl()}</div>
           <div className="flex items-center gap-2">
@@ -1424,11 +2327,18 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
             )}
           </div>
         </div>
-      ) : (
+      ) : mode === 'locktrack' ? (
         <div className="flex items-center justify-between">
           <div className="text-[10px] text-gray-400">LockTrack endpoint: {getLocktrackBase()}/lock</div>
           <div className="flex items-center gap-2">
             <button className="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600" onClick={clearOverlays}>Clear</button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between">
+          <div className="text-[10px] text-gray-400">Object Map mode · manual workflow</div>
+          <div className="flex items-center gap-2">
+            <button className="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600" onClick={clearOverlays}>Clear Overlays</button>
           </div>
         </div>
       )}
@@ -1439,6 +2349,7 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
             <option value="detect">Detect</option>
             <option value="segment">Segment</option>
             <option value="locktrack">LockTrack</option>
+            <option value="objectmap">Object Map</option>
           </select>
         </label>
         <label className="flex items-center gap-1">thr
@@ -1501,6 +2412,20 @@ export const VisionRealtimePanel: React.FC<VisionRealtimePanelProps> = ({ getSna
           abortRef={abortRef}
           views={lockViews}
           setViews={setLockViews}
+        />
+      )}
+
+      {mode === 'objectmap' && (
+        <ObjectMapSection
+          getSnapshot={getSnapshot}
+          setBoxes={setBoxes}
+          setMasks={setMasks}
+          setPoses={setPoses}
+          clearClassifications={clearClassificationResults}
+          imgSize={imgSize}
+          sendBridge={sendBridgeCommand}
+          threshold={thr}
+          createThumbFromBox={cropImageToBox}
         />
       )}
 

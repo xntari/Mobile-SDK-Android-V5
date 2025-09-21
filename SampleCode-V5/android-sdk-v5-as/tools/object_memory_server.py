@@ -42,7 +42,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
@@ -150,6 +150,48 @@ def ensure_dirs():
 
 
 # ------------------------- Data structures -------------------------
+def normalize_detect_label(label: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    if not label:
+        return None, None
+    raw = label.strip()
+    if not raw:
+        return None, None
+    base = raw
+    if '_' in raw:
+        head, tail = raw.rsplit('_', 1)
+        if tail.isdigit():
+            base = head
+    return base.strip() or raw, raw
+
+
+def create_cluster_entry_from_embedding(
+    embedding: np.ndarray,
+    label: Optional[str] = None,
+    *,
+    max_samples: Optional[int] = None,
+    dedupe_threshold: Optional[float] = None,
+) -> ClusterEntry:
+    cluster_id = uuid.uuid4().hex[:10]
+    centroid = embedding.astype(np.float32, copy=True)
+    norm = np.linalg.norm(centroid)
+    if norm > 1e-6:
+        centroid = centroid / norm
+    cluster = ClusterEntry(
+        cluster_id=cluster_id,
+        created_ts=time.time(),
+        updated_ts=time.time(),
+        centroid=centroid,
+        sample_ids=[],
+        label=label,
+        status='named' if label else 'unknown',
+        merged_from=[],
+        max_samples=int(max_samples if max_samples is not None else DEFAULT_MAX_SAMPLES),
+        dedupe_threshold=float(dedupe_threshold if dedupe_threshold is not None else DEFAULT_DEDUPE_THRESHOLD),
+    )
+    CLUSTERS[cluster_id] = cluster
+    return cluster
+
+
 @dataclass
 class SampleEntry:
     sample_id: str
@@ -159,6 +201,8 @@ class SampleEntry:
     embedding: np.ndarray
     image_path: str
     telemetry: Dict[str, Any]
+    detect_label: Optional[str]
+    detect_label_raw: Optional[str]
 
     def to_dict(self) -> Dict[str, any]:
         return {
@@ -168,6 +212,8 @@ class SampleEntry:
             'track_ids': list(self.track_ids),
             'image_path': self.image_path,
             'telemetry': self.telemetry,
+            'detect_label': self.detect_label,
+            'detect_label_raw': self.detect_label_raw,
         }
 
 
@@ -231,6 +277,8 @@ def serialize_state(path: str) -> None:
                 'embedding': s.embedding,
                 'image_path': s.image_path,
                 'telemetry': s.telemetry,
+                'detect_label': s.detect_label,
+                'detect_label_raw': s.detect_label_raw,
             }
             for sid, s in SAMPLES.items()
         },
@@ -275,6 +323,8 @@ def load_state(path: str) -> None:
                 embedding=embedding,
                 image_path=s['image_path'],
                 telemetry=dict(s.get('telemetry') or {}),
+                detect_label=s.get('detect_label'),
+                detect_label_raw=s.get('detect_label_raw'),
             )
     except Exception as e:
         print(f"[object_memory] failed to load state: {e}")
@@ -299,10 +349,23 @@ def schedule_save():
     threading.Thread(target=_save_worker, daemon=True).start()
 
 
-def get_or_create_cluster(embedding: np.ndarray, track_id: Optional[str]) -> Tuple[ClusterEntry, bool, float]:
-    best_id = None
+def get_or_create_cluster(
+    embedding: np.ndarray,
+    track_id: Optional[str],
+    *,
+    avoid_cluster_ids: Optional[Set[str]] = None,
+    force_new_cluster: bool = False,
+) -> Tuple[ClusterEntry, bool, float]:
+    if force_new_cluster:
+        cluster = create_cluster_entry_from_embedding(embedding)
+        return cluster, True, -1.0
+
+    avoid: Set[str] = avoid_cluster_ids or set()
+    best_id: Optional[str] = None
     best_sim = -1.0
     for cid, cluster in CLUSTERS.items():
+        if cid in avoid:
+            continue
         sim = cosine_sim(cluster.centroid, embedding)
         if sim > best_sim:
             best_sim = sim
@@ -315,25 +378,27 @@ def get_or_create_cluster(embedding: np.ndarray, track_id: Optional[str]) -> Tup
         # attach to best cluster anyway but mark low confidence (status unchanged)
         return CLUSTERS[best_id], False, best_sim
 
-    cluster_id = uuid.uuid4().hex[:10]
-    cluster = ClusterEntry(
-        cluster_id=cluster_id,
-        created_ts=time.time(),
-        updated_ts=time.time(),
-        centroid=embedding.copy(),
-        sample_ids=[],
-        label=None,
-        status='unknown',
-        merged_from=[],
-        max_samples=DEFAULT_MAX_SAMPLES,
-        dedupe_threshold=DEFAULT_DEDUPE_THRESHOLD,
-    )
-    CLUSTERS[cluster_id] = cluster
+    cluster = create_cluster_entry_from_embedding(embedding)
     return cluster, True, best_sim
 
 
-def add_sample(embedding: np.ndarray, image: Image.Image, track_id: Optional[str], telemetry: Optional[Dict[str, Any]] = None) -> Tuple[Optional[SampleEntry], ClusterEntry, float, bool, float]:
-    cluster, is_new, similarity = get_or_create_cluster(embedding, track_id)
+def add_sample(
+    embedding: np.ndarray,
+    image: Image.Image,
+    track_id: Optional[str],
+    telemetry: Optional[Dict[str, Any]] = None,
+    *,
+    force_new_cluster: bool = False,
+    avoid_cluster_ids: Optional[Set[str]] = None,
+    detect_label: Optional[str] = None,
+    detect_label_raw: Optional[str] = None,
+) -> Tuple[Optional[SampleEntry], ClusterEntry, float, bool, float]:
+    cluster, is_new, similarity = get_or_create_cluster(
+        embedding,
+        track_id,
+        avoid_cluster_ids=avoid_cluster_ids,
+        force_new_cluster=force_new_cluster,
+    )
     # Dedupe: compare against existing embeddings in cluster
     max_existing_sim = -1.0
     if cluster.sample_ids:
@@ -362,6 +427,8 @@ def add_sample(embedding: np.ndarray, image: Image.Image, track_id: Optional[str
         embedding=embedding,
         image_path=img_path,
         telemetry=telemetry or {},
+        detect_label=detect_label,
+        detect_label_raw=detect_label_raw or detect_label,
     )
     SAMPLES[sample_id] = entry
 
@@ -520,6 +587,47 @@ def cluster_neighbor_summary() -> Dict[str, Dict[str, Optional[Any]]]:
     return summary
 
 
+def cluster_detect_label_stats(cluster: ClusterEntry) -> List[Dict[str, Any]]:
+    counts: Dict[str, int] = {}
+    display: Dict[str, str] = {}
+    for sid in cluster.sample_ids:
+        sample = SAMPLES.get(sid)
+        if not sample or not sample.detect_label:
+            continue
+        key = sample.detect_label.lower()
+        counts[key] = counts.get(key, 0) + 1
+        if key not in display:
+            label_display = sample.detect_label
+            if sample.detect_label_raw and sample.detect_label_raw.strip():
+                label_display = sample.detect_label_raw.strip()
+            display[key] = label_display
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [
+        {
+            'label': display.get(key, key),
+            'count': count,
+        }
+        for key, count in ordered
+    ]
+
+
+def cluster_public_dict(cluster: ClusterEntry) -> Dict[str, Any]:
+    data = cluster.to_dict()
+    data['detect_label_stats'] = cluster_detect_label_stats(cluster)
+    latest_id = cluster.sample_ids[-1] if cluster.sample_ids else None
+    if latest_id:
+        sample = SAMPLES.get(latest_id)
+        if sample:
+            data['latest_sample'] = {
+                'sample_id': sample.sample_id,
+                'created_ts': sample.created_ts,
+                'detect_label': sample.detect_label,
+                'detect_label_raw': sample.detect_label_raw,
+                'telemetry': sample.telemetry,
+            }
+    return data
+
+
 # ------------------------- FastAPI models -------------------------
 class OrientationPayload(BaseModel):
     yaw: Optional[float] = None
@@ -553,10 +661,15 @@ class IngestRequest(BaseModel):
     track_id: Optional[str] = None
     label: Optional[str] = None
     telemetry: Optional[SampleTelemetryPayload] = None
+    force_new_cluster: bool = False
+    avoid_cluster_ids: List[str] = Field(default_factory=list)
+    detect_label: Optional[str] = None
+    detect_label_raw: Optional[str] = None
 
 
 class SearchRequest(BaseModel):
     image: str
+    exclude_cluster_ids: List[str] = Field(default_factory=list)
 
 
 class MergeRequest(BaseModel):
@@ -575,6 +688,12 @@ class ClusterConfigRequest(BaseModel):
 
 class PruneRequest(BaseModel):
     similarity: float = Field(0.98, ge=0.0, le=1.0)
+
+
+class MoveSamplesRequest(BaseModel):
+    sample_ids: List[str] = Field(default_factory=list)
+    target_cluster_id: Optional[str] = None
+    new_label: Optional[str] = None
 
 
 # ------------------------- FastAPI app -------------------------
@@ -615,9 +734,20 @@ def ingest(req: IngestRequest):
         raise HTTPException(status_code=400, detail=f'bad image: {e}')
     emb = compute_embedding(img)
     telemetry_payload: Dict[str, Any] = req.telemetry.dict(exclude_none=True) if req.telemetry else {}
-    sample, cluster, similarity, stored, max_existing = add_sample(emb, img, req.track_id, telemetry=telemetry_payload)
+    avoid_ids = {cid for cid in req.avoid_cluster_ids if cid}
+    normalized_label, raw_label = normalize_detect_label(req.detect_label or req.detect_label_raw)
+    sample, cluster, similarity, stored, max_existing = add_sample(
+        emb,
+        img,
+        req.track_id,
+        telemetry=telemetry_payload,
+        force_new_cluster=bool(req.force_new_cluster),
+        avoid_cluster_ids=avoid_ids if avoid_ids else None,
+        detect_label=normalized_label,
+        detect_label_raw=raw_label,
+    )
     response: Dict[str, Any] = {
-        'cluster': cluster.to_dict(),
+        'cluster': cluster_public_dict(cluster),
         'similarity': similarity,
         'stored': stored,
         'max_existing_similarity': max_existing,
@@ -645,7 +775,10 @@ def search(req: SearchRequest):
     emb = compute_embedding(img)
     best_id = None
     best_sim = -1.0
+    exclude = {cid for cid in req.exclude_cluster_ids if cid}
     for cid, cluster in CLUSTERS.items():
+        if cid in exclude:
+            continue
         sim = cosine_sim(cluster.centroid, emb)
         if sim > best_sim:
             best_sim = sim
@@ -653,10 +786,13 @@ def search(req: SearchRequest):
     if best_id is None:
         return {'match': None}
     cluster = CLUSTERS[best_id]
-    print(f"{cluster.to_dict()=}, {best_sim=}")
+    try:
+        print(f"[object_memory] search best={cluster.cluster_id} sim={best_sim:.3f}")
+    except Exception:
+        pass
     return {
         'match': {
-            'cluster': cluster.to_dict(),
+            'cluster': cluster_public_dict(cluster),
             'similarity': best_sim,
         }
     }
@@ -676,7 +812,7 @@ def list_clusters(status: Optional[str] = None, limit: int = 100, offset: int = 
         neighbor = neighbor_info.get(cluster.cluster_id, {})
         result.append(
             {
-                **cluster.to_dict(),
+                **cluster_public_dict(cluster),
                 'preview_sample_id': preview_sample,
                 'mean_similarity': cluster_mean_similarity(cluster),
                 'nearest_neighbor_id': neighbor.get('nearest_neighbor_id'),
@@ -698,7 +834,7 @@ def get_cluster(cluster_id: str):
     neighbor = cluster_neighbor_summary().get(cluster_id, {})
     return {
         'cluster': {
-            **cluster.to_dict(),
+            **cluster_public_dict(cluster),
             'mean_similarity': cluster_mean_similarity(cluster),
             'nearest_neighbor_id': neighbor.get('nearest_neighbor_id'),
             'nearest_neighbor_similarity': neighbor.get('nearest_neighbor_similarity'),
@@ -716,7 +852,7 @@ def label_cluster(cluster_id: str, req: LabelRequest):
     cluster.status = 'named' if cluster.label else 'unknown'
     cluster.updated_ts = time.time()
     schedule_save()
-    return {'cluster': cluster.to_dict()}
+    return {'cluster': cluster_public_dict(cluster)}
 
 
 @app.post('/memory/clusters/{cluster_id}/config')
@@ -731,7 +867,7 @@ def configure_cluster(cluster_id: str, req: ClusterConfigRequest):
     trim_cluster_to_limit(cluster)
     cluster.updated_ts = time.time()
     schedule_save()
-    return {'cluster': cluster.to_dict()}
+    return {'cluster': cluster_public_dict(cluster)}
 
 
 @app.post('/memory/clusters/{cluster_id}/prune')
@@ -760,7 +896,7 @@ def prune_cluster(cluster_id: str, req: PruneRequest):
     schedule_save()
     return {
         'removed': removed,
-        'cluster': cluster.to_dict(),
+        'cluster': cluster_public_dict(cluster),
     }
 
 
@@ -799,7 +935,7 @@ def merge_clusters(req: MergeRequest):
     trim_cluster_to_limit(target)
     target.updated_ts = time.time()
     schedule_save()
-    return {'target': target.to_dict(), 'merged': moved}
+    return {'target': cluster_public_dict(target), 'merged': moved}
 
 
 @app.delete('/memory/clusters/{cluster_id}')
@@ -809,6 +945,123 @@ def delete_cluster_endpoint(cluster_id: str):
     remove_cluster(cluster_id)
     schedule_save()
     return {'deleted': cluster_id}
+
+
+@app.post('/memory/samples/move')
+def move_samples(req: MoveSamplesRequest):
+    if not req.sample_ids:
+        raise HTTPException(status_code=400, detail='sample_ids required')
+    seen: Set[str] = set()
+    ordered_ids: List[str] = []
+    for sid in req.sample_ids:
+        if sid and sid not in seen:
+            ordered_ids.append(sid)
+            seen.add(sid)
+    samples = [SAMPLES[sid] for sid in ordered_ids if sid in SAMPLES]
+    missing = [sid for sid in ordered_ids if sid not in SAMPLES]
+    if not samples:
+        raise HTTPException(status_code=404, detail='no samples found')
+
+    label = (req.new_label or '').strip()
+    created_new = False
+    target: Optional[ClusterEntry] = None
+    if req.target_cluster_id:
+        target = CLUSTERS.get(req.target_cluster_id)
+        if not target:
+            raise HTTPException(status_code=404, detail='target cluster not found')
+        if label:
+            target.label = label
+            target.status = 'named'
+    else:
+        if not label:
+            raise HTTPException(status_code=400, detail='new_label required when target_cluster_id missing')
+        first_embedding = samples[0].embedding
+        target = create_cluster_entry_from_embedding(first_embedding, label=label)
+        target.sample_ids = []  # ensure clean slate
+        created_new = True
+
+    ensure_dirs()
+    target_dir = os.path.join(SAMPLES_DIR, target.cluster_id)
+    os.makedirs(target_dir, exist_ok=True)
+
+    moved: List[str] = []
+    updated_sources: Set[str] = set()
+    emptied_clusters: Set[str] = set()
+
+    for sample in samples:
+        if sample.cluster_id == target.cluster_id:
+            continue
+        source_cluster = CLUSTERS.get(sample.cluster_id)
+        if source_cluster:
+            if sample.sample_id in source_cluster.sample_ids:
+                source_cluster.sample_ids = [sid for sid in source_cluster.sample_ids if sid != sample.sample_id]
+            if not source_cluster.sample_ids:
+                emptied_clusters.add(source_cluster.cluster_id)
+            else:
+                updated_sources.add(source_cluster.cluster_id)
+                source_cluster.updated_ts = time.time()
+
+        dest_path = os.path.join(target_dir, f'{sample.sample_id}.jpg')
+        if sample.image_path != dest_path:
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            try:
+                shutil.move(sample.image_path, dest_path)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                # last resort copy to new location if move fails
+                try:
+                    shutil.copyfile(sample.image_path, dest_path)
+                    os.remove(sample.image_path)
+                except Exception:
+                    pass
+        sample.image_path = dest_path
+        sample.cluster_id = target.cluster_id
+        if sample.sample_id not in target.sample_ids:
+            target.sample_ids.append(sample.sample_id)
+        moved.append(sample.sample_id)
+
+    # Deduplicate in case some samples were already in target
+    if target.sample_ids:
+        target.sample_ids = list(dict.fromkeys(target.sample_ids))
+
+    if target.sample_ids:
+        recompute_cluster_centroid(target)
+    target.updated_ts = time.time()
+    if len(target.sample_ids) > target.max_samples:
+        target.max_samples = max(target.max_samples, len(target.sample_ids))
+
+    updated_source_list: List[Dict[str, Any]] = []
+    for cid in updated_sources:
+        cluster = CLUSTERS.get(cid)
+        if not cluster:
+            continue
+        recompute_cluster_centroid(cluster)
+        cluster.updated_ts = time.time()
+        updated_source_list.append(cluster_public_dict(cluster))
+
+    removed_clusters: List[str] = []
+    for cid in emptied_clusters:
+        cluster = CLUSTERS.pop(cid, None)
+        if not cluster:
+            continue
+        removed_clusters.append(cid)
+        cluster_dir = os.path.join(SAMPLES_DIR, cid)
+        try:
+            if os.path.isdir(cluster_dir):
+                shutil.rmtree(cluster_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+    schedule_save()
+    return {
+        'target': cluster_public_dict(target),
+        'created': created_new,
+        'moved': moved,
+        'missing': missing,
+        'updated_sources': updated_source_list,
+        'removed_clusters': removed_clusters,
+    }
 
 
 @app.delete('/memory/samples/{sample_id}')

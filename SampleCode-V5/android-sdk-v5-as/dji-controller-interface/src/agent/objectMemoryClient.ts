@@ -12,6 +12,14 @@ export type ObjectMemoryCluster = {
   updated_ts?: number;
   nearest_neighbor_id?: string | null;
   nearest_neighbor_similarity?: number | null;
+  detect_label_stats?: ObjectMemoryLabelStat[];
+  latest_sample?: {
+    sample_id: string;
+    created_ts: number;
+    detect_label?: string | null;
+    detect_label_raw?: string | null;
+    telemetry?: SampleTelemetryPayload;
+  } | null;
 };
 
 export type ObjectMemorySample = {
@@ -20,7 +28,45 @@ export type ObjectMemorySample = {
   created_ts: number;
   track_ids: string[];
   image_path: string;
-  telemetry?: Record<string, any>;
+  telemetry?: SampleTelemetryPayload;
+  detect_label?: string | null;
+  detect_label_raw?: string | null;
+};
+
+export type ObjectMemoryLabelStat = {
+  label: string;
+  count: number;
+};
+
+export type SampleTelemetryPayload = {
+  drone_position?: { latitude?: number; longitude?: number; altitude_m?: number };
+  drone_orientation?: { yaw?: number; pitch?: number; roll?: number };
+  gimbal_orientation?: { yaw?: number; pitch?: number; roll?: number };
+  object_position?: { latitude?: number; longitude?: number; altitude_m?: number; distance_m?: number };
+  object_orientation?: { yaw?: number; pitch?: number; roll?: number };
+  source_camera?: string;
+  timestamp?: number;
+  extra?: Record<string, any>;
+};
+
+export type MoveSamplesResponse = {
+  target: ObjectMemoryCluster;
+  created: boolean;
+  moved: string[];
+  missing: string[];
+  updated_sources: ObjectMemoryCluster[];
+  removed_clusters: string[];
+};
+
+export type IngestSampleParams = {
+  image: string;
+  track_id?: string;
+  label?: string;
+  telemetry?: SampleTelemetryPayload;
+  forceNewCluster?: boolean;
+  avoidClusterIds?: string[];
+  detectLabel?: string;
+  detectLabelRaw?: string;
 };
 
 type SavedEndpoints = { objectMemory?: string };
@@ -56,10 +102,22 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
-export async function ingestSample(params: { image: string; track_id?: string; label?: string }): Promise<any> {
+export async function ingestSample(params: IngestSampleParams): Promise<any> {
+  const payload: Record<string, any> = {
+    image: params.image,
+  };
+  if (params.track_id) payload.track_id = params.track_id;
+  if (params.label) payload.label = params.label;
+  if (params.telemetry) payload.telemetry = params.telemetry;
+  if (params.forceNewCluster) payload.force_new_cluster = true;
+  if (params.avoidClusterIds && params.avoidClusterIds.length) {
+    payload.avoid_cluster_ids = params.avoidClusterIds;
+  }
+  if (params.detectLabel) payload.detect_label = params.detectLabel;
+  if (params.detectLabelRaw) payload.detect_label_raw = params.detectLabelRaw;
   return http('/memory/ingest', {
     method: 'POST',
-    body: JSON.stringify(params),
+    body: JSON.stringify(payload),
   });
 }
 
@@ -105,6 +163,18 @@ export async function mergeClusters(targetId: string, sourceIds: string[]): Prom
 
 export async function deleteSample(sampleId: string): Promise<{ deleted: string }> {
   return http(`/memory/samples/${sampleId}`, { method: 'DELETE' });
+}
+
+export async function moveSamples(params: { sampleIds: string[]; targetClusterId?: string; newLabel?: string }): Promise<MoveSamplesResponse> {
+  const payload: Record<string, any> = {
+    sample_ids: params.sampleIds,
+  };
+  if (params.targetClusterId) payload.target_cluster_id = params.targetClusterId;
+  if (params.newLabel) payload.new_label = params.newLabel;
+  return http('/memory/samples/move', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function fetchSampleImage(sampleId: string): Promise<string> {

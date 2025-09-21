@@ -23,7 +23,14 @@ export interface AnalyzeRequest {
 
 export interface AnalyzeResponse {
   detections: Detection[];
-  meta?: { backend: 'http' | 'fallback'; url?: string; httpBoxes?: number; fallbackUsed?: boolean };
+  meta?: {
+    backend: 'http' | 'fallback';
+    url?: string;
+    httpBoxes?: number;
+    fallbackUsed?: boolean;
+    ovLabelsUsed?: string[];
+    memoryLabelPrompts?: string[];
+  };
 }
 
 // Endpoint helpers — read from globals or persisted settings on every call so Settings take effect immediately.
@@ -146,6 +153,7 @@ export interface RealtimeDetectRequest {
   classes?: string[];   // optional allowlist
   img_size?: number;    // optional server downscale control
   searchDb?: boolean;
+  memoryClusterIds?: string[];
   signal?: AbortSignal; // optional abort
 }
 
@@ -164,6 +172,9 @@ export async function analyzeRealtime(req: RealtimeDetectRequest): Promise<Analy
         threshold: req.threshold ?? getThreshold(),
         img_size: req.img_size ?? 640,
         ...(req.searchDb ? { search_db: true } : {}),
+        ...(Array.isArray(req.memoryClusterIds) && req.memoryClusterIds.length > 0
+          ? { memory_cluster_ids: req.memoryClusterIds }
+          : {}),
         ...(Array.isArray(req.classes) && req.classes.length > 0
           ? { ov_labels: req.classes }
           : {})
@@ -181,7 +192,18 @@ export async function analyzeRealtime(req: RealtimeDetectRequest): Promise<Analy
       memory_similarity: typeof b.memory_similarity === 'number' ? Number(b.memory_similarity) : undefined,
       yolo_label: b.yolo_label ? String(b.yolo_label) : undefined,
     }));
-    return { detections, meta: { backend: 'http', url, httpBoxes: boxes.length } };
+    const ovLabelsUsed = Array.isArray(data?.ov_labels_used) ? data.ov_labels_used.map((v: any) => String(v)) : undefined;
+    const memoryLabelPrompts = Array.isArray(data?.memory_label_prompts) ? data.memory_label_prompts.map((v: any) => String(v)) : undefined;
+    return {
+      detections,
+      meta: {
+        backend: 'http',
+        url,
+        httpBoxes: boxes.length,
+        ...(ovLabelsUsed ? { ovLabelsUsed } : {}),
+        ...(memoryLabelPrompts ? { memoryLabelPrompts } : {}),
+      },
+    };
   } catch (e) {
     console.warn('[visionClient] realtime detect call failed:', e);
     return { detections: [], meta: { backend: 'http', url: getRealtimeVisionUrl(), httpBoxes: 0 } };

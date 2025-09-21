@@ -25,7 +25,7 @@ Run
 """
 from __future__ import annotations
 
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional, Set, Tuple
 import base64
 import io
 import os
@@ -489,6 +489,69 @@ def _object_memory_post(path: str, payload: Dict[str, Any], timeout: float = 0.5
         return None
 
 
+def _object_memory_get(path: str, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
+    if not _OBJECT_MEMORY_URL:
+        return None
+    url = f"{_OBJECT_MEMORY_URL.rstrip('/')}{path}"
+    req = urllib.request.Request(url)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            if not raw:
+                return None
+            return json.loads(raw.decode('utf-8'))
+    except Exception as e:
+        print(f"[realtime] object memory GET failed: {e}")
+        return None
+
+
+def _memory_cluster_label_prompts(cluster_ids: List[str], top_k: int = 5) -> List[str]:
+    prompts: List[str] = []
+    seen: Set[str] = set()
+    for cid in cluster_ids:
+        if not cid:
+            continue
+        detail = _object_memory_get(f'/memory/clusters/{cid}')
+        if not detail:
+            continue
+        cluster = detail.get('cluster') if isinstance(detail, dict) else None
+        if not cluster:
+            continue
+        stats = cluster.get('detect_label_stats') if isinstance(cluster, dict) else None
+        if not isinstance(stats, list):
+            continue
+        for entry in stats:
+            try:
+                label = entry.get('label') if isinstance(entry, dict) else None
+            except AttributeError:
+                label = None
+            if not label:
+                continue
+            key = str(label).strip()
+            if not key or key.lower() in seen:
+                continue
+            prompts.append(key)
+            seen.add(key.lower())
+            if len(prompts) >= top_k:
+                return prompts
+    return prompts[:top_k]
+
+
+def _sanitize_detect_label(label: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    if not label:
+        return None, None
+    raw = str(label).strip()
+    if not raw:
+        return None, None
+    base = raw
+    if '_' in raw:
+        head, tail = raw.rsplit('_', 1)
+        if tail.isdigit():
+            base = head
+    base = base.strip()
+    return (base or raw), raw
+
+
 # ------------------------- YOLO‑E loaders -------------------------
 def _lazy_load_yoloe():
     global _HAVE_YOLOE, _yoloe_model, _yoloe_model_cpu
@@ -732,6 +795,7 @@ class RTDetectRequest(BaseModel):
     img_size: int | None = None
     ov_labels: list[str] | None = None
     search_db: bool | None = None
+    memory_cluster_ids: Optional[List[str]] = None
 
 
 class RTSegmentRequest(BaseModel):
@@ -761,7 +825,15 @@ def realtime_detect(req: RTDetectRequest, request: Request):
     size = int(req.img_size) if req.img_size else _DEFAULT_IMGSZ
     img2 = _scale_image(img, size)
 
-    use_pf = not (req.ov_labels and len(req.ov_labels) > 0)
+    ov_labels = list(req.ov_labels or [])
+    memory_label_prompts: List[str] = []
+    if req.memory_cluster_ids and _OBJECT_MEMORY_URL:
+        memory_label_prompts = _memory_cluster_label_prompts([str(cid) for cid in req.memory_cluster_ids if cid])
+        if memory_label_prompts and not ov_labels:
+            ov_labels = memory_label_prompts
+    search_db = bool(req.search_db) or bool(memory_label_prompts)
+
+    use_pf = not (ov_labels and len(ov_labels) > 0)
     boxes: List[Dict[str, Any]] = []
     memory_hits = 0
     try:
@@ -778,8 +850,8 @@ def realtime_detect(req: RTDetectRequest, request: Request):
                 return {'boxes': []}
             # set textual classes and single predict per docs
             # Set textual classes using safe helper for MPS compatibility
-            if req.ov_labels:
-                safe_set_classes_yoloe(_yoloe_model, req.ov_labels)
+            if ov_labels:
+                safe_set_classes_yoloe(_yoloe_model, ov_labels)
             res = _safe_predict(_yoloe_model, img2, size, thr)
         if res:
             # Use Ultralytics built‑in tracker to get IDs
@@ -791,8 +863,8 @@ def realtime_detect(req: RTDetectRequest, request: Request):
                     raise RuntimeError('model not loaded')
                 # For OV, ensure classes are set before tracking as well
                 # For OV, ensure classes are set before tracking
-                if (not use_pf) and req.ov_labels:
-                    safe_set_classes_yoloe(model, req.ov_labels)
+                if (not use_pf) and ov_labels:
+                    safe_set_classes_yoloe(model, ov_labels)
                 track_res = model.track(img2, imgsz=size, conf=thr, verbose=False, persist=True, tracker='botsort-reid.yaml', half=_USE_HALF)  # type: ignore
                 if track_res:
                     r = track_res[0]
@@ -840,8 +912,8 @@ def realtime_detect(req: RTDetectRequest, request: Request):
                             lbl = str(names[cid])
                     except Exception:
                         lbl = None
-                    if (not use_pf) and req.ov_labels and isinstance(cid, int) and 0 <= cid < len(req.ov_labels):
-                        lbl = str(req.ov_labels[cid])
+                    if (not use_pf) and ov_labels and isinstance(cid, int) and 0 <= cid < len(ov_labels):
+                        lbl = str(ov_labels[cid])
                     # Append per-class display id based on tracker id
                     tid = ids[i] if i < len(ids) else None
                     if tid is not None and lbl:
@@ -849,19 +921,32 @@ def realtime_detect(req: RTDetectRequest, request: Request):
                         disp = _display_id_for(sid, lbl, tid)
                         if disp is not None:
                             lbl = f"{lbl}_{disp}"
-                    boxes.append({
+                    box_entry: Dict[str, Any] = {
                         'x1': max(0.0, min(1.0, float(x1)/W)),
                         'y1': max(0.0, min(1.0, float(y1)/H)),
                         'x2': max(0.0, min(1.0, float(x2)/W)),
                         'y2': max(0.0, min(1.0, float(y2)/H)),
-                        **({'score': sc} if sc is not None else {}),
-                        **({'label': lbl} if lbl else {}),
-                        **({'track_id': tid} if tid is not None else {}),
-                    })
+                    }
+                    if sc is not None:
+                        box_entry['score'] = sc
+                    if lbl:
+                        box_entry['label'] = lbl
+                        box_entry['_det_label'] = lbl
+                    if tid is not None:
+                        box_entry['track_id'] = tid
+                    boxes.append(box_entry)
         # Optional object memory search to reuse labels
         seen_tracks: Set[str] = set()
 
-        def ingest_track(track_key: Optional[str], data_url: str, label: Optional[str] = None) -> None:
+        def ingest_track(
+            track_key: Optional[str],
+            data_url: str,
+            label: Optional[str] = None,
+            *,
+            force_new_cluster: bool = False,
+            avoid_clusters: Optional[List[str]] = None,
+            detect_label: Optional[str] = None,
+        ) -> None:
             if not track_key:
                 return
             if track_key in seen_tracks:
@@ -871,6 +956,15 @@ def realtime_detect(req: RTDetectRequest, request: Request):
             payload = {'image': data_url, 'track_id': track_key}
             if label:
                 payload['label'] = label
+            if force_new_cluster:
+                payload['force_new_cluster'] = True
+            if avoid_clusters:
+                payload['avoid_cluster_ids'] = list({str(cid) for cid in avoid_clusters if cid})
+            norm_label, raw_label = _sanitize_detect_label(detect_label)
+            if norm_label:
+                payload['detect_label'] = norm_label
+            if raw_label:
+                payload['detect_label_raw'] = raw_label
             try:
                 _object_memory_post('/memory/ingest', payload, timeout=0.3)
             except Exception:
@@ -881,7 +975,22 @@ def realtime_detect(req: RTDetectRequest, request: Request):
                 seen_tracks.add(track_key)
 
         if _OBJECT_MEMORY_URL and boxes:
-            for b in boxes:
+            def _boxes_overlap_norm(box_a: Dict[str, Any], box_b: Dict[str, Any]) -> bool:
+                return not (
+                    box_a.get('x2', 0.0) <= box_b.get('x1', 0.0)
+                    or box_a.get('x1', 0.0) >= box_b.get('x2', 0.0)
+                    or box_a.get('y2', 0.0) <= box_b.get('y1', 0.0)
+                    or box_a.get('y1', 0.0) >= box_b.get('y2', 0.0)
+                )
+
+            def _labels_match(box_a: Dict[str, Any], box_b: Dict[str, Any]) -> bool:
+                la = box_a.get('_det_label') if '_det_label' in box_a else box_a.get('label')
+                lb = box_b.get('_det_label') if '_det_label' in box_b else box_b.get('label')
+                return la == lb
+
+            assigned_clusters: Dict[str, List[int]] = {}
+
+            for idx, b in enumerate(boxes):
                 try:
                     x1_px = int(max(0.0, min(1.0, b['x1'])) * W)
                     y1_px = int(max(0.0, min(1.0, b['y1'])) * H)
@@ -895,33 +1004,84 @@ def realtime_detect(req: RTDetectRequest, request: Request):
                     if b.get('track_id') is not None:
                         track_key = str(b['track_id'])
 
-                    resp = _object_memory_post('/memory/search', {'image': data_url}) if req.search_db else None
-                    if not resp or 'match' not in resp:
-                        ingest_track(track_key, data_url)
-                        continue
-                    match = resp['match']
-                    if not match:
-                        ingest_track(track_key, data_url)
-                        continue
-                    similarity = float(match.get('similarity', 0.0) or 0.0)
-                    if similarity < _OBJECT_MEMORY_LABEL_THRESHOLD:
-                        ingest_track(track_key, data_url)
-                        continue
-                    cluster = match.get('cluster') or {}
-                    label = cluster.get('label')
-                    if not label:
-                        ingest_track(track_key, data_url)
-                        continue
-                    original_label = b.get('label')
-                    if original_label and str(original_label) != label:
-                        b['yolo_label'] = original_label
-                    b['memory_label'] = label
-                    b['memory_similarity'] = similarity
-                    if 'cluster_id' in cluster:
-                        b['memory_cluster_id'] = cluster['cluster_id']
-                    b['label'] = label
-                    memory_hits += 1
-                    ingest_track(track_key, data_url, label if original_label and str(original_label).lower() == label.lower() else None)
+                    exclude_clusters: List[str] = []
+                    for prev_idx in range(idx):
+                        prev_box = boxes[prev_idx]
+                        if not _boxes_overlap_norm(b, prev_box) and _labels_match(b, prev_box):
+                            cid_prev = prev_box.get('memory_cluster_id')
+                            if cid_prev:
+                                exclude_clusters.append(str(cid_prev))
+                    # deduplicate while preserving order
+                    seen_exclude: Set[str] = set()
+                    exclude_clusters = [cid for cid in exclude_clusters if not (cid in seen_exclude or seen_exclude.add(cid))]
+                    avoid_ids: Set[str] = set(exclude_clusters)
+                    force_new = bool(exclude_clusters) and not search_db
+
+                    resp = _object_memory_post('/memory/search', {'image': data_url, 'exclude_cluster_ids': exclude_clusters}) if (search_db and exclude_clusters) else (_object_memory_post('/memory/search', {'image': data_url}) if search_db else None)
+                    match = resp.get('match') if resp else None
+
+                    label_for_ingest: Optional[str] = None
+                    adopted_label = False
+                    similarity_val: Optional[float] = None
+
+                    if match:
+                        similarity = float(match.get('similarity', 0.0) or 0.0)
+                        similarity_val = similarity
+                        if similarity >= _OBJECT_MEMORY_LABEL_THRESHOLD:
+                            cluster = match.get('cluster') or {}
+                            label = cluster.get('label')
+                            cluster_id = str(cluster.get('cluster_id') or '') if cluster else ''
+                            if label:
+                                conflict = False
+                                if cluster_id:
+                                    for prev_idx in assigned_clusters.get(cluster_id, []):
+                                        prev_box = boxes[prev_idx]
+                                        if not _boxes_overlap_norm(b, prev_box) and _labels_match(b, prev_box):
+                                            conflict = True
+                                            break
+                                if conflict:
+                                    b['memory_conflict'] = True
+                                    if cluster_id:
+                                        avoid_ids.add(cluster_id)
+                                    force_new = True
+                                    b['memory_similarity'] = similarity
+                                else:
+                                    original_label = b.get('label')
+                                    if original_label and str(original_label) != label:
+                                        b['yolo_label'] = original_label
+                                    b['memory_label'] = label
+                                    b['memory_similarity'] = similarity
+                                    if cluster_id:
+                                        b['memory_cluster_id'] = cluster_id
+                                        assigned_clusters.setdefault(cluster_id, []).append(idx)
+                                    b['label'] = label
+                                    adopted_label = True
+                                    memory_hits += 1
+                                    if original_label and str(original_label).lower() == str(label).lower():
+                                        label_for_ingest = label
+                                # ensure we don't fall through to default ingest path for conflict
+                                if conflict:
+                                    label_for_ingest = None
+                            else:
+                                # no label provided, fall back to default ingest with avoid hints
+                                force_new = force_new or bool(exclude_clusters)
+                        else:
+                            force_new = force_new or bool(exclude_clusters)
+                    else:
+                        force_new = force_new or bool(exclude_clusters)
+
+                    avoid_list = list(avoid_ids)
+                    ingest_track(
+                        track_key,
+                        data_url,
+                        label_for_ingest,
+                        force_new_cluster=force_new,
+                        avoid_clusters=avoid_list if avoid_list else None,
+                        detect_label=b.get('_det_label') or b.get('label'),
+                    )
+
+                    if similarity_val is not None and 'memory_similarity' not in b:
+                        b['memory_similarity'] = similarity_val
                 except Exception as e_mem:
                     print(f"[realtime] memory lookup failed: {e_mem}")
         # No fallbacks in detect path
@@ -935,10 +1095,14 @@ def realtime_detect(req: RTDetectRequest, request: Request):
                 lab_counts[lbl] = lab_counts.get(lbl, 0) + 1
         top = sorted(lab_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
         sid = request.headers.get('x-client-session') or 'no-sid'
-        print(f"[realtime][DETECT][sid={sid}] thr={thr} size={size} mode={'PF' if use_pf else 'OV'} labels={(req.ov_labels or [])} -> {len(boxes)} boxes; memory_hits={memory_hits}; top: {top}")
+        print(f"[realtime][DETECT][sid={sid}] thr={thr} size={size} mode={'PF' if use_pf else 'OV'} labels={(ov_labels or [])} -> {len(boxes)} boxes; memory_hits={memory_hits}; top: {top}")
     except Exception:
         pass
-    return {'boxes': boxes}
+    return {
+        'boxes': boxes,
+        'ov_labels_used': ov_labels,
+        'memory_label_prompts': memory_label_prompts,
+    }
 
 
 @app.post('/realtime/segment')

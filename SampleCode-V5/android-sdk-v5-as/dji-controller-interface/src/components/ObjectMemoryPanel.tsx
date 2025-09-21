@@ -5,6 +5,7 @@ import {
   getCluster,
   labelCluster,
   mergeClusters,
+  moveSamples,
   deleteSample,
   deleteCluster,
   fetchSampleImage,
@@ -32,12 +33,15 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
   const [dedupeThresholdInput, setDedupeThresholdInput] = React.useState<number>(0.985);
   const [pruneSimilarity, setPruneSimilarity] = React.useState<number>(0.99);
   const [mergeSource, setMergeSource] = React.useState<string>('');
+  const [selectedSamples, setSelectedSamples] = React.useState<string[]>([]);
+  const [moveTargetId, setMoveTargetId] = React.useState<string>('');
+  const [moveNewLabel, setMoveNewLabel] = React.useState<string>('');
   const thumbsRef = React.useRef<Map<string, SampleThumb>>(new Map());
   const [, forceTick] = React.useState<number>(0);
-  const [sortMode, setSortMode] = React.useState<'updated'|'alpha'|'samples'|'cohesion'|'neighbor'>(()=>{
+  const [sortMode, setSortMode] = React.useState<'updated'|'alpha'|'samples'|'cohesion'|'neighbor'|'detect'>(()=>{
     try {
       const raw = localStorage.getItem('objectMemory.sortMode');
-      if (raw === 'alpha' || raw === 'samples' || raw === 'cohesion' || raw === 'updated' || raw === 'neighbor') return raw;
+      if (raw === 'alpha' || raw === 'samples' || raw === 'cohesion' || raw === 'updated' || raw === 'neighbor' || raw === 'detect') return raw;
     } catch {}
     return 'updated';
   });
@@ -82,6 +86,16 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
           if (valA !== valB) return dir * (valA > valB ? 1 : -1);
           return dir * a.cluster_id.localeCompare(b.cluster_id);
         }
+        case 'detect': {
+          const topA = a.detect_label_stats && a.detect_label_stats.length ? a.detect_label_stats[0] : undefined;
+          const topB = b.detect_label_stats && b.detect_label_stats.length ? b.detect_label_stats[0] : undefined;
+          const countDiff = (topA?.count ?? 0) - (topB?.count ?? 0);
+          if (countDiff !== 0) return dir * countDiff;
+          const labelA = topA?.label ?? '';
+          const labelB = topB?.label ?? '';
+          if (labelA && labelB && labelA !== labelB) return dir * labelA.localeCompare(labelB);
+          return dir * a.cluster_id.localeCompare(b.cluster_id);
+        }
         case 'updated':
         default: {
           const aTs = a.updated_ts ?? a.created_ts ?? 0;
@@ -98,18 +112,30 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
     setClusters(prev => applySort(prev));
   }, [applySort]);
 
-  const refreshClusters = React.useCallback(async () => {
+  const refreshClusters = React.useCallback(async (): Promise<ObjectMemoryCluster[]> => {
     setLoading(true);
     setMessage('');
+    let sorted: ObjectMemoryCluster[] = [];
     try {
       const res = await listClusters({ limit: 200 });
-      setClusters(applySort(res.clusters));
+      sorted = applySort(res.clusters);
+      setClusters(sorted);
     } catch (e) {
       setMessage(String(e instanceof Error ? e.message : e));
+      sorted = [];
     } finally {
       setLoading(false);
     }
+    return sorted;
   }, [applySort]);
+
+  const toggleSampleSelection = React.useCallback((sampleId: string) => {
+    setSelectedSamples(prev => (prev.includes(sampleId) ? prev.filter((id) => id !== sampleId) : [...prev, sampleId]));
+  }, []);
+
+  const clearSelection = React.useCallback(() => {
+    setSelectedSamples([]);
+  }, []);
 
   const loadCluster = React.useCallback(async (clusterId: string) => {
     setLoading(true);
@@ -120,6 +146,9 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
       setClusterDetail(detail);
       setSelectedId(clusterId);
       setLabelInput(detail.cluster.label || '');
+      setSelectedSamples([]);
+      setMoveTargetId('');
+      setMoveNewLabel('');
       if (typeof detail.cluster.max_samples === 'number') {
         setMaxSamplesInput(detail.cluster.max_samples);
       }
@@ -139,6 +168,14 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
   React.useEffect(() => {
     void refreshClusters();
   }, [refreshClusters]);
+
+  const trimmedMoveLabel = moveNewLabel.trim();
+  const selectedCount = selectedSamples.length;
+  const canMoveSelected = selectedCount > 0 && (moveTargetId || trimmedMoveLabel.length > 0);
+  const summarizeDetectLabels = React.useCallback((stats?: { label: string; count: number }[], limit: number = 3): string => {
+    if (!stats || !stats.length) return '';
+    return stats.slice(0, limit).map((s) => `${s.label}(${s.count})`).join(', ');
+  }, []);
 
   const handleLabelSave = React.useCallback(async () => {
     if (!selectedId) return;
@@ -165,6 +202,48 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
     }
   }, [selectedId, mergeSource, loadCluster, refreshClusters]);
 
+  const handleMoveSelected = React.useCallback(async () => {
+    const sampleIds = [...selectedSamples];
+    if (!sampleIds.length) return;
+    const targetId = moveTargetId;
+    const newLabel = moveNewLabel.trim();
+    if (!targetId && !newLabel) {
+      setMessage('Choose a destination cluster or enter a new label');
+      return;
+    }
+    setLoading(true);
+    setMessage('');
+    try {
+      const payload: { sampleIds: string[]; targetClusterId?: string; newLabel?: string } = { sampleIds };
+      if (targetId) payload.targetClusterId = targetId;
+      if (newLabel) payload.newLabel = newLabel;
+      const res = await moveSamples(payload);
+      const updated = await refreshClusters();
+      const currentClusterId = selectedId;
+      const currentStillExists = currentClusterId ? updated.some((c) => c.cluster_id === currentClusterId) : false;
+      setSelectedSamples([]);
+      setMoveTargetId('');
+      setMoveNewLabel('');
+      if (currentStillExists && currentClusterId) {
+        await loadCluster(currentClusterId);
+      } else if (res.created && res.target?.cluster_id) {
+        await loadCluster(res.target.cluster_id);
+      } else {
+        thumbsRef.current.clear();
+        setClusterDetail(null);
+        setSelectedId(null);
+        setLabelInput('');
+        setMergeSource('');
+      }
+      const movedCount = res.moved?.length ?? sampleIds.length;
+      setMessage(`Moved ${movedCount} sample${movedCount === 1 ? '' : 's'}`);
+    } catch (e) {
+      setMessage(String(e instanceof Error ? e.message : e));
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedSamples, moveTargetId, moveNewLabel, refreshClusters, selectedId, loadCluster]);
+
   const handleDeleteCluster = React.useCallback(async () => {
     if (!selectedId) return;
     const label = clusterDetail?.cluster.label || selectedId;
@@ -180,6 +259,9 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
       setSelectedId(null);
       setLabelInput('');
       setMergeSource('');
+      setSelectedSamples([]);
+      setMoveTargetId('');
+      setMoveNewLabel('');
       await refreshClusters();
       setMessage('Cluster deleted');
     } catch (e) {
@@ -193,6 +275,7 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
     if (!selectedId) return;
     try {
       await deleteSample(sampleId);
+      setSelectedSamples((prev) => prev.filter((id) => id !== sampleId));
       thumbsRef.current.delete(sampleId);
       await loadCluster(selectedId);
       await refreshClusters();
@@ -270,6 +353,7 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
               <option value="samples">samples</option>
               <option value="cohesion">cohesion</option>
               <option value="neighbor">nearest</option>
+              <option value="detect">det label</option>
             </select>
           </label>
           <button
@@ -296,6 +380,11 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
                   {typeof cluster.mean_similarity === 'number' ? ` · μ ${cluster.mean_similarity.toFixed(3)}` : ''}
                   {typeof cluster.nearest_neighbor_similarity === 'number' ? ` · ↔ ${cluster.nearest_neighbor_similarity.toFixed(3)}` : ''}
                 </div>
+                {cluster.detect_label_stats?.length ? (
+                  <div className="text-gray-600 text-[10px]">
+                    det: {summarizeDetectLabels(cluster.detect_label_stats, 3)}
+                  </div>
+                ) : null}
               </button>
             ))}
             {!clusters.length && !loading && <div className="text-gray-500 text-[11px]">No clusters yet</div>}
@@ -319,6 +408,11 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
                     {typeof clusterDetail.cluster.nearest_neighbor_similarity === 'number' ? ` (${clusterDetail.cluster.nearest_neighbor_similarity.toFixed(3)})` : ''}
                   </div>
                 )}
+                {clusterDetail.cluster.detect_label_stats?.length ? (
+                  <div className="text-[10px] text-gray-400">
+                    YOLO labels: {summarizeDetectLabels(clusterDetail.cluster.detect_label_stats, 5)}
+                  </div>
+                ) : null}
                 <div className="flex items-center gap-2">
                   <input
                     className="bg-gray-800 text-xs px-2 py-1 rounded w-40"
@@ -352,23 +446,72 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
                   </label>
                   <button className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded" onClick={handlePrune}>Prune</button>
                 </div>
+                {selectedCount > 0 && (
+                  <div className="flex flex-wrap items-center gap-2 text-[10px] text-gray-300 bg-gray-800/60 px-2 py-1 rounded">
+                    <span>{selectedCount} selected</span>
+                    <select className="bg-gray-900 text-xs px-2 py-1 rounded" value={moveTargetId} onChange={(e)=>setMoveTargetId(e.target.value)}>
+                      <option value="">→ existing…</option>
+                      {clusters.filter(c=>c.cluster_id !== selectedId).map(c=> (
+                        <option key={c.cluster_id} value={c.cluster_id}>{c.label || c.cluster_id}</option>
+                      ))}
+                    </select>
+                    <span>or</span>
+                    <input
+                      className="bg-gray-900 text-xs px-2 py-1 rounded w-32"
+                      placeholder="new cluster label…"
+                      value={moveNewLabel}
+                      onChange={(e)=>setMoveNewLabel(e.target.value)}
+                    />
+                    <button
+                      className="px-2 py-1 bg-indigo-700 hover:bg-indigo-600 rounded disabled:opacity-40 disabled:hover:bg-indigo-700"
+                      onClick={handleMoveSelected}
+                      disabled={!canMoveSelected || loading}
+                    >
+                      Move
+                    </button>
+                    <button className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded" onClick={clearSelection}>Clear</button>
+                  </div>
+                )}
                 <div className="grid grid-cols-3 gap-2">
                   {clusterDetail.samples.map((sample) => {
                     const thumb = thumbsRef.current.get(sample.sample_id)?.dataUrl;
+                    const isSelected = selectedSamples.includes(sample.sample_id);
                     return (
-                      <div key={sample.sample_id} className="border border-gray-700 rounded overflow-hidden relative">
-                        <div className="absolute top-1 right-1">
-                          <button className="bg-gray-900/70 hover:bg-gray-900 text-[9px] px-1 py-0.5 rounded" onClick={()=>handleDeleteSample(sample.sample_id)}>✕</button>
+                      <div
+                        key={sample.sample_id}
+                        className={`border rounded overflow-hidden relative transition-shadow ${isSelected ? 'border-indigo-500 ring-2 ring-indigo-500' : 'border-gray-700'}`}
+                      >
+                        <div className="absolute top-1 left-1">
+                          <input
+                            type="checkbox"
+                            className="h-3 w-3 accent-indigo-500"
+                            checked={isSelected}
+                            onChange={()=>toggleSampleSelection(sample.sample_id)}
+                          />
                         </div>
-                        <div className="w-full h-24 bg-gray-900 flex items-center justify-center">
+                        <div className="absolute top-1 right-1">
+                          <button
+                            className="bg-gray-900/70 hover:bg-gray-900 text-[9px] px-1 py-0.5 rounded"
+                            onClick={(event)=>{ event.stopPropagation(); void handleDeleteSample(sample.sample_id); }}
+                          >
+                            ✕
+                          </button>
+                        </div>
+                        <div
+                          className="w-full h-24 bg-gray-900 flex items-center justify-center cursor-pointer"
+                          onClick={()=>toggleSampleSelection(sample.sample_id)}
+                        >
                           {thumb ? (
                             <img src={thumb} alt={sample.sample_id} className="max-h-full max-w-full object-contain" />
                           ) : (
                             <div className="text-[10px] text-gray-500">loading…</div>
                           )}
                         </div>
-                        <div className="p-1 text-[9px] text-gray-500 break-all">
-                          {sample.sample_id}
+                        <div className="p-1 text-[9px] text-gray-500 break-all flex flex-col gap-0.5">
+                          {sample.detect_label ? (
+                            <span className="text-gray-400">det: {sample.detect_label}</span>
+                          ) : null}
+                          <span>{sample.sample_id}</span>
                         </div>
                       </div>
                     );

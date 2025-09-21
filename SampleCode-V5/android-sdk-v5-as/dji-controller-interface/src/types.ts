@@ -27,6 +27,8 @@ export interface TelemetryData extends BridgeMessage {
   type: 'telemetry_data';
   altitude: number;
   altitude_above_home: number;
+  altitude_above_takeoff?: number;
+  altitude_barometric?: number;
   speed: number;
   location: {
     latitude: number;
