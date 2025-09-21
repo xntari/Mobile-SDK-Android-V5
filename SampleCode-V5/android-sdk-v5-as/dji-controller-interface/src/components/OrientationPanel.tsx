@@ -3,6 +3,8 @@ import { Panel } from './Panel';
 import { TelemetryData } from '../types';
 import { rotationMatrixFromEuler, vectorRotate, combineRotationMatrices } from '../utils/poseMath';
 import { getCameraCenterRay, projectRayToGround } from '../utils/rayProjection';
+import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
+import { computeTargetMetrics } from '../utils/objectMemoryTarget';
 import { OrientationCompass } from './OrientationCompass';
 
 type OrientationPanelProps = {
@@ -28,6 +30,12 @@ const defaultVector = { x: 0, y: 0, z: -1 };
 
 export const OrientationPanel: React.FC<OrientationPanelProps> = ({ telemetry, sendCommand }) => {
   const [isResetting, setIsResetting] = React.useState(false);
+  const [objectTarget, setObjectTarget] = React.useState<ObjectMemoryTargetSelection | null>(() => objectMemoryTargetStore.getCurrent());
+  const targetMetrics = React.useMemo(
+    () => computeTargetMetrics(telemetry, objectTarget?.anchor, objectTarget?.clusterLabel ?? objectTarget?.clusterId),
+    [telemetry, objectTarget]
+  );
+  React.useEffect(() => objectMemoryTargetStore.subscribe(setObjectTarget), []);
   const gimbal = telemetry?.gimbals?.find((g) => g.index === 'LEFT_OR_MAIN');
   const aircraftMatrix = React.useMemo(() => {
     if (!telemetry?.attitude) return null;
@@ -79,8 +87,24 @@ export const OrientationPanel: React.FC<OrientationPanelProps> = ({ telemetry, s
       defaultSize={{ w: 320, h: 480 }}
     >
       <div className="flex flex-col gap-2 text-xs text-gray-200 h-full overflow-y-auto" style={{ fontFamily: 'monospace' }}>
+        {targetMetrics && (
+          <div className="bg-black/60 border border-sky-700/50 rounded px-3 py-2 text-[11px] text-sky-200 flex items-center justify-between">
+            <div className="font-semibold text-sky-100">{objectTarget?.clusterLabel ?? objectTarget?.clusterId ?? 'Target'}</div>
+            <div className="flex items-center gap-3">
+              <span>{Number.isFinite(targetMetrics.slantDistance) ? `${targetMetrics.slantDistance.toFixed(1)} m` : '—'}</span>
+              {targetMetrics.altitudeDelta != null && Number.isFinite(targetMetrics.altitudeDelta) && (
+                <span>Δalt {targetMetrics.altitudeDelta.toFixed(1)} m</span>
+              )}
+              <span>BRG {targetMetrics.bearing.toFixed(0)}°</span>
+            </div>
+          </div>
+        )}
         <div className="flex justify-center">
-          <OrientationCompass telemetry={telemetry} size={240} />
+          <OrientationCompass telemetry={telemetry} size={240} target={targetMetrics ? {
+            bearing: targetMetrics.bearing,
+            distance: targetMetrics.slantDistance,
+            altitudeDelta: targetMetrics.altitudeDelta,
+          } : undefined} />
         </div>
         <div className="flex gap-4">
           <section className="flex-1">
@@ -89,6 +113,16 @@ export const OrientationPanel: React.FC<OrientationPanelProps> = ({ telemetry, s
             <div>Pitch: {formatAngle(telemetry?.attitude?.pitch)}°</div>
             <div>Yaw: {formatAngle(telemetry?.attitude?.yaw)}°</div>
             <div>Heading: {formatAngle(telemetry?.compass_heading)}°</div>
+            <div>Motors: {telemetry?.motors_on ? '🟢 ON' : '⚫ OFF'}</div>
+            <div className="mt-1 text-gray-400 uppercase text-[10px]">Altitude</div>
+            <div>AGL: {formatNumber(telemetry?.altitude, 1)} m</div>
+            <div>Above TO: {formatNumber(telemetry?.altitude_above_takeoff, 1)} m</div>
+            <div>TO Alt: {formatNumber(telemetry?.takeoff_altitude, 1)} m</div>
+            <div>AMSL: {formatNumber((telemetry?.takeoff_altitude || 0) + (telemetry?.altitude || 0), 1)} m</div>
+            <div>Baro: {formatNumber(telemetry?.altitude_barometric, 1)} m</div>
+            {telemetry?.altitude_ultrasonic !== undefined && telemetry?.altitude_ultrasonic !== null && (
+              <div>Ultrasonic: {formatNumber(telemetry.altitude_ultrasonic, 1)} m</div>
+            )}
           </section>
           <section className="flex-1">
             <div className="text-gray-400 uppercase text-[10px]">Gimbal</div>

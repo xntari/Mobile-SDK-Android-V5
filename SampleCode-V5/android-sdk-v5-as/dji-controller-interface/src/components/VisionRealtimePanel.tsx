@@ -1566,15 +1566,28 @@ const ObjectMapSection: React.FC<ObjectMapSectionProps> = ({
     const originLocationRaw = telemetry?.location;
     const originLat = parseMaybeNumber(originLocationRaw?.latitude);
     const originLon = parseMaybeNumber(originLocationRaw?.longitude);
-    const originAltitude = parseMaybeNumber(originLocationRaw?.altitude)
-      ?? parseMaybeNumber(telemetry?.altitude_above_home)
-      ?? parseMaybeNumber(telemetry?.altitude_above_takeoff)
-      ?? parseMaybeNumber(telemetry?.altitude_barometric);
+    // Use AMSL altitude directly from location (already calculated in DJIBridgeServer)
+    // location.altitude is now ABSOLUTE altitude (AMSL)
+    const locationAlt = parseMaybeNumber(originLocationRaw?.altitude);
+
+    // Fallback: Use barometric altitude which is also AMSL now
+    const baroAltitude = telemetry?.altitude_barometric || 0;
+
+    // Use location altitude if available, otherwise use barometric
+    const originAltitude = locationAlt ?? baroAltitude;
+
+    // Debug log altitude values
+    console.log('VisionPanel Altitude Debug:', {
+      locationAlt,
+      baroAltitude,
+      final: originAltitude,
+      motorsOn: telemetry?.motors_on
+    });
     const originLocation = originLat !== null && originLon !== null
       ? {
           latitude: originLat,
           longitude: originLon,
-          ...(originAltitude !== null ? { altitude: originAltitude } : {}),
+          altitude: originAltitude,  // Always include altitude
         }
       : undefined;
     const originAttitudeRaw = telemetry?.attitude;
@@ -1837,10 +1850,10 @@ const ObjectMapSection: React.FC<ObjectMapSectionProps> = ({
       const locationRaw = telemetry.location;
       const originLat = parseMaybeNumber(locationRaw?.latitude);
       const originLon = parseMaybeNumber(locationRaw?.longitude);
+      // Use AMSL altitude directly from location (already calculated in DJIBridgeServer)
+      // location.altitude is now ABSOLUTE altitude (AMSL)
       const originAltitude = parseMaybeNumber(locationRaw?.altitude)
-        ?? parseMaybeNumber(telemetry.altitude_above_home)
-        ?? parseMaybeNumber(telemetry.altitude_above_takeoff)
-        ?? parseMaybeNumber(telemetry.altitude_barometric);
+        ?? (telemetry.altitude_barometric || 0);
       const dronePosition = originLat !== null && originLon !== null ? {
         latitude: originLat,
         longitude: originLon,
@@ -2045,9 +2058,9 @@ const ObjectMapSection: React.FC<ObjectMapSectionProps> = ({
               <div className="mt-1">
                 <div>Aircraft Lat: {measurement.origin.location.latitude?.toFixed(6) ?? '—'}</div>
                 <div>Aircraft Lon: {measurement.origin.location.longitude?.toFixed(6) ?? '—'}</div>
-                <div>Aircraft Alt: {typeof measurement.origin.location.altitude === 'number' && isFinite(measurement.origin.location.altitude)
+                <div>Aircraft Alt (AMSL): {typeof measurement.origin.location.altitude === 'number' && isFinite(measurement.origin.location.altitude)
                   ? `${measurement.origin.location.altitude.toFixed(1)} m`
-                  : '—'}</div>
+                  : '0.0 m'}</div>
               </div>
             )}
             {measurement?.origin?.attitude && (

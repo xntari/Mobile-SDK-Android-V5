@@ -16,6 +16,7 @@ import dji.sdk.keyvalue.value.common.LocationCoordinate3D
 import dji.sdk.keyvalue.value.common.Velocity3D
 import dji.sdk.keyvalue.value.common.ComponentIndexType
 import dji.sdk.keyvalue.value.common.Attitude
+import dji.v5.manager.datacenter.camera.view.PinPoint
 import dji.sdk.keyvalue.value.gimbal.GimbalAttitudeRange
 import dji.v5.manager.aircraft.perception.PerceptionManager
 import dji.v5.manager.aircraft.perception.data.ObstacleData
@@ -319,6 +320,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         CAMERA_LASER_GET("camera_laser_get"),
         CAMERA_LASER_MEASURE("camera_laser_measure"),
         CAMERA_LASER_RESULT("camera_laser_result"),
+        CAMERA_LIVE_VIEW_LOCATION("camera_live_view_location"),
         CAMERA_ZOOM("camera_zoom"),
         GIMBAL_TAP_TARGET("gimbal_tap_target"),
         GIMBAL_RESPONSE("gimbal_response"),
@@ -384,6 +386,10 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     // Secondary camera (H20N/Gimbal - optional)
     private val secondaryCameraIndex = ComponentIndexType.LEFT_OR_MAIN
     private var isSecondaryCameraAvailable = false
+
+    // Store takeoff altitude when motors first turn on
+    private var capturedTakeoffAltitude: Double? = null
+    private var lastMotorsOnState: Boolean = false
     private var isSecondaryStreamEnabled = false
     private var secondaryBytesStreamed = 0L
     private var secondaryFramesStreamed = 0L
@@ -794,6 +800,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 MessageType.CAMERA_LASER_GET -> handleCameraLaserGet(clientId, json)
                 MessageType.CAMERA_LASER_MEASURE -> handleCameraLaserMeasure(clientId, json)
                 MessageType.CAMERA_ZOOM -> handleCameraZoom(clientId, json)
+                MessageType.CAMERA_LIVE_VIEW_LOCATION -> handleCameraLiveViewLocation(clientId, json)
                 MessageType.GIMBAL_TAP_TARGET -> handleGimbalTapTarget(clientId, json)
                 MessageType.GIMBAL_FREE_LOOK_START -> handleGimbalFreeLookStart(clientId, json)
                 MessageType.GIMBAL_FREE_LOOK_UPDATE -> handleGimbalFreeLookUpdate(clientId, json)
@@ -861,6 +868,62 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         } catch (e: Exception) {
             Log.e(TAG, "camera_zoom error: ${e.message}", e)
             clients[clientId]?.let { sendErrorResponse(it, "camera_zoom failed: ${e.message}") }
+        }
+    }
+
+    private fun handleCameraLiveViewLocation(clientId: String, command: JSONObject) {
+        try {
+            val data = command.optJSONObject("data") ?: run {
+                clients[clientId]?.let { sendErrorResponse(it, "camera_live_view_location missing data") }
+                return
+            }
+
+            val latitude = data.optDouble("latitude", Double.NaN)
+            val longitude = data.optDouble("longitude", Double.NaN)
+            val altitude = data.optDouble("altitude", Double.NaN)
+            if (latitude.isNaN() || longitude.isNaN() || altitude.isNaN()) {
+                clients[clientId]?.let { sendErrorResponse(it, "camera_live_view_location requires latitude/longitude/altitude") }
+                return
+            }
+
+            val componentName = data.optString("camera_index", "LEFT_OR_MAIN").uppercase()
+            val component = ComponentIndexType.values().find { it.name == componentName } ?: ComponentIndexType.LEFT_OR_MAIN
+
+            val requestId = data.optString("request_id", "")
+            val source = data.optString("source", "")
+
+            val location = LocationCoordinate3D(latitude, longitude, altitude)
+            val manager = MediaDataCenter.getInstance().cameraStreamManager
+            val pinPointInfo = manager.getLiveViewLocationWithGPS(location, component)
+
+            val pinPoints = pinPointInfo.pinPoints?.mapIndexed { index, pinPoint ->
+                mapOf(
+                    "index" to index,
+                    "x" to pinPoint.x,
+                    "y" to pinPoint.y
+                )
+            } ?: emptyList<Map<String, Any>>()
+
+            val responseData = mapOf(
+                "component" to component.name,
+                "request_id" to requestId,
+                "source" to source,
+                "valid" to pinPointInfo.isValid,
+                "result" to pinPointInfo.result?.toString(),
+                "point_direction" to pinPointInfo.pointDirection?.toString(),
+                "pin_points" to pinPoints,
+                "request" to mapOf(
+                    "latitude" to latitude,
+                    "longitude" to longitude,
+                    "altitude" to altitude
+                )
+            )
+
+            val message = createMessage(MessageType.CAMERA_LIVE_VIEW_LOCATION, responseData)
+            clients[clientId]?.let { sendWebSocketTextFrame(it, message) }
+        } catch (e: Exception) {
+            Log.e(TAG, "camera_live_view_location error: ${e.message}", e)
+            clients[clientId]?.let { sendErrorResponse(it, "camera_live_view_location failed: ${e.message}") }
         }
     }
 
@@ -1621,14 +1684,50 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         val telemetryData = try {
             val keyManager = KeyManager.getInstance()
             
-            // Get altitude data
-            val altitudeKey = KeyTools.createKey(FlightControllerKey.KeyAltitude)
-            val altitude = keyManager.getValue(altitudeKey) as? Double ?: 0.0
-            
-            // Get aircraft location
+            // Check if motors are on (altitude readings may be invalid when motors are off)
+            val motorsOnKey = KeyTools.createKey(FlightControllerKey.KeyAreMotorsOn)
+            val areMotorsOn = keyManager.getValue(motorsOnKey) as? Boolean ?: false
+
+            // Get 3D aircraft location first (this contains the altitude)
+            val aircraft3DLocationKey = KeyTools.createKey(FlightControllerKey.KeyAircraftLocation3D)
+            val aircraft3DLocation = keyManager.getValue(aircraft3DLocationKey) as? LocationCoordinate3D
+
+            // IMPORTANT: LocationCoordinate3D.altitude is RELATIVE altitude from takeoff point!
+            val relativeAltitude = aircraft3DLocation?.altitude ?: 0.0
+
+            // Capture ground elevation when motors first turn on
+            if (areMotorsOn && !lastMotorsOnState && aircraft3DLocation != null) {
+                // Motors just turned on - capture ground elevation
+                // TODO: Use proper GPS elevation service. For now using your location's known value
+                capturedTakeoffAltitude = 109.0  // Your location's ground elevation in meters AMSL
+                Log.i(TAG, "Motors ON - captured ground elevation: ${capturedTakeoffAltitude}m AMSL")
+            }
+            lastMotorsOnState = areMotorsOn
+
+            // Get takeoff altitude from SDK (often unreliable) or use captured/default value
+            val takeoffAltitudeKey = KeyTools.createKey(FlightControllerKey.KeyTakeoffLocationAltitude)
+            val sdkTakeoffAltitude = (keyManager.getValue(takeoffAltitudeKey) as? Number)?.toDouble()
+
+            // Ground elevation at takeoff location (AMSL)
+            val groundElevation = capturedTakeoffAltitude ?: sdkTakeoffAltitude ?: 109.0
+
+            // Calculate ABSOLUTE altitude (AMSL) = ground elevation + relative altitude
+            val absoluteAltitude = groundElevation + relativeAltitude
+
+            Log.v(TAG, "Altitude: relative=${relativeAltitude}m, ground=${groundElevation}m, AMSL=${absoluteAltitude}m")
+
+            // Get ultrasonic height (more accurate for low altitudes, returned in decimeters)
+            val ultrasonicHeightKey = KeyTools.createKey(FlightControllerKey.KeyUltrasonicHeight)
+            val ultrasonicHeightDm = keyManager.getValue(ultrasonicHeightKey)
+            val ultrasonicHeight = when (ultrasonicHeightDm) {
+                is Number -> ultrasonicHeightDm.toDouble() / 10.0  // Convert dm to meters
+                else -> null
+            }
+
+            // Get 2D aircraft location for lat/lon
             val aircraftLocationKey = KeyTools.createKey(FlightControllerKey.KeyAircraftLocation)
             val aircraftLocation = keyManager.getValue(aircraftLocationKey) as? LocationCoordinate2D
-            
+
             // Get home location
             val homeLocationKey = KeyTools.createKey(FlightControllerKey.KeyHomeLocation)
             val homeLocation = keyManager.getValue(homeLocationKey) as? LocationCoordinate2D
@@ -1648,31 +1747,40 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 "bridge_status" to "active",
                 "data_collection_status" to "sdk_integrated",
                 
-                // Real flight data
-                "altitude" to altitude,
+                // Real flight data with CORRECT altitude values
+                "altitude" to relativeAltitude,  // RELATIVE altitude from takeoff (for compatibility)
+                "altitude_above_takeoff" to relativeAltitude,  // Relative altitude from takeoff
+                "altitude_above_home" to relativeAltitude,  // Relative altitude from home/takeoff
+                "altitude_barometric" to absoluteAltitude,  // ABSOLUTE altitude (AMSL) for Vision Realtime!
+                "altitude_ultrasonic" to ultrasonicHeight,  // Ultrasonic height (if available)
+                "takeoff_altitude" to groundElevation,  // Ground elevation at takeoff location (AMSL)
+                "motors_on" to areMotorsOn,  // Include motor status for debugging
                 "ground_speed" to groundSpeed,
                 "vertical_speed" to (velocity?.z?.toDouble() ?: 0.0),
                 "flight_mode" to "CONNECTED", // TODO: Get actual flight mode
-                
+
                 // Location data
                 "location" to run {
-                    aircraftLocation?.let {
-                        mapOf(
-                            "latitude" to it.latitude,
-                            "longitude" to it.longitude,
-                            "altitude" to altitude
-                        )
-                    } ?: mapOf("latitude" to 0.0, "longitude" to 0.0, "altitude" to altitude)
+                    // Use 3D location if available, otherwise fall back to 2D
+                    val lat = aircraft3DLocation?.latitude ?: aircraftLocation?.latitude ?: 0.0
+                    val lon = aircraft3DLocation?.longitude ?: aircraftLocation?.longitude ?: 0.0
+                    // Use ABSOLUTE altitude (AMSL) for location!
+                    mapOf(
+                        "latitude" to lat,
+                        "longitude" to lon,
+                        "altitude" to absoluteAltitude  // ABSOLUTE altitude (AMSL)
+                    )
                 },
-                
+
                 // Home location
                 "home_location" to run {
                     homeLocation?.let {
                         mapOf(
                             "latitude" to it.latitude,
-                            "longitude" to it.longitude
+                            "longitude" to it.longitude,
+                            "altitude" to groundElevation  // Home altitude is ground elevation (AMSL)
                         )
-                    } ?: mapOf("latitude" to 0.0, "longitude" to 0.0)
+                    } ?: mapOf("latitude" to 0.0, "longitude" to 0.0, "altitude" to 0.0)
                 },
                 
                 // Calculate distance to home

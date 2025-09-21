@@ -5,6 +5,8 @@ import { TelemetryData } from '../types';
 import { rotationMatrixFromEuler, vectorRotate, combineRotationMatrices } from './poseMath';
 import { getCameraIntrinsics, pixelToRay } from './cameraIntrinsics';
 
+type Matrix3 = [number, number, number, number, number, number, number, number, number];
+
 export interface GeographicPoint {
   latitude: number;
   longitude: number;
@@ -151,7 +153,7 @@ export function projectRayToGround(
   // Transform ray through gimbal and aircraft rotations
   // 1. Camera to gimbal (assuming camera aligned with gimbal)
   const gimbalMatrix = rotationMatrixFromEuler({
-    roll: 0, // Gimbal typically doesn't have roll
+    roll: gimbal.attitude.roll || 0,
     pitch: gimbal.attitude.pitch || 0,
     yaw: gimbal.attitude.yaw || 0,
   });
@@ -266,6 +268,14 @@ export function calculateProjectionError(predicted: GeographicPoint, actual: Geo
   return Math.sqrt(enu.east ** 2 + enu.north ** 2 + enu.up ** 2);
 }
 
+function transposeMatrix(matrix: Matrix3): Matrix3 {
+  return [
+    matrix[0], matrix[3], matrix[6],
+    matrix[1], matrix[4], matrix[7],
+    matrix[2], matrix[5], matrix[8],
+  ];
+}
+
 /**
  * Get camera center ray (for debugging/visualization)
  * @param telemetry Current telemetry data
@@ -296,4 +306,144 @@ export function getCameraCenterRay(telemetry: TelemetryData): { x: number; y: nu
   const worldMatrix = combineRotationMatrices([aircraftMatrix, gimbalMatrix]);
 
   return vectorRotate(cameraRay, worldMatrix);
+}
+
+export interface ScreenProjectionResult {
+  normalized: { x: number; y: number };
+  screen: { x: number; y: number };
+  inFrame: boolean;
+  cameraVector: { x: number; y: number; z: number };
+  distance: number;
+}
+
+interface ProjectToScreenOptions {
+  imageWidth?: number;
+  imageHeight?: number;
+  cameraType?: 'main' | 'fpv';
+  cameraModel?: string;
+  baseFocalLength?: number;
+  zoomRatioOverride?: number;
+  horizontalFovOverride?: number;
+  verticalFovOverride?: number;
+}
+
+export function projectGeographicPointToScreen(
+  telemetry: TelemetryData,
+  target: GeographicPoint,
+  options: ProjectToScreenOptions = {}
+): ScreenProjectionResult | null {
+  if (!telemetry.location || !telemetry.attitude) {
+    return null;
+  }
+
+  const imageWidth = options.imageWidth ?? 1280;
+  const imageHeight = options.imageHeight ?? 720;
+  if (imageWidth <= 0 || imageHeight <= 0) {
+    return null;
+  }
+
+  const cameraType = options.cameraType ?? 'main';
+  const gimbal = telemetry.gimbals?.find((g) => g.index === 'LEFT_OR_MAIN' || g.index === 'MAIN' || g.index === 'PRIMARY');
+
+  const gimbalAttitude = gimbal?.attitude;
+  const gimbalPitch = gimbalAttitude?.pitch ?? 0;
+  const gimbalRoll = gimbalAttitude?.roll ?? 0;
+  const aircraftYaw = telemetry.attitude.yaw || 0;
+  const gimbalYawRel = typeof gimbal?.yaw_relative === 'number'
+    ? gimbal.yaw_relative
+    : (gimbalAttitude?.yaw ?? aircraftYaw) - aircraftYaw;
+
+  const aircraftMatrix = rotationMatrixFromEuler({
+    roll: telemetry.attitude.roll || 0,
+    pitch: telemetry.attitude.pitch || 0,
+    yaw: aircraftYaw,
+  });
+
+  const worldToBody = transposeMatrix(aircraftMatrix);
+
+  const gimbalMatrix = rotationMatrixFromEuler({
+    roll: gimbalRoll,
+    pitch: gimbalPitch,
+    yaw: gimbalYawRel,
+  });
+  const bodyToCamera = transposeMatrix(gimbalMatrix);
+
+  const originAltitude = telemetry.location.altitude ?? telemetry.altitude ?? 0;
+  const enu = geographicToENU({
+    latitude: target.latitude,
+    longitude: target.longitude,
+    altitude: target.altitude,
+  }, {
+    latitude: telemetry.location.latitude,
+    longitude: telemetry.location.longitude,
+    altitude: originAltitude,
+  });
+
+  const worldVector = { x: enu.east, y: enu.north, z: enu.up };
+  const bodyVector = vectorRotate(worldVector, worldToBody);
+  const cameraVector = vectorRotate(bodyVector, bodyToCamera);
+
+  const distance = Math.sqrt(cameraVector.x ** 2 + cameraVector.y ** 2 + cameraVector.z ** 2);
+  if (!Number.isFinite(distance) || distance <= 1e-3) {
+    return null;
+  }
+  const forward = -cameraVector.z;
+  if (!Number.isFinite(forward) || forward <= 1e-6) {
+    return {
+      normalized: { x: Number.NaN, y: Number.NaN },
+      screen: { x: Number.NaN, y: Number.NaN },
+      inFrame: false,
+      cameraVector,
+      distance,
+    };
+  }
+
+  const defaultZoom = telemetry.camera_optics?.zoom_ratio ?? 1;
+  const zoomRatio = options.zoomRatioOverride ?? defaultZoom;
+  const cameraModel = options.cameraModel ?? (cameraType === 'fpv' ? 'MAVIC3' : 'H20N');
+  const baseFocalLength = options.baseFocalLength ?? (cameraType === 'fpv' ? 24 : 25);
+
+  const overrideHFov = options.horizontalFovOverride ?? telemetry.camera_optics?.display_fov?.horizontal;
+  const overrideVFov = options.verticalFovOverride ?? telemetry.camera_optics?.display_fov?.vertical;
+
+  let halfHFov: number;
+  let halfVFov: number;
+  let fx: number;
+  let fy: number;
+
+  if (typeof overrideHFov === 'number' && overrideHFov > 0 && typeof overrideVFov === 'number' && overrideVFov > 0) {
+    halfHFov = (overrideHFov * Math.PI) / 180 / 2;
+    halfVFov = (overrideVFov * Math.PI) / 180 / 2;
+    fx = (imageWidth / 2) / Math.tan(halfHFov);
+    fy = (imageHeight / 2) / Math.tan(halfVFov);
+  } else {
+    const intrinsics = getCameraIntrinsics(zoomRatio, cameraModel, baseFocalLength);
+    halfHFov = (intrinsics.horizontalFov * Math.PI) / 180 / 2;
+    halfVFov = (intrinsics.verticalFov * Math.PI) / 180 / 2;
+    fx = (imageWidth / 2) / Math.tan(halfHFov);
+    fy = (imageHeight / 2) / Math.tan(halfVFov);
+  }
+
+  if (!Number.isFinite(fx) || !Number.isFinite(fy) || fx <= 0 || fy <= 0) {
+    return null;
+  }
+
+  const u = fx * (cameraVector.x / forward) + imageWidth / 2;
+  const v = fy * (cameraVector.y / forward) + imageHeight / 2;
+
+  const normalizedX = u / imageWidth;
+  const normalizedY = v / imageHeight;
+
+  const screenX = normalizedX;
+  const screenY = normalizedY;
+
+  const inFrame = normalizedX >= 0 && normalizedX <= 1 && normalizedY >= 0 && normalizedY <= 1;
+
+  return {
+    normalized: { x: normalizedX, y: normalizedY },
+    screen: { x: screenX, y: screenY },
+    inFrame,
+    cameraVector,
+    distance,
+  };
 }

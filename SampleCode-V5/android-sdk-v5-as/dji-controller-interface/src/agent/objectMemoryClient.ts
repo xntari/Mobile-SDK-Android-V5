@@ -1,3 +1,32 @@
+export type ObjectMemoryClusterAnchor = {
+  sample_id: string;
+  sample_created_ts: number;
+  timestamp?: number;
+  distance_m?: number;
+  source_camera?: string;
+  object_position: { latitude: number; longitude: number; altitude_m?: number };
+  drone_position: { latitude: number; longitude: number; altitude_m?: number };
+  drone_orientation?: { yaw?: number; pitch?: number; roll?: number };
+  gimbal_orientation?: { yaw?: number; pitch?: number; roll?: number };
+  object_map?: {
+    enu_offset?: { east?: number; north?: number; up?: number };
+    screen_point?: { x?: number; y?: number };
+    laser_location?: { latitude: number; longitude: number; altitude_m?: number };
+    target_point?: { latitude: number; longitude: number; altitude_m?: number };
+    aircraft?: {
+      location?: { latitude: number; longitude: number; altitude_m?: number };
+      attitude?: { yaw?: number; pitch?: number; roll?: number };
+      gimbal?: { yaw?: number; pitch?: number; roll?: number };
+    };
+    prompts?: string[];
+    ov_labels_used?: string[];
+    detection_score?: number;
+    memory_label?: string;
+    memory_similarity?: number;
+    track_id?: string;
+  };
+};
+
 export type ObjectMemoryCluster = {
   cluster_id: string;
   created_ts: number;
@@ -20,6 +49,7 @@ export type ObjectMemoryCluster = {
     detect_label_raw?: string | null;
     telemetry?: SampleTelemetryPayload;
   } | null;
+  object_map_anchor?: ObjectMemoryClusterAnchor | null;
 };
 
 export type ObjectMemorySample = {

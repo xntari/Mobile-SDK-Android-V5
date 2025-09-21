@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { MapDisplayProps, TelemetryData } from '../types';
+import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
+import { computeTargetMetrics } from '../utils/objectMemoryTarget';
 
 export const MapDisplay: React.FC<MapDisplayProps> = ({
   flightPath = []
@@ -10,10 +12,22 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
   const mapRef = useRef<maplibregl.Map | null>(null);
   const aircraftMarkerRef = useRef<maplibregl.Marker | null>(null);
   const homeMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const targetMarkerRef = useRef<maplibregl.Marker | null>(null);
   const [mapReady, setMapReady] = useState(false);
 
   // Direct telemetry data state - updated via electronAPI listener like camera components
   const [telemetryData, setTelemetryData] = useState<TelemetryData | null>(null);
+  const [objectTarget, setObjectTarget] = useState<ObjectMemoryTargetSelection | null>(() => objectMemoryTargetStore.getCurrent());
+
+  useEffect(() => {
+    const unsubscribe = objectMemoryTargetStore.subscribe(setObjectTarget);
+    return unsubscribe;
+  }, []);
+
+  const targetMetrics = React.useMemo(
+    () => computeTargetMetrics(telemetryData, objectTarget?.anchor, objectTarget?.clusterLabel ?? objectTarget?.clusterId),
+    [telemetryData, objectTarget]
+  );
 
   // Map rotation toggle
   const [autoRotate, setAutoRotate] = useState(() => {
@@ -104,6 +118,9 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
       if (mapRef.current) {
         mapRef.current.remove();
       }
+      aircraftMarkerRef.current = null;
+      homeMarkerRef.current = null;
+      targetMarkerRef.current = null;
     };
   }, []);
 
@@ -251,7 +268,29 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
         homeMarkerRef.current.setLngLat([homeLocation.longitude, homeLocation.latitude]);
       }
     }
-  }, [mapReady, telemetryData, autoRotate]);
+
+    const targetPosition = targetMetrics?.targetPosition;
+    if (targetPosition && Number.isFinite(targetPosition.latitude) && Number.isFinite(targetPosition.longitude)) {
+      if (!targetMarkerRef.current) {
+        const targetEl = document.createElement('div');
+        targetEl.style.width = '14px';
+        targetEl.style.height = '14px';
+        targetEl.style.borderRadius = '50%';
+        targetEl.style.backgroundColor = '#0ea5e9';
+        targetEl.style.border = '2px solid white';
+        targetEl.style.boxShadow = '0 0 6px rgba(14, 165, 233, 0.7)';
+
+        targetMarkerRef.current = new maplibregl.Marker({ element: targetEl })
+          .setLngLat([targetPosition.longitude, targetPosition.latitude])
+          .addTo(map);
+      } else {
+        targetMarkerRef.current.setLngLat([targetPosition.longitude, targetPosition.latitude]);
+      }
+    } else if (targetMarkerRef.current) {
+      targetMarkerRef.current.remove();
+      targetMarkerRef.current = null;
+    }
+  }, [mapReady, telemetryData, autoRotate, targetMetrics]);
 
   // Persist autoRotate setting
   useEffect(() => {
@@ -338,7 +377,7 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
       </div>
       
       {/* Map info */}
-      <div className="mt-2 flex justify-between text-xs">
+      <div className="mt-2 flex flex-wrap justify-around gap-4 text-xs">
         <div className="text-center">
           <div className="text-gray-400">DIST HOME</div>
           <div className="font-mono text-white">
@@ -359,7 +398,31 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
             {(telemetryData?.compass_heading || telemetryData?.heading || 0).toFixed(0)}°
           </div>
         </div>
+
+        {targetMetrics && (
+          <>
+            <div className="text-center">
+              <div className="text-purple-200">OBJ DIST</div>
+              <div className="font-mono text-purple-300">
+                {targetMetrics.slantDistance.toFixed(0)}m
+              </div>
+            </div>
+            <div className="text-center">
+              <div className="text-purple-200">OBJ BRG</div>
+              <div className="font-mono text-purple-300">
+                {targetMetrics.bearing.toFixed(0)}°
+              </div>
+            </div>
+          </>
+        )}
       </div>
+
+      {targetMetrics && (
+        <div className="mt-1 text-[11px] text-center text-purple-200">
+          {(objectTarget?.clusterLabel ?? objectTarget?.clusterId) ?? 'Target'}
+          {targetMetrics.altitudeDelta != null ? ` · Δalt ${targetMetrics.altitudeDelta.toFixed(1)} m` : ''}
+        </div>
+      )}
 
       {/* Map rotation toggle */}
       <div className="mt-2 flex justify-center">
@@ -383,6 +446,9 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
             <div className="text-gray-400 text-[10px] mb-1">AIRCRAFT</div>
             <div>{telemetryData.location.latitude.toFixed(6)}</div>
             <div>{telemetryData.location.longitude.toFixed(6)}</div>
+            <div className="text-yellow-400">
+              {((telemetryData.takeoff_altitude || 0) + (telemetryData.altitude || 0)).toFixed(1)} m AMSL
+            </div>
           </div>
         )}
 
@@ -392,6 +458,9 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
             <div className="text-gray-400 text-[10px] mb-1">HOME</div>
             <div>{telemetryData.home_location.latitude.toFixed(6)}</div>
             <div>{telemetryData.home_location.longitude.toFixed(6)}</div>
+            <div className="text-yellow-400">
+              {(telemetryData.takeoff_altitude || telemetryData.home_location.altitude || 0).toFixed(1)} m AMSL
+            </div>
           </div>
         )}
       </div>

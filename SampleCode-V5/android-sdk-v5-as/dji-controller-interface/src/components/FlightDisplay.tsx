@@ -95,7 +95,7 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
     ctx.font = '16px monospace';
     ctx.textAlign = 'left';
     ctx.fillText(`${Math.round(altitude)}m`, width - 80, centerY - 20);
-    ctx.fillText('ALT', width - 80, centerY - 5);
+    ctx.fillText('AMSL', width - 80, centerY - 5);
 
     // Draw speed on far left side
     ctx.textAlign = 'right';
@@ -140,7 +140,8 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
 
     // Safely extract telemetry, fallback to zeros
     const attitude = telemetryData?.attitude || { roll: 0, pitch: 0 } as any;
-    const altitude = telemetryData?.altitude ?? 0;
+    // Calculate AMSL altitude (takeoff altitude + current altitude)
+    const amslAltitude = (telemetryData?.takeoff_altitude || 0) + (telemetryData?.altitude || 0);
     const speed = telemetryData?.speed ?? 0;
     const heading = telemetryData?.compass_heading ?? telemetryData?.heading ?? 0;
 
@@ -150,7 +151,7 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
       rect.width,
       rect.height,
       attitude,
-      altitude,
+      amslAltitude,
       speed,
       heading,
       telemetryData?.velocity_vector

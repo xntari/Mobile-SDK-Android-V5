@@ -5,12 +5,18 @@ interface OrientationCompassProps {
   telemetry: TelemetryData | null;
   size?: number;
   className?: string;
+  target?: {
+    bearing: number;
+    distance: number;
+    altitudeDelta: number | null;
+  };
 }
 
 export const OrientationCompass: React.FC<OrientationCompassProps> = ({
   telemetry,
   size = 240,
-  className = ''
+  className = '',
+  target,
 }) => {
   const centerX = size / 2;
   const centerY = size / 2;
@@ -167,6 +173,43 @@ export const OrientationCompass: React.FC<OrientationCompassProps> = ({
     );
   }
 
+  const targetElements = React.useMemo(() => {
+    if (!target) return null;
+    const relativeAngle = (target.bearing - compassHeading + 360) % 360;
+    const rad = ((relativeAngle - 90) * Math.PI) / 180;
+    const markerRadius = radius * 0.9;
+    const markerX = centerX + Math.cos(rad) * markerRadius;
+    const markerY = centerY + Math.sin(rad) * markerRadius;
+    const trailRadius = radius * 0.6;
+    const trailX = centerX + Math.cos(rad) * trailRadius;
+    const trailY = centerY + Math.sin(rad) * trailRadius;
+
+    return (
+      <g>
+        <line
+          x1={trailX}
+          y1={trailY}
+          x2={markerX}
+          y2={markerY}
+          stroke="#38bdf8"
+          strokeWidth={2}
+          strokeDasharray="4,2"
+        />
+        <circle cx={markerX} cy={markerY} r={6} fill="#0ea5e9" stroke="#38bdf8" strokeWidth={2} />
+        <text
+          x={markerX}
+          y={markerY - 10}
+          fill="#bae6fd"
+          fontSize="10"
+          fontWeight="bold"
+          textAnchor="middle"
+        >
+          {Math.round(target.distance)}m
+        </text>
+      </g>
+    );
+  }, [target, compassHeading, centerX, centerY, radius]);
+
   return (
     <svg
       width={size}
@@ -209,6 +252,9 @@ export const OrientationCompass: React.FC<OrientationCompassProps> = ({
 
       {/* Velocity vector */}
       {velocityArrow}
+
+      {/* Target indicator */}
+      {targetElements}
 
       {/* Gimbal direction arrow */}
       <g>

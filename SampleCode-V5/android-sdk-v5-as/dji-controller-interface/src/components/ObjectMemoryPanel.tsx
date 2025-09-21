@@ -14,6 +14,7 @@ import {
   type ObjectMemoryCluster,
   type ObjectMemorySample,
 } from '../agent/objectMemoryClient';
+import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
 
 interface ObjectMemoryPanelProps {
   defaultPosition?: { x: number; y: number };
@@ -38,6 +39,7 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
   const [moveNewLabel, setMoveNewLabel] = React.useState<string>('');
   const thumbsRef = React.useRef<Map<string, SampleThumb>>(new Map());
   const [, forceTick] = React.useState<number>(0);
+  const [activeTarget, setActiveTarget] = React.useState<ObjectMemoryTargetSelection | null>(() => objectMemoryTargetStore.getCurrent());
   const [sortMode, setSortMode] = React.useState<'updated'|'alpha'|'samples'|'cohesion'|'neighbor'|'detect'>(()=>{
     try {
       const raw = localStorage.getItem('objectMemory.sortMode');
@@ -55,6 +57,10 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
 
   React.useEffect(()=>{ try { localStorage.setItem('objectMemory.sortMode', sortMode); } catch {} }, [sortMode]);
   React.useEffect(()=>{ try { localStorage.setItem('objectMemory.sortDirection', sortDirection); } catch {} }, [sortDirection]);
+
+  React.useEffect(() => {
+    return objectMemoryTargetStore.subscribe(setActiveTarget);
+  }, []);
 
   const applySort = React.useCallback((items: ObjectMemoryCluster[]): ObjectMemoryCluster[] => {
     const list = [...items];
@@ -172,10 +178,40 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
   const trimmedMoveLabel = moveNewLabel.trim();
   const selectedCount = selectedSamples.length;
   const canMoveSelected = selectedCount > 0 && (moveTargetId || trimmedMoveLabel.length > 0);
+  const activeAnchorSampleId = activeTarget?.anchor.sample_id;
   const summarizeDetectLabels = React.useCallback((stats?: { label: string; count: number }[], limit: number = 3): string => {
     if (!stats || !stats.length) return '';
     return stats.slice(0, limit).map((s) => `${s.label}(${s.count})`).join(', ');
   }, []);
+  const formatCoord = React.useCallback((value?: number, digits: number = 6) => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+    return value.toFixed(digits);
+  }, []);
+  const formatAltitude = React.useCallback((value?: number) => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+    return `${value.toFixed(1)} m`;
+  }, []);
+  const formatDistance = React.useCallback((value?: number) => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+    if (value >= 1000) return `${(value / 1000).toFixed(2)} km`;
+    return `${value.toFixed(1)} m`;
+  }, []);
+  const formatOffset = React.useCallback((value?: number) => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+    return `${value.toFixed(1)} m`;
+  }, []);
+  const formatTimestamp = React.useCallback((value?: number) => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+    const date = new Date(value * 1000);
+    if (Number.isNaN(date.getTime())) return '—';
+    return date.toLocaleString();
+  }, []);
+  const selectedClusterAnchor = clusterDetail?.cluster.object_map_anchor ?? null;
+  const selectedAnchorIsActive = Boolean(
+    selectedClusterAnchor &&
+    activeTarget?.clusterId === clusterDetail?.cluster.cluster_id &&
+    activeAnchorSampleId === selectedClusterAnchor.sample_id
+  );
 
   const handleLabelSave = React.useCallback(async () => {
     if (!selectedId) return;
@@ -374,7 +410,12 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
                 className={`block w-full text-left text-[11px] px-2 py-1 rounded mb-1 ${selectedId === cluster.cluster_id ? 'bg-gray-700' : 'hover:bg-gray-800'}`}
                 onClick={() => void loadCluster(cluster.cluster_id)}
               >
-                <div className="font-semibold text-gray-100">{cluster.label || '(unlabeled)'}</div>
+                <div className="font-semibold text-gray-100 flex items-center gap-1">
+                  <span>{cluster.label || '(unlabeled)'}</span>
+                  {cluster.object_map_anchor ? (
+                    <span className={`${activeTarget?.clusterId === cluster.cluster_id ? 'text-amber-400' : 'text-emerald-400'} text-[11px]`} title="Has laser telemetry anchor">📍</span>
+                  ) : null}
+                </div>
                 <div className="text-gray-500">
                   {cluster.sample_count} samples · {cluster.status}
                   {typeof cluster.mean_similarity === 'number' ? ` · μ ${cluster.mean_similarity.toFixed(3)}` : ''}
@@ -411,6 +452,63 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
                 {clusterDetail.cluster.detect_label_stats?.length ? (
                   <div className="text-[10px] text-gray-400">
                     YOLO labels: {summarizeDetectLabels(clusterDetail.cluster.detect_label_stats, 5)}
+                  </div>
+                ) : null}
+                {selectedClusterAnchor ? (
+                  <div className="bg-gray-900/70 border border-emerald-600/70 rounded p-2 text-[10px] text-gray-200 flex flex-col gap-1">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 text-emerald-300 font-semibold uppercase tracking-wide">
+                        <span>Laser Anchor</span>
+                        {selectedAnchorIsActive && <span className="text-amber-300 text-[9px] font-normal uppercase">active</span>}
+                      </div>
+                      <div className="text-gray-500 font-mono">sample {selectedClusterAnchor.sample_id}</div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-6 gap-y-1">
+                      <div>
+                        <div className="text-gray-500 uppercase tracking-wide">Target</div>
+                        <div>Lat {formatCoord(selectedClusterAnchor.object_position.latitude)}</div>
+                        <div>Lon {formatCoord(selectedClusterAnchor.object_position.longitude)}</div>
+                        <div>Alt {formatAltitude(selectedClusterAnchor.object_position.altitude_m)}</div>
+                        <div>Dist {formatDistance(selectedClusterAnchor.distance_m)}</div>
+                      </div>
+                      <div>
+                        <div className="text-gray-500 uppercase tracking-wide">Aircraft</div>
+                        <div>Lat {formatCoord(selectedClusterAnchor.drone_position.latitude)}</div>
+                        <div>Lon {formatCoord(selectedClusterAnchor.drone_position.longitude)}</div>
+                        <div>Alt {formatAltitude(selectedClusterAnchor.drone_position.altitude_m)}</div>
+                        {selectedClusterAnchor.object_map?.enu_offset ? (
+                          <div className="text-gray-500">
+                            ΔE {formatOffset(selectedClusterAnchor.object_map.enu_offset.east)} · ΔN {formatOffset(selectedClusterAnchor.object_map.enu_offset.north)} · ΔU {formatOffset(selectedClusterAnchor.object_map.enu_offset.up)}
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 mt-1">
+                      <div className="text-gray-500">Captured {formatTimestamp(selectedClusterAnchor.timestamp ?? selectedClusterAnchor.sample_created_ts)}</div>
+                      {selectedClusterAnchor.source_camera && (
+                        <div className="text-gray-500">via {selectedClusterAnchor.source_camera}</div>
+                      )}
+                      <div className="flex-1" />
+                      {!selectedAnchorIsActive ? (
+                        <button
+                          className="px-2 py-1 bg-emerald-700 hover:bg-emerald-600 rounded text-gray-100"
+                          onClick={() => objectMemoryTargetStore.set({
+                            clusterId: clusterDetail.cluster.cluster_id,
+                            clusterLabel: clusterDetail.cluster.label,
+                            anchor: selectedClusterAnchor,
+                          })}
+                        >
+                          Send to nav overlays
+                        </button>
+                      ) : (
+                        <button
+                          className="px-2 py-1 bg-amber-700 hover:bg-amber-600 rounded text-gray-100"
+                          onClick={() => objectMemoryTargetStore.set(null)}
+                        >
+                          Clear target
+                        </button>
+                      )}
+                    </div>
                   </div>
                 ) : null}
                 <div className="flex items-center gap-2">
@@ -476,10 +574,16 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
                   {clusterDetail.samples.map((sample) => {
                     const thumb = thumbsRef.current.get(sample.sample_id)?.dataUrl;
                     const isSelected = selectedSamples.includes(sample.sample_id);
+                    const isAnchorSample = selectedClusterAnchor?.sample_id === sample.sample_id;
+                    const stateClasses = isSelected
+                      ? 'border-indigo-500 ring-2 ring-indigo-500'
+                      : isAnchorSample
+                        ? 'border-emerald-500 ring-1 ring-emerald-400/40'
+                        : 'border-gray-700';
                     return (
                       <div
                         key={sample.sample_id}
-                        className={`border rounded overflow-hidden relative transition-shadow ${isSelected ? 'border-indigo-500 ring-2 ring-indigo-500' : 'border-gray-700'}`}
+                        className={`border rounded overflow-hidden relative transition-shadow ${stateClasses}`}
                       >
                         <div className="absolute top-1 left-1">
                           <input
@@ -508,6 +612,7 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
                           )}
                         </div>
                         <div className="p-1 text-[9px] text-gray-500 break-all flex flex-col gap-0.5">
+                          {isAnchorSample && <span className="text-emerald-400 uppercase text-[8px]">anchor</span>}
                           {sample.detect_label ? (
                             <span className="text-gray-400">det: {sample.detect_label}</span>
                           ) : null}

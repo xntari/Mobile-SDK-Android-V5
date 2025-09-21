@@ -1,5 +1,7 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { HSICompassProps } from '../types';
+import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
+import { computeTargetMetrics } from '../utils/objectMemoryTarget';
 
 export const HSICompass: React.FC<HSICompassProps> = ({
   size = 'normal',
@@ -12,6 +14,17 @@ export const HSICompass: React.FC<HSICompassProps> = ({
 
   // Direct telemetry data state - updated via electronAPI listener like camera components
   const [telemetryData, setTelemetryData] = useState<any>(null);
+  const [objectTarget, setObjectTarget] = useState<ObjectMemoryTargetSelection | null>(() => objectMemoryTargetStore.getCurrent());
+
+  useEffect(() => {
+    const unsubscribe = objectMemoryTargetStore.subscribe(setObjectTarget);
+    return unsubscribe;
+  }, []);
+
+  const targetMetrics = React.useMemo(
+    () => computeTargetMetrics(telemetryData, objectTarget?.anchor, objectTarget?.clusterLabel ?? objectTarget?.clusterId),
+    [telemetryData, objectTarget]
+  );
 
   // Convert distance to visual radius using linear or logarithmic scale
   const distanceToRadius = (distance: number, maxDistance: number, radius: number): number => {
@@ -258,6 +271,7 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     radius: number,
     heading: number,
     homeDirection?: number,
+    targetDirection?: { bearing: number },
     attitude?: { roll: number; pitch: number; yaw: number },
     obstacleData?: any
   ) => {
@@ -358,7 +372,7 @@ export const HSICompass: React.FC<HSICompassProps> = ({
       ctx.translate(centerX, centerY);
       // Rotate by (homeDirection - heading) to account for the rotated compass rose
       ctx.rotate((homeDirection - heading) * Math.PI / 180);
-      
+
       ctx.fillStyle = '#00D084';
       ctx.strokeStyle = '#FFFFFF';
       ctx.lineWidth = 1;
@@ -371,7 +385,25 @@ export const HSICompass: React.FC<HSICompassProps> = ({
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
-      
+
+      ctx.restore();
+    }
+
+    if (targetDirection) {
+      ctx.save();
+      ctx.translate(centerX, centerY);
+      ctx.rotate((targetDirection.bearing - heading) * Math.PI / 180);
+      ctx.fillStyle = '#0ea5e9';
+      ctx.strokeStyle = '#bae6fd';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, -radius - 12);
+      ctx.lineTo(-5, -radius - 2);
+      ctx.lineTo(0, -radius + 6);
+      ctx.lineTo(5, -radius - 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
       ctx.restore();
     }
 
@@ -522,8 +554,8 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     const homeDirection = telemetryData?.home_bearing;
     const attitude = telemetryData?.attitude;
 
-    drawCompassRose(ctx, centerX, centerY, radius, heading, homeDirection, attitude, obstacleData);
-  }, [telemetryData, useRawPerceptionData, scaleRange, useLogarithmicScale, size]);
+    drawCompassRose(ctx, centerX, centerY, radius, heading, homeDirection, targetMetrics ? { bearing: targetMetrics.bearing } : undefined, attitude, obstacleData);
+  }, [telemetryData, useRawPerceptionData, scaleRange, useLogarithmicScale, size, targetMetrics]);
 
   // Size configurations - increased height to fit heading above and distance below
   const sizeConfig = size === 'small' 
@@ -631,7 +663,7 @@ export const HSICompass: React.FC<HSICompassProps> = ({
           </div>
         </div>
       )}
-      
+
       <div className="flex justify-center">
         <canvas 
           ref={canvasRef}
@@ -644,10 +676,17 @@ export const HSICompass: React.FC<HSICompassProps> = ({
           }}
         />
       </div>
+
+      {size === 'small' && targetMetrics && (
+        <div className="mt-2 text-[10px] text-center text-purple-200">
+          {(objectTarget?.clusterLabel ?? objectTarget?.clusterId) ?? 'Target'}: {targetMetrics.slantDistance.toFixed(1)} m
+        </div>
+      )}
       
       {/* Digital readouts - only show for normal size */}
       {size === 'normal' && (
-        <div className="mt-3 flex justify-between text-xs">
+        <>
+          <div className="mt-3 flex justify-between text-xs">
           <div className="text-center">
             <div className="text-gray-400">HDG</div>
             <div className="font-mono text-dji-blue">
@@ -681,7 +720,23 @@ export const HSICompass: React.FC<HSICompassProps> = ({
               </div>
             </div>
           )}
+
+          {targetMetrics && (
+            <div className="text-center">
+              <div className="text-gray-400">OBJ</div>
+              <div className="font-mono text-purple-300">
+                {targetMetrics.bearing.toFixed(0)}°
+              </div>
+            </div>
+          )}
         </div>
+          {targetMetrics && (
+            <div className="mt-2 text-xs text-center text-purple-200">
+              {(objectTarget?.clusterLabel ?? objectTarget?.clusterId) ?? 'Target'}: {targetMetrics.slantDistance.toFixed(1)} m
+              {targetMetrics.altitudeDelta != null ? ` · Δalt ${targetMetrics.altitudeDelta.toFixed(1)} m` : ''}
+            </div>
+          )}
+        </>
       )}
     </div>
   );

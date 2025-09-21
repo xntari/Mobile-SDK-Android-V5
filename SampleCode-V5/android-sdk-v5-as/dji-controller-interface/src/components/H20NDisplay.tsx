@@ -3,6 +3,11 @@ import { H20NDisplayProps, TelemetryData } from '../types';
 import { GimbalModeToggle, GimbalMode } from './GimbalModeToggle';
 import type { Detection, Mask } from '../agent/visionClient';
 import { CameraDisplay } from './CameraDisplay';
+import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
+import { computeTargetMetrics } from '../utils/objectMemoryTarget';
+import { projectGeographicPointToScreen } from '../utils/rayProjection';
+import { registerLiveViewLocationListener, requestLiveViewLocation, type LiveViewPinPoint } from '../agent/cameraProjectionClient';
+import { normalizeAngleDeg, shortestAngleDiffDeg } from '../utils/angleUtils';
 
 export interface H20NDisplayRef {
   getSnapshot: () => Promise<string>;
@@ -46,6 +51,8 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
   const spsRef = useRef<Uint8Array | null>(null);
   const ppsRef = useRef<Uint8Array | null>(null);
   const decoderConfiguredRef = useRef<boolean>(false);
+  const [objectTarget, setObjectTarget] = useState<ObjectMemoryTargetSelection | null>(() => objectMemoryTargetStore.getCurrent());
+  const [liveViewPoint, setLiveViewPoint] = useState<LiveViewPinPoint | null>(null);
   const [clickIndicators, setClickIndicators] = useState<ClickIndicator[]>([]);
   const [lastGimbalCommand, setLastGimbalCommand] = useState<{
     coordinates: { x: number; y: number };
@@ -77,6 +84,11 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
   const [preciseStrength, setPreciseStrength] = useState<number>(1.0);
   const [zoomValue, setZoomValue] = useState<number>(() => telemetryData?.camera_optics?.zoom_ratio ?? 1);
   const zoomDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const unsubscribe = objectMemoryTargetStore.subscribe(setObjectTarget);
+    return unsubscribe;
+  }, []);
 
   // Clear vision boxes when camera moves (any gimbal command updates) - handled by parent App component now
 
@@ -422,6 +434,149 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
     
     setDisplayRect({ left, top, width: displayWidth, height: displayHeight });
   };
+
+  const targetMetrics = React.useMemo(
+    () => computeTargetMetrics(telemetryData, objectTarget?.anchor, objectTarget?.clusterLabel ?? objectTarget?.clusterId),
+    [telemetryData, objectTarget]
+  );
+
+  const targetProjection = React.useMemo(() => {
+    if (!telemetryData || !objectTarget?.anchor) return null;
+    const anchor = objectTarget.anchor;
+    const { object_position: objectPos, object_map: extras } = anchor;
+    if (typeof objectPos?.latitude !== 'number' || typeof objectPos?.longitude !== 'number') return null;
+    const altitude = objectPos.altitude_m
+      ?? extras?.laser_location?.altitude_m
+      ?? extras?.target_point?.altitude_m
+      ?? telemetryData.location?.altitude
+      ?? telemetryData.altitude
+      ?? 0;
+    return projectGeographicPointToScreen(telemetryData, {
+      latitude: objectPos.latitude,
+      longitude: objectPos.longitude,
+      altitude,
+    }, {
+      imageWidth: videoDimensions.width,
+      imageHeight: videoDimensions.height,
+      cameraType: 'main',
+      cameraModel: 'H20N',
+      baseFocalLength: 25,
+      zoomRatioOverride: telemetryData.camera_optics?.zoom_ratio ?? undefined,
+    });
+  }, [telemetryData, objectTarget, videoDimensions]);
+
+  const fallbackProjection = React.useMemo(() => {
+    if (!telemetryData || !targetMetrics) return null;
+    const fovH = telemetryData.camera_optics?.display_fov?.horizontal ?? 78;
+    const fovV = telemetryData.camera_optics?.display_fov?.vertical ?? 52;
+    if (!Number.isFinite(fovH) || !Number.isFinite(fovV) || fovH <= 0 || fovV <= 0) return null;
+
+    const heading = telemetryData.heading ?? telemetryData.compass_heading ?? 0;
+    let gimbalYaw = 0;
+    let gimbalPitch = 0;
+    const gimbal = telemetryData.gimbals?.find((g) => g.index === 'LEFT_OR_MAIN');
+    if (gimbal) {
+      if (typeof gimbal.yaw_relative === 'number') gimbalYaw = gimbal.yaw_relative;
+      if (typeof gimbal.attitude?.pitch === 'number') gimbalPitch = gimbal.attitude.pitch;
+    }
+
+    const cameraHeading = normalizeAngleDeg(heading + gimbalYaw);
+    const horizontalOffset = shortestAngleDiffDeg(targetMetrics.bearing, cameraHeading);
+
+    const enu = targetMetrics.enu;
+    const horizontalDistance = Math.max(0.01, Math.sqrt(enu.east ** 2 + enu.north ** 2));
+    const targetPitch = (Math.atan2(enu.up, horizontalDistance) * 180) / Math.PI;
+    const verticalOffset = targetPitch - gimbalPitch;
+
+    const normX = 0.5 + (horizontalOffset / fovH);
+    const normY = 0.5 - (verticalOffset / fovV);
+    return {
+      normX,
+      normY,
+      displayX: normX * displayRect.width,
+      displayY: normY * displayRect.height,
+      inFrame: normX >= 0 && normX <= 1 && normY >= 0 && normY <= 1,
+    };
+  }, [telemetryData, targetMetrics, displayRect.width, displayRect.height]);
+
+  useEffect(() => {
+    if (!objectTarget?.anchor?.object_position) {
+      setLiveViewPoint(null);
+      return;
+    }
+    const { latitude, longitude, altitude_m } = objectTarget.anchor.object_position;
+    if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+      setLiveViewPoint(null);
+      return;
+    }
+    const altitude = typeof altitude_m === 'number' ? altitude_m : 0;
+    const requestId = `h20n-${objectTarget.clusterId ?? ''}`;
+    const component = 'LEFT_OR_MAIN';
+
+    const unsubscribe = registerLiveViewLocationListener((message) => {
+      if (message.component?.toUpperCase() !== component) return;
+      if (message.request_id && message.request_id !== requestId) return;
+      const pin = Array.isArray(message.pin_points) && message.pin_points.length > 0 ? message.pin_points[0] : null;
+      if (message.valid && pin && typeof pin.x === 'number' && typeof pin.y === 'number') {
+        setLiveViewPoint(pin);
+      } else {
+        setLiveViewPoint(null);
+      }
+    });
+
+    requestLiveViewLocation({
+      latitude,
+      longitude,
+      altitude,
+      component,
+      requestId,
+      source: 'h20n_overlay',
+    })?.catch(() => {
+      // Ignore errors; fallback to local projection
+    });
+
+    return unsubscribe;
+  }, [objectTarget, targetMetrics?.bearing, targetMetrics?.slantDistance, targetMetrics?.altitudeDelta]);
+
+  const targetOverlay = React.useMemo(() => {
+    if (!objectTarget || !targetMetrics || !targetProjection) return null;
+    if (displayRect.width <= 0 || displayRect.height <= 0) return null;
+    const px = targetProjection.screen.x * displayRect.width;
+    const py = targetProjection.screen.y * displayRect.height;
+    const clampedX = Math.max(0, Math.min(displayRect.width, px));
+    const clampedY = Math.max(0, Math.min(displayRect.height, py));
+    const angleRad = Math.atan2(targetProjection.normalized.y, targetProjection.normalized.x);
+    const sdkPoint = liveViewPoint;
+    const sdkNormX = sdkPoint?.x ?? null;
+    const sdkNormY = sdkPoint?.y ?? null;
+    const sdkDisplayX = sdkNormX != null ? sdkNormX * displayRect.width : null;
+    const sdkDisplayY = sdkNormY != null ? sdkNormY * displayRect.height : null;
+    const fallback = fallbackProjection;
+    const finalNormX = sdkNormX ?? fallback?.normX ?? targetProjection.screen.x;
+    const finalNormY = sdkNormY ?? fallback?.normY ?? targetProjection.screen.y;
+    const finalDisplayX = sdkDisplayX ?? fallback?.displayX ?? (targetProjection.inFrame ? px : clampedX);
+    const finalDisplayY = sdkDisplayY ?? fallback?.displayY ?? (targetProjection.inFrame ? py : clampedY);
+    return {
+      label: objectTarget.clusterLabel ?? objectTarget.clusterId,
+      inFrame: sdkNormX != null && sdkNormY != null
+        ? (sdkNormX >= 0 && sdkNormX <= 1 && sdkNormY >= 0 && sdkNormY <= 1)
+        : fallback?.inFrame ?? targetProjection.inFrame,
+      x: px,
+      y: py,
+      displayX: finalDisplayX,
+      displayY: finalDisplayY,
+      angleDeg: angleRad * 180 / Math.PI,
+      distance: targetMetrics.slantDistance,
+      altitudeDelta: targetMetrics.altitudeDelta,
+      normX: finalNormX,
+      normY: finalNormY,
+      px,
+      py,
+      sdkNormX,
+      sdkNormY,
+      sdkValid: !!sdkPoint,
+    };
+  }, [objectTarget, targetMetrics, targetProjection, displayRect, liveViewPoint, fallbackProjection]);
 
   // Update display rect when container size or video dimensions change
   // Handle gimbal response messages from bridge
@@ -1118,6 +1273,50 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
           height: `${displayRect.height}px`
         }}
       >
+        {targetOverlay && (
+          <div className="absolute inset-0 pointer-events-none z-30">
+            <div
+              className="absolute"
+              style={{
+                left: `${targetOverlay.displayX}px`,
+                top: `${targetOverlay.displayY}px`
+              }}
+            >
+              {targetOverlay.inFrame ? (
+                <div
+                  className="w-4 h-4 rounded-full border border-sky-300 bg-sky-500/40 shadow-[0_0_6px_rgba(125,211,252,0.6)]"
+                  style={{ transform: 'translate(-50%, -50%)' }}
+                />
+              ) : (
+                <div
+                  className="w-0 h-0 border-l-[7px] border-r-[7px] border-b-[12px] border-l-transparent border-r-transparent border-b-sky-400 drop-shadow-[0_0_4px_rgba(125,211,252,0.7)]"
+                  style={{ transform: `translate(-50%, -50%) rotate(${(targetOverlay.angleDeg ?? 0) + 90}deg)` }}
+                />
+              )}
+            </div>
+            <div className="absolute top-2 left-2">
+              <div className="inline-flex items-center gap-2 rounded bg-black/70 px-2 py-1 text-[10px] text-sky-200">
+                <span className="font-semibold text-sky-100">{targetOverlay.label}</span>
+                <span>{Number.isFinite(targetOverlay.distance) ? `${targetOverlay.distance.toFixed(1)} m` : '—'}</span>
+                {targetOverlay.altitudeDelta != null && Number.isFinite(targetOverlay.altitudeDelta) && (
+                  <span>Δalt {targetOverlay.altitudeDelta.toFixed(1)} m</span>
+                )}
+                {Number.isFinite(targetOverlay.normX) && Number.isFinite(targetOverlay.normY) && (
+                  <span>screen ({targetOverlay.normX.toFixed(3)}, {targetOverlay.normY.toFixed(3)})</span>
+                )}
+                {Number.isFinite(targetOverlay.px) && Number.isFinite(targetOverlay.py) && (
+                  <span>{Math.round(targetOverlay.px)}px × {Math.round(targetOverlay.py)}px</span>
+                )}
+                {Number.isFinite(targetOverlay.sdkNormX ?? NaN) && Number.isFinite(targetOverlay.sdkNormY ?? NaN) && (
+                  <span>sdk ({targetOverlay.sdkNormX!.toFixed(3)}, {targetOverlay.sdkNormY!.toFixed(3)})</span>
+                )}
+                {targetOverlay.sdkValid === false && (
+                  <span className="text-red-300">sdk invalid</span>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
           {/* Click indicators for gimbal tap targets */}
           {clickIndicators.map((indicator) => (
             <div

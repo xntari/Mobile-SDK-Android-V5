@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import base64
 import io
+import math
 import os
 import pickle
 import shutil
@@ -611,6 +612,191 @@ def cluster_detect_label_stats(cluster: ClusterEntry) -> List[Dict[str, Any]]:
     ]
 
 
+def _sanitize_number(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if math.isfinite(value) else None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
+
+
+def _extract_position(payload: Any) -> Optional[Dict[str, float]]:
+    if not isinstance(payload, dict):
+        return None
+    latitude = _sanitize_number(payload.get('latitude') or payload.get('lat') or payload.get('latitude_deg'))
+    longitude = _sanitize_number(payload.get('longitude') or payload.get('lon') or payload.get('longitude_deg'))
+    if latitude is None or longitude is None:
+        return None
+    altitude = None
+    for key in ('altitude_m', 'altitude', 'alt', 'height'):
+        altitude = _sanitize_number(payload.get(key))
+        if altitude is not None:
+            break
+    result: Dict[str, float] = {
+        'latitude': latitude,
+        'longitude': longitude,
+    }
+    if altitude is not None:
+        result['altitude_m'] = altitude
+    return result
+
+
+def _sanitize_orientation(payload: Any) -> Optional[Dict[str, float]]:
+    if not isinstance(payload, dict):
+        return None
+    result: Dict[str, float] = {}
+    for key in ('roll', 'pitch', 'yaw'):
+        val = _sanitize_number(payload.get(key))
+        if val is not None:
+            result[key] = val
+    return result or None
+
+
+def _sanitize_enu(payload: Any) -> Optional[Dict[str, float]]:
+    if not isinstance(payload, dict):
+        return None
+    result: Dict[str, float] = {}
+    for key in ('east', 'north', 'up'):
+        val = _sanitize_number(payload.get(key))
+        if val is not None:
+            result[key] = val
+    return result or None
+
+
+def _sanitize_screen_point(payload: Any) -> Optional[Dict[str, float]]:
+    if not isinstance(payload, dict):
+        return None
+    result: Dict[str, float] = {}
+    for key in ('x', 'y'):
+        val = _sanitize_number(payload.get(key))
+        if val is not None:
+            result[key] = val
+    return result or None
+
+
+def _sanitize_object_map_extra(payload: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    result: Dict[str, Any] = {}
+    enu = _sanitize_enu(payload.get('enu_offset'))
+    if enu:
+        result['enu_offset'] = enu
+    screen = _sanitize_screen_point(payload.get('screen_point'))
+    if screen:
+        result['screen_point'] = screen
+    laser = _extract_position(payload.get('laser_location'))
+    if laser:
+        result['laser_location'] = laser
+    target = _extract_position(payload.get('target_point'))
+    if target:
+        result['target_point'] = target
+    aircraft = payload.get('aircraft') if isinstance(payload.get('aircraft'), dict) else None
+    if isinstance(aircraft, dict):
+        aircraft_entry: Dict[str, Any] = {}
+        loc = _extract_position(aircraft.get('location'))
+        if loc:
+            aircraft_entry['location'] = loc
+        att = _sanitize_orientation(aircraft.get('attitude'))
+        if att:
+            aircraft_entry['attitude'] = att
+        gim = _sanitize_orientation(aircraft.get('gimbal'))
+        if gim:
+            aircraft_entry['gimbal'] = gim
+        if aircraft_entry:
+            result['aircraft'] = aircraft_entry
+    for key in ('prompts', 'ov_labels_used'):
+        values = payload.get(key)
+        if isinstance(values, list):
+            filtered = [str(item) for item in values if isinstance(item, str) and item]
+            if filtered:
+                result[key] = filtered
+    for key in ('detection_score', 'memory_similarity'):
+        val = _sanitize_number(payload.get(key))
+        if val is not None:
+            result[key] = val
+    for key in ('memory_label', 'track_id'):
+        val = payload.get(key)
+        if isinstance(val, str) and val:
+            result[key] = val
+    return result or None
+
+
+def sample_object_map_anchor(sample: Optional[SampleEntry]) -> Optional[Dict[str, Any]]:
+    if not sample:
+        return None
+    telemetry = sample.telemetry if isinstance(sample.telemetry, dict) else {}
+    object_pos = telemetry.get('object_position') if isinstance(telemetry, dict) else None
+    drone_pos = telemetry.get('drone_position') if isinstance(telemetry, dict) else None
+    extra = telemetry.get('extra') if isinstance(telemetry, dict) else None
+    object_map_extra = extra.get('object_map') if isinstance(extra, dict) else None
+    aircraft_data = object_map_extra.get('aircraft') if isinstance(object_map_extra, dict) else None
+
+    object_position = _extract_position(object_pos)
+    if object_position is None and isinstance(object_map_extra, dict):
+        object_position = _extract_position(object_map_extra.get('laser_location')) or _extract_position(object_map_extra.get('target_point'))
+
+    drone_position = _extract_position(drone_pos)
+    if drone_position is None and isinstance(aircraft_data, dict):
+        drone_position = _extract_position(aircraft_data.get('location'))
+
+    if object_position is None or drone_position is None:
+        return None
+
+    anchor: Dict[str, Any] = {
+        'sample_id': sample.sample_id,
+        'sample_created_ts': sample.created_ts,
+        'object_position': object_position,
+        'drone_position': drone_position,
+    }
+
+    timestamp = _sanitize_number(telemetry.get('timestamp')) if isinstance(telemetry, dict) else None
+    if timestamp is not None:
+        anchor['timestamp'] = timestamp
+
+    distance = None
+    if isinstance(object_pos, dict):
+        distance = _sanitize_number(object_pos.get('distance_m'))
+    if distance is None and isinstance(object_map_extra, dict):
+        distance = _sanitize_number(object_map_extra.get('distance_m'))
+    if distance is not None:
+        anchor['distance_m'] = distance
+
+    drone_orientation = _sanitize_orientation(telemetry.get('drone_orientation')) if isinstance(telemetry, dict) else None
+    if not drone_orientation and isinstance(aircraft_data, dict):
+        drone_orientation = _sanitize_orientation(aircraft_data.get('attitude'))
+    if drone_orientation:
+        anchor['drone_orientation'] = drone_orientation
+
+    gimbal_orientation = _sanitize_orientation(telemetry.get('gimbal_orientation')) if isinstance(telemetry, dict) else None
+    if not gimbal_orientation and isinstance(aircraft_data, dict):
+        gimbal_orientation = _sanitize_orientation(aircraft_data.get('gimbal'))
+    if gimbal_orientation:
+        anchor['gimbal_orientation'] = gimbal_orientation
+
+    source_camera = telemetry.get('source_camera') if isinstance(telemetry, dict) else None
+    if isinstance(source_camera, str) and source_camera:
+        anchor['source_camera'] = source_camera
+
+    object_map = _sanitize_object_map_extra(object_map_extra)
+    if object_map:
+        anchor['object_map'] = object_map
+
+    return anchor
+
+
+def cluster_object_map_anchor(cluster: ClusterEntry) -> Optional[Dict[str, Any]]:
+    for sample_id in reversed(cluster.sample_ids):
+        sample = SAMPLES.get(sample_id)
+        anchor = sample_object_map_anchor(sample)
+        if anchor:
+            return anchor
+    return None
+
+
 def cluster_public_dict(cluster: ClusterEntry) -> Dict[str, Any]:
     data = cluster.to_dict()
     data['detect_label_stats'] = cluster_detect_label_stats(cluster)
@@ -625,6 +811,9 @@ def cluster_public_dict(cluster: ClusterEntry) -> Dict[str, Any]:
                 'detect_label_raw': sample.detect_label_raw,
                 'telemetry': sample.telemetry,
             }
+    anchor = cluster_object_map_anchor(cluster)
+    if anchor:
+        data['object_map_anchor'] = anchor
     return data
 
 
