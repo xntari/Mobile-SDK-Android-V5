@@ -70,7 +70,7 @@ STATE_DIR = os.path.join("data", "object_memory")
 STATE_PATH = os.path.join(STATE_DIR, "state.pkl")
 SAMPLES_DIR = os.path.join(STATE_DIR, "samples")
 
-ATTACH_THRESHOLD = float(os.environ.get("OBJECT_MEMORY_ATTACH_THRESHOLD", "0.82"))
+ATTACH_THRESHOLD = float(os.environ.get("OBJECT_MEMORY_ATTACH_THRESHOLD", "0.70"))
 CREATE_THRESHOLD = float(os.environ.get("OBJECT_MEMORY_CREATE_THRESHOLD", "0.70"))
 SAVE_INTERVAL = float(os.environ.get("OBJECT_MEMORY_SAVE_INTERVAL", "5"))
 DEFAULT_MAX_SAMPLES = int(os.environ.get("OBJECT_MEMORY_MAX_SAMPLES", "50"))
@@ -653,6 +653,7 @@ def search(req: SearchRequest):
     if best_id is None:
         return {'match': None}
     cluster = CLUSTERS[best_id]
+    print(f"{cluster.to_dict()=}, {best_sim=}")
     return {
         'match': {
             'cluster': cluster.to_dict(),

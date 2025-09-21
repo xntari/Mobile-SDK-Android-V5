@@ -83,7 +83,7 @@ _DEFAULT_THRESH: float = float(os.environ.get("Y_THRESH", "0.25"))
 _DEVICE: str = os.environ.get("Y_DEVICE", "auto")  # 'auto' | 'cpu' | 'mps' | 'cuda'
 _USE_HALF: bool = False  # Use FP16 half precision
 _OBJECT_MEMORY_URL: Optional[str] = os.environ.get("OBJECT_MEMORY_URL", "http://127.0.0.1:9012")
-_OBJECT_MEMORY_LABEL_THRESHOLD: float = float(os.environ.get("OBJECT_MEMORY_LABEL_THRESHOLD", "0.82"))
+_OBJECT_MEMORY_LABEL_THRESHOLD: float = float(os.environ.get("OBJECT_MEMORY_LABEL_THRESHOLD", "0.7"))
 _OBJECT_MEMORY_TRACK_TTL: float = float(os.environ.get("OBJECT_MEMORY_TRACK_TTL", "120"))
 
 _CLI_OV_MODEL_SPEC: Optional[str] = None

@@ -101,6 +101,63 @@ class BridgeManager {
         //   sectors_count: message.obstacle_avoidance?.sectors?.length || 0
         // });
         
+        const sanitizeGimbals = (): TelemetryData['gimbals'] => {
+          if (!Array.isArray(message.gimbals)) return undefined;
+          return message.gimbals.map((entry: any) => {
+            const attitude = entry?.attitude;
+            const limits = entry?.limits;
+            return {
+              index: String(entry?.index ?? ''),
+              connected: Boolean(entry?.connected),
+              attitude: attitude ? {
+                pitch: Number(attitude.pitch ?? 0),
+                roll: Number(attitude.roll ?? 0),
+                yaw: Number(attitude.yaw ?? 0),
+              } : undefined,
+              yaw_relative: typeof entry?.yaw_relative === 'number' ? entry.yaw_relative : undefined,
+              limits: limits ? {
+                pitch: limits.pitch ? {
+                  min: typeof limits.pitch.min === 'number' ? limits.pitch.min : undefined,
+                  max: typeof limits.pitch.max === 'number' ? limits.pitch.max : undefined,
+                } : undefined,
+                yaw: limits.yaw ? {
+                  min: typeof limits.yaw.min === 'number' ? limits.yaw.min : undefined,
+                  max: typeof limits.yaw.max === 'number' ? limits.yaw.max : undefined,
+                } : undefined,
+                roll: limits.roll ? {
+                  min: typeof limits.roll.min === 'number' ? limits.roll.min : undefined,
+                  max: typeof limits.roll.max === 'number' ? limits.roll.max : undefined,
+                } : undefined,
+              } : undefined,
+            };
+          });
+        };
+
+        const sanitizeCameraOptics = (): TelemetryData['camera_optics'] => {
+          const optics = message.camera_optics;
+          if (!optics || typeof optics !== 'object') return undefined;
+          return {
+            index: String(optics.index ?? ''),
+            lens: typeof optics.lens === 'string' ? optics.lens : undefined,
+            lens_type: typeof optics.lens_type === 'string' ? optics.lens_type : undefined,
+            zoom_ratio: typeof optics.zoom_ratio === 'number' ? optics.zoom_ratio : undefined,
+            zoom_range: optics.zoom_range && typeof optics.zoom_range === 'object'
+              ? {
+                  min: typeof optics.zoom_range.min === 'number' ? optics.zoom_range.min : undefined,
+                  max: typeof optics.zoom_range.max === 'number' ? optics.zoom_range.max : undefined,
+                }
+              : undefined,
+            focal_length: typeof optics.focal_length === 'number' ? optics.focal_length : undefined,
+            display_fov: optics.display_fov && typeof optics.display_fov === 'object'
+              ? {
+                  horizontal: typeof optics.display_fov.horizontal === 'number' ? optics.display_fov.horizontal : undefined,
+                  vertical: typeof optics.display_fov.vertical === 'number' ? optics.display_fov.vertical : undefined,
+                }
+              : undefined,
+            laser_measurement: typeof optics.laser_measurement === 'string' ? optics.laser_measurement : undefined,
+          };
+        };
+
         const mappedTelemetry = {
           ...message,
           speed: message.ground_speed || message.speed || 0,
@@ -108,6 +165,8 @@ class BridgeManager {
           attitude: message.attitude || { pitch: 0, roll: 0, yaw: 0 },
           compass_heading: trueCompassHeading,
           home_bearing: bearingToHome,
+          gimbals: sanitizeGimbals(),
+          camera_optics: sanitizeCameraOptics(),
         } as TelemetryData;
         
         this.bridgeData = {

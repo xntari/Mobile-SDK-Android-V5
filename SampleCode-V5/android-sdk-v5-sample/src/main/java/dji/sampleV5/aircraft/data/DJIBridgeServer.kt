@@ -9,11 +9,14 @@ import dji.sdk.keyvalue.key.KeyTools
 import dji.v5.manager.KeyManager
 import dji.v5.manager.datacenter.MediaDataCenter
 import dji.v5.manager.interfaces.ICameraStreamManager
+import dji.sdk.keyvalue.key.CameraKey
+import dji.sdk.keyvalue.key.GimbalKey
 import dji.sdk.keyvalue.value.common.LocationCoordinate2D
 import dji.sdk.keyvalue.value.common.LocationCoordinate3D
 import dji.sdk.keyvalue.value.common.Velocity3D
 import dji.sdk.keyvalue.value.common.ComponentIndexType
 import dji.sdk.keyvalue.value.common.Attitude
+import dji.sdk.keyvalue.value.gimbal.GimbalAttitudeRange
 import dji.v5.manager.aircraft.perception.PerceptionManager
 import dji.v5.manager.aircraft.perception.data.ObstacleData
 import dji.v5.manager.aircraft.perception.data.PerceptionInfo
@@ -36,16 +39,13 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import kotlin.collections.ArrayList
-import dji.sdk.keyvalue.key.CameraKey
-import dji.sdk.keyvalue.key.GimbalKey
 import dji.sdk.keyvalue.value.camera.TapZoomMode
 import dji.sdk.keyvalue.value.camera.ZoomTargetPointInfo
-import dji.sdk.keyvalue.value.common.CameraLensType
 import dji.sdk.keyvalue.value.camera.CameraVideoStreamSourceType
+import dji.sdk.keyvalue.value.camera.ZoomRatiosRange
+import dji.sdk.keyvalue.value.common.CameraLensType
 import dji.sdk.keyvalue.value.gimbal.GimbalSpeedRotation
 import dji.sdk.keyvalue.value.gimbal.CtrlInfo
-import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotation
-import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotationMode
 import dji.v5.et.createCamera
 import dji.v5.et.create
 import dji.v5.et.action
@@ -66,6 +66,126 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         private const val TAG = "DJIBridgeServer"
         private const val WEBSOCKET_MAGIC_STRING = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
         private const val PROTOCOL_VERSION = "1.0"
+    }
+
+    private fun collectGimbalSnapshot(index: ComponentIndexType, keyManager: KeyManager): Map<String, Any?>? {
+        return try {
+            val attitude = keyManager.getValue(KeyTools.createKey(GimbalKey.KeyGimbalAttitude, index)) as? Attitude
+            val limits = keyManager.getValue(KeyTools.createKey(GimbalKey.KeyGimbalAttitudeRange, index)) as? GimbalAttitudeRange
+            val yawRelative = keyManager.getValue(KeyTools.createKey(GimbalKey.KeyYawRelativeToAircraftHeading, index)) as? Double
+            val connected = keyManager.getValue(KeyTools.createKey(GimbalKey.KeyConnection, index)) as? Boolean ?: false
+            if (attitude == null && !connected) {
+                return null
+            }
+            mapOf(
+                "index" to index.name,
+                "connected" to connected,
+                "attitude" to attitude?.let {
+                    mapOf(
+                        "pitch" to it.pitch.toDouble(),
+                        "roll" to it.roll.toDouble(),
+                        "yaw" to it.yaw.toDouble()
+                    )
+                },
+                "yaw_relative" to yawRelative,
+                "limits" to limits?.let {
+                    mapOf(
+                        "pitch" to mapOf("min" to it.pitch?.min, "max" to it.pitch?.max),
+                        "yaw" to mapOf("min" to it.yaw?.min, "max" to it.yaw?.max),
+                        "roll" to mapOf("min" to it.roll?.min, "max" to it.roll?.max)
+                    )
+                }
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "collectGimbalSnapshot error for $index: ${e.message}")
+            null
+        }
+    }
+
+    private fun collectCameraOpticsSnapshot(index: ComponentIndexType, keyManager: KeyManager): Map<String, Any?> {
+        return try {
+            val lens = keyManager.getValue(CameraKey.KeyCameraVideoStreamSource.create(index)) as? CameraVideoStreamSourceType
+            val activeLens = getActiveCameraLens(index)
+            val zoomLens = CameraLensType.CAMERA_LENS_ZOOM
+            val zoomKey = KeyTools.createCameraKey<Double>(CameraKey.KeyCameraZoomRatios, index, zoomLens)
+            val zoomRatio = keyManager.getValue(zoomKey) as? Double
+            val laserInfo = try {
+                val laserKey = KeyTools.createCameraKey(CameraKey.KeyLaserMeasureInformation, index, CameraLensType.CAMERA_LENS_ZOOM)
+                keyManager.getValue(laserKey)
+            } catch (_: Exception) {
+                null
+            }
+            val result = mutableMapOf<String, Any?>(
+                "index" to index.name,
+                "lens" to lens?.name,
+                "lens_type" to activeLens.name
+            )
+            if (zoomRatio != null) {
+                result["zoom_ratio"] = zoomRatio
+            }
+            val zoomRangeKey = try {
+                KeyTools.createCameraKey<ZoomRatiosRange>(CameraKey.KeyCameraZoomRatiosRange, index, zoomLens)
+            } catch (_: Exception) {
+                null
+            }
+            if (zoomRangeKey != null) {
+                val rangeValue = try {
+                    keyManager.getValue(zoomRangeKey)
+                } catch (_: Exception) {
+                    null
+                }
+                val rangeMap = when (rangeValue) {
+                    is ZoomRatiosRange -> {
+                        fun extract(methodNames: List<String>): Double? {
+                            for (name in methodNames) {
+                                try {
+                                    val method = rangeValue.javaClass.getMethod(name)
+                                    val value = method.invoke(rangeValue) as? Number
+                                    if (value != null) {
+                                        return value.toDouble()
+                                    }
+                                } catch (_: Exception) {
+                                    // Ignore missing methods
+                                }
+                            }
+                            return null
+                        }
+                        val min = extract(listOf("getMinZoomRatio", "getMin", "getMinimum"))
+                        val max = extract(listOf("getMaxZoomRatio", "getMax", "getMaximum"))
+                        if (min != null && max != null) mapOf("min" to min, "max" to max) else null
+                    }
+                    is Pair<*, *> -> {
+                        val min = (rangeValue.first as? Number)?.toDouble()
+                        val max = (rangeValue.second as? Number)?.toDouble()
+                        if (min != null && max != null) mapOf("min" to min, "max" to max) else null
+                    }
+                    is List<*> -> {
+                        if (rangeValue.size >= 2) {
+                            val min = (rangeValue[0] as? Number)?.toDouble()
+                            val max = (rangeValue[1] as? Number)?.toDouble()
+                            if (min != null && max != null) {
+                                mapOf("min" to min, "max" to max)
+                            } else {
+                                null
+                            }
+                        } else {
+                            null
+                        }
+                    }
+                    else -> null
+                }
+                if (rangeMap != null) {
+                    result["zoom_range"] = rangeMap
+                }
+            }
+            if (laserInfo != null) {
+                result["laser_measurement"] = laserInfo.toString()
+            }
+            result
+        } catch (e: Exception) {
+            Log.w(TAG, "collectCameraOpticsSnapshot error for $index: ${e.message}")
+            emptyMap()
+        }
     }
     
     // Message Types - Extensible for all future data types
@@ -94,11 +214,13 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         CAMERA_LASER_GET("camera_laser_get"),
         CAMERA_LASER_MEASURE("camera_laser_measure"),
         CAMERA_LASER_RESULT("camera_laser_result"),
+        CAMERA_ZOOM("camera_zoom"),
         GIMBAL_TAP_TARGET("gimbal_tap_target"),
         GIMBAL_RESPONSE("gimbal_response"),
         GIMBAL_FREE_LOOK_START("gimbal_free_look_start"),
         GIMBAL_FREE_LOOK_UPDATE("gimbal_free_look_update"),
         GIMBAL_FREE_LOOK_STOP("gimbal_free_look_stop"),
+        GIMBAL_RESET("gimbal_reset"),
         FLIGHT_COMMAND("flight_command"),
         SYSTEM_COMMAND("system_command");
         
@@ -566,10 +688,12 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 MessageType.CAMERA_LASER_ENABLE -> handleCameraLaserEnable(clientId, json)
                 MessageType.CAMERA_LASER_GET -> handleCameraLaserGet(clientId, json)
                 MessageType.CAMERA_LASER_MEASURE -> handleCameraLaserMeasure(clientId, json)
+                MessageType.CAMERA_ZOOM -> handleCameraZoom(clientId, json)
                 MessageType.GIMBAL_TAP_TARGET -> handleGimbalTapTarget(clientId, json)
                 MessageType.GIMBAL_FREE_LOOK_START -> handleGimbalFreeLookStart(clientId, json)
                 MessageType.GIMBAL_FREE_LOOK_UPDATE -> handleGimbalFreeLookUpdate(clientId, json)
                 MessageType.GIMBAL_FREE_LOOK_STOP -> handleGimbalFreeLookStop(clientId, json)
+                MessageType.GIMBAL_RESET -> handleGimbalReset(clientId, json)
                 MessageType.FLIGHT_COMMAND -> handleFlightCommand(clientId, json)
                 MessageType.SYSTEM_COMMAND -> handleSystemCommand(clientId, json)
                 MessageType.HEARTBEAT -> handleHeartbeat(clientId, socket)
@@ -604,7 +728,61 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         Log.i(TAG, "Camera command from $clientId: $command") 
         // TODO: Implement camera/gimbal control
     }
-    
+
+    private fun handleCameraZoom(clientId: String, command: JSONObject) {
+        try {
+            val data = command.optJSONObject("data") ?: run {
+                clients[clientId]?.let { sendErrorResponse(it, "camera_zoom missing data") }
+                return
+            }
+            var ratio = data.optDouble("ratio", Double.NaN)
+            if (ratio.isNaN()) {
+                clients[clientId]?.let { sendErrorResponse(it, "camera_zoom ratio required") }
+                return
+            }
+            ratio = ratio.coerceIn(1.0, 200.0)
+            val component = ComponentIndexType.LEFT_OR_MAIN
+            val key = KeyTools.createCameraKey<Double>(CameraKey.KeyCameraZoomRatios, component, CameraLensType.CAMERA_LENS_ZOOM)
+            KeyManager.getInstance().setValue(key, ratio, null)
+            val msg = createMessage(
+                MessageType.CAMERA_STATUS,
+                mapOf(
+                    "zoom_ratio" to ratio,
+                    "lens" to CameraLensType.CAMERA_LENS_ZOOM.name
+                )
+            )
+            clients[clientId]?.let { sendWebSocketTextFrame(it, msg) }
+            Log.i(TAG, "Camera zoom set to $ratio on ${CameraLensType.CAMERA_LENS_ZOOM.name} for client $clientId")
+        } catch (e: Exception) {
+            Log.e(TAG, "camera_zoom error: ${e.message}", e)
+            clients[clientId]?.let { sendErrorResponse(it, "camera_zoom failed: ${e.message}") }
+        }
+    }
+
+    private fun handleGimbalReset(clientId: String, command: JSONObject) {
+        try {
+            val data = command.optJSONObject("data") ?: JSONObject()
+            val indexName = data.optString("index", "LEFT_OR_MAIN").uppercase()
+            val component = try { ComponentIndexType.valueOf(indexName) } catch (_: Exception) { ComponentIndexType.LEFT_OR_MAIN }
+            val keyManager = KeyManager.getInstance()
+            val currentAttitude = keyManager.getValue(KeyTools.createKey(GimbalKey.KeyGimbalAttitude, component)) as? Attitude
+            val targetPitch = if (data.has("pitch")) data.optDouble("pitch", 0.0) else 0.0
+            val targetYaw = if (data.has("yaw")) data.optDouble("yaw", 0.0) else 0.0
+            val currentPitch = currentAttitude?.pitch?.toDouble() ?: 0.0
+            val currentYaw = currentAttitude?.yaw?.toDouble() ?: 0.0
+            val pitchDiff = (targetPitch - currentPitch).coerceIn(-FREELOOK_MAX_RATE, FREELOOK_MAX_RATE)
+            val yawDiff = (targetYaw - currentYaw).coerceIn(-FREELOOK_MAX_RATE, FREELOOK_MAX_RATE)
+
+            executeGimbalVelocityCommand(yawDiff, pitchDiff)
+            executor.schedule({ executeGimbalVelocityCommand(0.0, 0.0) }, 800, java.util.concurrent.TimeUnit.MILLISECONDS)
+            sendGimbalResponse(clientId, true, "Gimbal reset command sent", targetYaw, targetPitch)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "gimbal_reset error: ${e.message}", e)
+            sendGimbalResponse(clientId, false, e.message ?: "gimbal_reset error", 0.0, 0.0)
+        }
+    }
+
     private fun handleFlightCommand(clientId: String, command: JSONObject) {
         Log.i(TAG, "Flight command from $clientId: $command")
         // TODO: Implement flight mode changes, RTH, etc.
@@ -1393,6 +1571,14 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                     }
                 },
                 
+                "velocity_vector" to velocity?.let {
+                    mapOf(
+                        "x" to it.x,
+                        "y" to it.y,
+                        "z" to it.z
+                    )
+                },
+
                 // Obstacle avoidance using real data from PerceptionManager listeners (same as HSI widget)
                 "obstacle_avoidance" to run {
                     try {
@@ -1465,9 +1651,12 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                         )
                     }
                 },
-                
-                // Note for development
-                "note" to "Phase 4C: Real-time obstacle avoidance integrated using PerceptionManager listeners"
+
+                // Gimbal + optics snapshot for H20N (LEFT_OR_MAIN)
+                "gimbals" to listOfNotNull(
+                    collectGimbalSnapshot(ComponentIndexType.LEFT_OR_MAIN, keyManager)
+                ),
+                "camera_optics" to collectCameraOpticsSnapshot(ComponentIndexType.LEFT_OR_MAIN, keyManager)
             )
         } catch (e: Exception) {
             Log.w(TAG, "Failed to collect telemetry data: ${e.message}")
@@ -1479,7 +1668,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         }
         return createMessage(MessageType.TELEMETRY_DATA, telemetryData, Priority.HIGH)
     }
-    
+
     private fun createBatteryStatusMessage(): String {
         // Collect basic battery status - simplified for Phase 2A testing
         val batteryData = try {

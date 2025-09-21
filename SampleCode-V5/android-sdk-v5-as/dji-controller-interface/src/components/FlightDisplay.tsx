@@ -19,7 +19,8 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
     attitude: { roll: number; pitch: number } | null,
     altitude: number,
     speed: number,
-    heading: number
+    heading: number,
+    velocity?: { x: number; y: number; z: number }
   ) => {
     const centerX = width / 2;
     const centerY = height / 2;
@@ -95,7 +96,7 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
     ctx.textAlign = 'left';
     ctx.fillText(`${Math.round(altitude)}m`, width - 80, centerY - 20);
     ctx.fillText('ALT', width - 80, centerY - 5);
-    
+
     // Draw speed on far left side
     ctx.textAlign = 'right';
     ctx.fillText(`${speed.toFixed(1)}`, 80, centerY - 20);
@@ -105,6 +106,20 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
     ctx.textAlign = 'center';
     ctx.fillText(`${Math.round(heading).toString().padStart(3, '0')}°`, centerX, 40);
     ctx.fillText('HDG', centerX, 60);
+
+    if (velocity) {
+      ctx.textAlign = 'left';
+      const baseX = 20;
+      let baseY = height - 70;
+      ctx.fillText(`VX ${velocity.x.toFixed(1)} m/s`, baseX, baseY);
+      baseY += 15;
+      ctx.fillText(`VY ${velocity.y.toFixed(1)} m/s`, baseX, baseY);
+      baseY += 15;
+      ctx.fillText(`VZ ${velocity.z.toFixed(1)} m/s`, baseX, baseY);
+      baseY += 15;
+      const horiz = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
+      ctx.fillText(`VH ${horiz.toFixed(1)} m/s`, baseX, baseY);
+    }
   };
 
 
@@ -137,7 +152,8 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
       attitude,
       altitude,
       speed,
-      heading
+      heading,
+      telemetryData?.velocity_vector
     );
   }, [telemetryData, size]);
 

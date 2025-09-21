@@ -19,6 +19,7 @@ import { CameraPanel } from './CameraPanel';
 import { Panel } from './Panel';
 import { mapPanelControls, hsiPanelControls, controllerPanelControls } from './panelControls';
 import { bridgeManager } from '../bridgeManager';
+import { OrientationPanel } from './OrientationPanel';
 
 export const App: React.FC = () => {
   const { bridgeData, connectionStatus } = useStableBridgeData();
@@ -264,6 +265,8 @@ export const App: React.FC = () => {
             setHeatmap={setVisionHeatmap}
             setHeatmapOpacity={setVisionHeatmapOpacity}
           />
+
+          <OrientationPanel telemetry={bridgeData.telemetry} sendCommand={sendBridge} />
 
         </div>
       </div>

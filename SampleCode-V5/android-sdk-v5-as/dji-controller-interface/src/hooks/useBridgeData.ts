@@ -190,8 +190,7 @@ export const useBridgeData = () => {
 
     // Cleanup on unmount
     return () => {
-      window.electronAPI.removeAllListeners('bridge-data');
-      window.electronAPI.removeAllListeners('connection-status');
+      // no-op: shared bridge listeners should remain available globally
     };
   }, []); // Empty array - run only once
 

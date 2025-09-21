@@ -19,6 +19,11 @@ interface GimbalModeToggleProps {
   // Laser controls
   laserOn?: boolean;
   onToggleLaser?: (on: boolean) => void;
+  // Zoom control
+  zoomRatio?: number;
+  zoomRange?: { min?: number; max?: number };
+  zoomEnabled?: boolean;
+  onZoomChange?: (ratio: number) => void;
 }
 
 export const GimbalModeToggle: React.FC<GimbalModeToggleProps> = ({
@@ -34,12 +39,22 @@ export const GimbalModeToggle: React.FC<GimbalModeToggleProps> = ({
   selectedLens = 'wide',
   onLensChange,
   laserOn = false,
-  onToggleLaser
+  onToggleLaser,
+  zoomRatio,
+  zoomRange,
+  zoomEnabled = true,
+  onZoomChange,
 }) => {
   const modes: { value: GimbalMode; label: string }[] = [
     { value: 'look_at', label: 'Look At' },
     { value: 'free_look', label: 'Free Look' },
   ];
+
+  const showZoomRange = typeof zoomRange?.min === 'number' && typeof zoomRange?.max === 'number';
+  const minZoom = showZoomRange ? (zoomRange!.min as number) : 1;
+  const maxZoom = showZoomRange ? (zoomRange!.max as number) : 30;
+  const zoomValue = typeof zoomRatio === 'number' ? zoomRatio : minZoom;
+  const clampedZoom = Math.min(maxZoom, Math.max(minZoom, zoomValue));
 
   return (
     <div className={`glass-panel p-2 ${className}`}>
@@ -99,6 +114,31 @@ export const GimbalModeToggle: React.FC<GimbalModeToggleProps> = ({
             </button>
           ))}
         </div>
+      </div>
+
+      {/* Zoom control */}
+      <div className="mt-3">
+        <div className="flex justify-between text-xs text-gray-400 mb-1 font-semibold">
+          <span>ZOOM</span>
+          <span className="text-gray-200 font-mono">
+            {typeof zoomRatio === 'number' ? `${zoomRatio.toFixed(1)}×` : '–'}
+          </span>
+        </div>
+        <input
+          type="range"
+          min={minZoom}
+          max={maxZoom}
+          step={0.1}
+          value={clampedZoom}
+          onChange={(e) => onZoomChange?.(parseFloat(e.target.value))}
+          className="w-full"
+          disabled={!zoomEnabled || !onZoomChange}
+        />
+        {showZoomRange && (
+          <div className="text-[10px] text-gray-500 mt-1">
+            Range {(zoomRange!.min as number).toFixed(1)}× – {(zoomRange!.max as number).toFixed(1)}×
+          </div>
+        )}
       </div>
 
       {/* Free Look tuning controls */}

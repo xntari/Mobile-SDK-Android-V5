@@ -75,8 +75,70 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
   // Precise Look tuning
   const [preciseDurationMs, setPreciseDurationMs] = useState<number>(700);
   const [preciseStrength, setPreciseStrength] = useState<number>(1.0);
+  const [zoomValue, setZoomValue] = useState<number>(() => telemetryData?.camera_optics?.zoom_ratio ?? 1);
+  const zoomDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Clear vision boxes when camera moves (any gimbal command updates) - handled by parent App component now
+
+  React.useEffect(() => {
+    if (typeof telemetryData?.camera_optics?.zoom_ratio === 'number') {
+      setZoomValue(telemetryData.camera_optics.zoom_ratio);
+    }
+  }, [telemetryData?.camera_optics?.zoom_ratio]);
+
+  React.useEffect(() => {
+    const lens = telemetryData?.camera_optics?.lens;
+    const lensType = telemetryData?.camera_optics?.lens_type;
+    const source = lensType || lens || '';
+    if (!source) return;
+    const upper = source.toUpperCase();
+    const normalized = upper.includes('ZOOM')
+      ? 'zoom'
+      : (upper.includes('INFRARED') || upper.includes('THERMAL'))
+        ? 'infrared'
+        : 'wide';
+    if (normalized !== selectedLens) {
+      setSelectedLens(normalized);
+    }
+  }, [telemetryData?.camera_optics?.lens, selectedLens]);
+
+  React.useEffect(() => () => {
+    if (zoomDebounceRef.current) {
+      clearTimeout(zoomDebounceRef.current);
+    }
+  }, []);
+
+  const zoomRange = telemetryData?.camera_optics?.zoom_range;
+  const minZoom = typeof zoomRange?.min === 'number' ? zoomRange.min : 1;
+  const maxZoom = typeof zoomRange?.max === 'number' ? zoomRange.max : 30;
+
+  const sendZoomCommand = React.useCallback((ratio: number) => {
+    const api = (window as any)?.electronAPI;
+    if (!api?.sendBridgeCommand) {
+      console.warn('camera_zoom unavailable: bridge command channel missing');
+      return;
+    }
+    api.sendBridgeCommand({
+      type: 'camera_zoom',
+      data: { ratio },
+    }).catch((error: any) => {
+      console.error('camera_zoom error', error);
+    });
+  }, []);
+
+  const handleZoomSliderChange = React.useCallback((ratio: number) => {
+    const clamped = Math.min(maxZoom, Math.max(minZoom, ratio));
+    setZoomValue(clamped);
+    if (zoomDebounceRef.current) {
+      clearTimeout(zoomDebounceRef.current);
+    }
+    zoomDebounceRef.current = setTimeout(() => {
+      sendZoomCommand(clamped);
+      zoomDebounceRef.current = null;
+    }, 220);
+  }, [maxZoom, minZoom, sendZoomCommand]);
+
+  const bridgeHasSendCommand = typeof window !== 'undefined' && !!(window as any).electronAPI?.sendBridgeCommand;
 
   // Helper: provide a snapshot of the current canvas as base64 JPEG
   const getSnapshot = async (): Promise<string> => {
@@ -446,13 +508,7 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
     }
     
     return () => {
-      if ((window as any).electronAPI?.removeAllListeners) {
-        try {
-          (window as any).electronAPI.removeAllListeners('bridge-data');
-        } catch (e) {
-          // console.warn('Could not remove bridge data listeners:', e);
-        }
-      }
+      // no-op cleanup to avoid removing shared bridge listeners
     };
   }, []);
   
@@ -1044,6 +1100,10 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(({
               (window as any).electronAPI.sendBridgeCommand({ type: 'camera_laser_enable', data: { enabled: on } }).catch(()=>{});
             }
           }}
+          zoomRatio={zoomValue}
+          zoomRange={telemetryData?.camera_optics?.zoom_range}
+          zoomEnabled={bridgeHasSendCommand}
+          onZoomChange={handleZoomSliderChange}
         />
       </div>
 

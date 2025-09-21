@@ -58,6 +58,32 @@ export interface TelemetryData extends BridgeMessage {
       warning_level: 'none' | 'caution' | 'warning' | 'critical';
     }>;
   };
+  velocity_vector?: {
+    x: number;
+    y: number;
+    z: number;
+  };
+  gimbals?: Array<{
+    index: string;
+    connected: boolean;
+    attitude?: { pitch: number; roll: number; yaw: number };
+    yaw_relative?: number;
+    limits?: {
+      pitch?: { min?: number; max?: number };
+      yaw?: { min?: number; max?: number };
+      roll?: { min?: number; max?: number };
+    };
+  }>;
+  camera_optics?: {
+    index: string;
+    lens?: string;
+    lens_type?: string;
+    zoom_ratio?: number;
+    zoom_range?: { min?: number; max?: number };
+    focal_length?: number;
+    display_fov?: { horizontal?: number; vertical?: number };
+    laser_measurement?: string;
+  };
 }
 
 export interface BatteryData extends BridgeMessage {

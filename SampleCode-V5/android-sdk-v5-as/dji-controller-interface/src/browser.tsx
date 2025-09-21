@@ -36,14 +36,9 @@ import './styles/index.css';
   // Event listeners (direct handling)
   onBridgeData: (callback: (data: any) => void) => {
     callbacksSetCount++;
-    console.log(`🔗 Browser: Setting bridgeDataCallback #${callbacksSetCount}`);
-    
-    // If this is not the first callback, we need to ensure continuity
-    if (callbacksSetCount > 1) {
-      console.log('⚠️ Browser: Multiple callback registrations detected');
-    }
-    
-    bridgeDataCallback = callback;
+    console.log(`🔗 Browser: Register bridgeData callback #${callbacksSetCount}`);
+
+    bridgeDataCallbacks.add(callback);
   },
   
   onVideoFrame: (callback: (frame: any) => void) => {
@@ -65,7 +60,7 @@ import './styles/index.css';
   
   // Cleanup
   removeAllListeners: (channel: string) => {
-    if (channel === 'bridge-data') bridgeDataCallback = null;
+    if (channel === 'bridge-data') bridgeDataCallbacks.clear();
     if (channel === 'video-frame') videoFrameCallback = null;
     if (channel === 'fpv-video-frame') fpvVideoFrameCallback = null;
     if (channel === 'secondary-video-frame') secondaryVideoFrameCallback = null;
@@ -76,7 +71,7 @@ import './styles/index.css';
 // Mock WebSocket connection for browser
 let mockWs: WebSocket | null = null;
 let mockConnectionStatus = 'disconnected';
-let bridgeDataCallback: ((data: any) => void) | null = null;
+const bridgeDataCallbacks = new Set<(data: any) => void>();
 let videoFrameCallback: ((frame: any) => void) | null = null; // Legacy compatibility
 let fpvVideoFrameCallback: ((frame: any) => void) | null = null; // FPV-specific callback
 let secondaryVideoFrameCallback: ((frame: any) => void) | null = null; // Secondary camera callback
@@ -160,9 +155,13 @@ const connectToMockBridge = () => {
             //console.log(`🎬 Browser: Video frame metadata [${cameraSource.toUpperCase()}|${isPrimary}]: ${message.frameSize} bytes, ${message.width}x${message.height}, frame #${message.frameNumber}`);
           } else {
             // Regular bridge data (controller, telemetry, etc.)
-            //console.log('📡 Browser: Received message:', message.type, message);
-            //console.log('📡 Browser: Calling bridgeDataCallback:', !!bridgeDataCallback);
-            bridgeDataCallback?.(message);
+            bridgeDataCallbacks.forEach(cb => {
+              try {
+                cb(message);
+              } catch (cbError) {
+                console.error('bridgeData callback error', cbError);
+              }
+            });
           }
         }
       } catch (error) {
