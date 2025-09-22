@@ -58,6 +58,7 @@ import dji.sdk.keyvalue.value.camera.ZoomRatiosRange
 import dji.sdk.keyvalue.value.common.CameraLensType
 import dji.sdk.keyvalue.value.gimbal.GimbalSpeedRotation
 import dji.sdk.keyvalue.value.gimbal.CtrlInfo
+// GeographicLib import removed - using SDK-based conversion
 import dji.sdk.keyvalue.value.flightcontroller.LookAtInfo
 import dji.sdk.keyvalue.value.flightcontroller.LookAtMode
 import dji.sdk.keyvalue.value.common.EmptyMsg
@@ -1962,43 +1963,99 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         val tx = (call(tp, "getX") as? Number)?.toDouble()
         val ty = (call(tp, "getY") as? Number)?.toDouble()
 
-        // Get current aircraft altitude and ground elevation for correction
-        val aircraftLocation = try {
+        // Get current aircraft location and altitude
+        val aircraft3DLocation = try {
             KeyManager.getInstance().getValue(FlightControllerKey.KeyAircraftLocation3D.create()) as? LocationCoordinate3D
         } catch (e: Exception) { null }
 
-        val takeoffAltitude = capturedTakeoffAltitude ?: try {
+        // Get takeoff location altitude (this is MSL at takeoff point)
+        val takeoffLocationAltitude = try {
             KeyManager.getInstance().getValue(FlightControllerKey.KeyTakeoffLocationAltitude.create()) as? Double
-        } catch (e: Exception) { null } ?: 109.0  // Default ground elevation
+        } catch (e: Exception) { null }
+
+        // Get the barometric altitude (should be MSL)
+        val barometricAltitude = try {
+            KeyManager.getInstance().getValue(FlightControllerKey.KeyAltitude.create()) as? Double
+        } catch (e: Exception) { null }
 
         val data = mutableMapOf<String, Any>()
         distance?.let { data["distance_m"] = it }
         if (lat != null && lon != null && alt != null) {
-            // The laser rangefinder altitude might be relative or absolute
-            // DJI Pilot likely expects AMSL (absolute), so we may need to correct it
+            // The LRF returns WGS-84 ellipsoid height (like waypoint.alt_m)
+            // We need to convert to AMSL (Above Mean Sea Level)
 
-            // Log both raw and corrected values for debugging
-            val rawAlt = alt
-            val aircraftAlt = aircraftLocation?.altitude ?: 0.0
+            // Get aircraft's relative altitude from takeoff
+            val aircraftRelativeAlt = aircraft3DLocation?.altitude ?: 0.0
 
-            // Check if the altitude seems to be relative (close to aircraft altitude difference)
-            // or absolute (larger values suggesting AMSL)
-            val correctedAlt = if (alt < 200) {
-                // Likely relative altitude - add ground elevation to get AMSL
-                alt + takeoffAltitude
+            // Calculate the current aircraft MSL altitude
+            val aircraftMSL = if (takeoffLocationAltitude != null) {
+                takeoffLocationAltitude + aircraftRelativeAlt
+            } else if (barometricAltitude != null) {
+                // Use barometric altitude as fallback (it should be MSL)
+                barometricAltitude + (takeoffLocationAltitude ?: 0.0)
             } else {
-                // Likely already AMSL
+                null
+            }
+
+            // The key insight: The LRF altitude is WGS-84 ellipsoid height
+            // DJI Pilot shows MSL altitude
+            // The difference between them is the geoid separation (geoid height)
+
+            // Since the SDK doesn't provide geoid conversion, we can derive it from known data:
+            // At the aircraft position, we know both:
+            // - MSL altitude (from barometric or takeoff + relative)
+            // - What the WGS-84 height would be (if we had it)
+
+            // For local area, geoid separation is approximately constant
+            // So we can use the aircraft's geoid separation for the target
+
+            // Calculate geoid separation using the takeoff location as reference
+            // The key insight: KeyTakeoffLocationAltitude returns MSL altitude at takeoff
+            // If we also had the WGS-84 ellipsoid height at takeoff, we could calculate geoid separation
+            // But since LocationCoordinate3D.altitude is relative, we need a different approach
+
+            // We can derive the geoid separation if we have GPS altitude data
+            // The barometric altitude (KeyAltitude) should be closer to MSL
+            // While raw GPS altitude would be WGS-84
+
+            // Since the LRF altitude appears to be WGS-84 ellipsoid height,
+            // and we need MSL, we must apply the geoid correction
+
+            // Convert WGS-84 ellipsoid height to MSL using proper geoid model
+            val correctedAlt = if (lat != null && lon != null) {
+                // Use the GeoidModel to convert WGS-84 ellipsoid height to MSL
+                val mslAltitude = GeoidModel.ellipsoidToMSL(alt, lat, lon)
+                val geoidHeight = GeoidModel.getGeoidHeight(lat, lon)
+
+                Log.i("CAMERA_LASER", "  - Geoid height at ($lat, $lon): $geoidHeight m")
+                Log.i("CAMERA_LASER", "  - Converted MSL altitude: $mslAltitude m")
+
+                mslAltitude
+            } else {
+                // No coordinates available for geoid conversion
+                Log.w("CAMERA_LASER", "No coordinates for geoid conversion, returning WGS-84 altitude")
                 alt
             }
 
-            Log.i("CAMERA_LASER", "LRF altitude: raw=$rawAlt, aircraft=$aircraftAlt, takeoff=$takeoffAltitude, corrected=$correctedAlt")
+            Log.i("CAMERA_LASER", "LRF Altitude Debug:")
+            Log.i("CAMERA_LASER", "  - LRF reported altitude (WGS-84): $alt m")
+            Log.i("CAMERA_LASER", "  - Aircraft relative altitude (AGL): $aircraftRelativeAlt m")
+            Log.i("CAMERA_LASER", "  - Takeoff location altitude: $takeoffLocationAltitude m")
+            Log.i("CAMERA_LASER", "  - Barometric altitude: $barometricAltitude m")
+            Log.i("CAMERA_LASER", "  - Aircraft MSL: $aircraftMSL m")
+            Log.i("CAMERA_LASER", "  - Distance to target: $distance m")
 
             data["waypoint"] = mapOf(
                 "lat" to lat,
                 "lon" to lon,
-                "alt_m" to correctedAlt,
-                "alt_raw" to rawAlt,  // Include raw value for debugging
-                "alt_relative" to (rawAlt - takeoffAltitude)  // Relative altitude for reference
+                "alt_m" to correctedAlt,  // This should be MSL after correction
+                "alt_debug" to mapOf(
+                    "lrf_wgs84" to alt,  // Raw WGS-84 ellipsoid height from SDK
+                    "aircraft_agl" to aircraftRelativeAlt,
+                    "takeoff_alt" to takeoffLocationAltitude,
+                    "barometric_alt" to barometricAltitude,
+                    "distance" to distance
+                )
             )
         }
         if (tx != null && ty != null) {
@@ -2423,19 +2480,20 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
 
             // Capture ground elevation when motors first turn on
             if (areMotorsOn && !lastMotorsOnState && aircraft3DLocation != null) {
-                // Motors just turned on - capture ground elevation
-                // TODO: Use proper GPS elevation service. For now using your location's known value
-                capturedTakeoffAltitude = 109.0  // Your location's ground elevation in meters AMSL
-                Log.i(TAG, "Motors ON - captured ground elevation: ${capturedTakeoffAltitude}m AMSL")
+                // Motors just turned on - capture ground elevation from SDK
+                val takeoffAltitudeKey = KeyTools.createKey(FlightControllerKey.KeyTakeoffLocationAltitude)
+                val sdkTakeoffAltitude = (keyManager.getValue(takeoffAltitudeKey) as? Number)?.toDouble()
+                capturedTakeoffAltitude = sdkTakeoffAltitude
+                Log.i(TAG, "Motors ON - captured takeoff altitude from SDK: ${capturedTakeoffAltitude}m")
             }
             lastMotorsOnState = areMotorsOn
 
-            // Get takeoff altitude from SDK (often unreliable) or use captured/default value
+            // Get takeoff altitude from SDK
             val takeoffAltitudeKey = KeyTools.createKey(FlightControllerKey.KeyTakeoffLocationAltitude)
             val sdkTakeoffAltitude = (keyManager.getValue(takeoffAltitudeKey) as? Number)?.toDouble()
 
-            // Ground elevation at takeoff location (AMSL)
-            val groundElevation = capturedTakeoffAltitude ?: sdkTakeoffAltitude ?: 109.0
+            // Ground elevation at takeoff location (MSL)
+            val groundElevation = capturedTakeoffAltitude ?: sdkTakeoffAltitude ?: 0.0
 
             // Calculate ABSOLUTE altitude (AMSL) = ground elevation + relative altitude
             val absoluteAltitude = groundElevation + relativeAltitude
