@@ -9,6 +9,7 @@ import { HSICompass } from './HSICompass';
 import { MapDisplay } from './MapDisplay';
 import { FlightDisplay } from './FlightDisplay';
 import { CameraDisplay } from './CameraDisplay';
+import { GPSTargetPanel } from './GPSTargetPanel';
 import { CameraControls } from './CameraControls';
 import { ConnectionStatus } from './ConnectionStatus';
 import { VisionPanel } from './VisionPanel';
@@ -20,6 +21,7 @@ import { Panel } from './Panel';
 import { mapPanelControls, hsiPanelControls, controllerPanelControls } from './panelControls';
 import { bridgeManager } from '../bridgeManager';
 import { OrientationPanel } from './OrientationPanel';
+import { ProjectionControls } from './ProjectionControls';
 
 export const App: React.FC = () => {
   const { bridgeData, connectionStatus } = useStableBridgeData();
@@ -184,7 +186,17 @@ export const App: React.FC = () => {
           </Panel>
 
           <ObjectMemoryPanel defaultPosition={{ x: 20, y: 600 }} defaultSize={{ w: 420, h: 320 }} />
-          
+
+          {/* GPS Target Panel */}
+          <Panel
+            title="GPS Targets"
+            defaultPosition={{ x: 450, y: 600 }}
+            defaultSize={{ w: 380, h: 400 }}
+            storageKey="gps.targets.panel"
+            visibilityEventType="gpsTargetsPanelVisibilityChange"
+          >
+            <GPSTargetPanel telemetryData={bridgeData.telemetry} />
+          </Panel>
 
           {/* Controller HUD Panel */}
           {bridgeData.controller && (
@@ -267,6 +279,8 @@ export const App: React.FC = () => {
           />
 
           <OrientationPanel telemetry={bridgeData.telemetry} sendCommand={sendBridge} />
+
+          <ProjectionControls />
 
         </div>
       </div>

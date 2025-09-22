@@ -7,6 +7,7 @@ import { computeTargetMetrics } from '../utils/objectMemoryTarget';
 import { projectGeographicPointToScreen } from '../utils/rayProjection';
 import { normalizeAngleDeg, shortestAngleDiffDeg } from '../utils/angleUtils';
 import { registerLiveViewLocationListener, requestLiveViewLocation, type LiveViewPinPoint } from '../agent/cameraProjectionClient';
+import { projectionModeStore } from '../state/projectionMode';
 
 export interface FPVDisplayRef {
   getSnapshot: () => Promise<string>;
@@ -113,13 +114,15 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
       cameraType: 'fpv',
       cameraModel: 'MAVIC3',
       baseFocalLength: 24,
+      zoomRatioOverride: telemetryData.fpv_optics?.zoom_ratio ?? undefined,
     });
   }, [telemetryData, objectTarget, videoDimensions]);
 
   const fallbackProjection = React.useMemo(() => {
     if (!telemetryData || !targetMetrics) return null;
-    const fovH = telemetryData.camera_optics?.display_fov?.horizontal ?? 78;
-    const fovV = telemetryData.camera_optics?.display_fov?.vertical ?? 52;
+    const optics = telemetryData.fpv_optics ?? telemetryData.camera_optics;
+    const fovH = optics?.display_fov?.horizontal ?? 82;
+    const fovV = optics?.display_fov?.vertical ?? 60;
     if (!Number.isFinite(fovH) || !Number.isFinite(fovV) || fovH <= 0 || fovV <= 0) return null;
 
     const heading = telemetryData.heading ?? telemetryData.compass_heading ?? 0;
@@ -151,17 +154,18 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
   }, [telemetryData, targetMetrics, displayRect.width, displayRect.height]);
 
   useEffect(() => {
-    if (!objectTarget?.anchor?.object_position) {
+    const position = objectTarget?.anchor?.object_position;
+    if (!position) {
       setLiveViewPoint(null);
       return;
     }
-    const { latitude, longitude, altitude_m } = objectTarget.anchor.object_position;
+    const { latitude, longitude, altitude_m } = position;
     if (typeof latitude !== 'number' || typeof longitude !== 'number') {
       setLiveViewPoint(null);
       return;
     }
     const altitude = typeof altitude_m === 'number' ? altitude_m : 0;
-    const requestId = `fpv-${objectTarget.clusterId ?? ''}`;
+    const requestId = `fpv-${objectTarget?.clusterId ?? ''}`;
     const component = 'FPV';
 
     const unsubscribe = registerLiveViewLocationListener((message) => {
@@ -176,19 +180,27 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
       }
     });
 
-    requestLiveViewLocation({
-      latitude,
-      longitude,
-      altitude,
-      component,
-      requestId,
-      source: 'fpv_overlay',
-    })?.catch(() => {
-      // Ignore errors; fallback to local projection
-    });
+    const updateProjection = () => {
+      requestLiveViewLocation({
+        latitude,
+        longitude,
+        altitude,
+        component,
+        requestId,
+        source: 'fpv_overlay',
+      })?.catch(() => {
+        // Ignore errors; fallback to local projection path
+      });
+    };
 
-    return unsubscribe;
-    }, [objectTarget, targetMetrics?.bearing, targetMetrics?.slantDistance, targetMetrics?.altitudeDelta]);
+    updateProjection();
+    const interval = window.setInterval(updateProjection, 500);
+
+    return () => {
+      window.clearInterval(interval);
+      unsubscribe();
+    };
+  }, [objectTarget?.anchor?.object_position?.latitude, objectTarget?.anchor?.object_position?.longitude, objectTarget?.anchor?.object_position?.altitude_m, objectTarget?.clusterId]);
 
   const targetOverlay = React.useMemo(() => {
     if (!objectTarget || !targetMetrics || !targetProjection) return null;
@@ -198,16 +210,47 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
     const clampedX = Math.max(0, Math.min(displayRect.width, px));
     const clampedY = Math.max(0, Math.min(displayRect.height, py));
     const angleRad = Math.atan2(targetProjection.normalized.y, targetProjection.normalized.x);
+
+    const projectionMode = projectionModeStore.getMode();
     const sdkPoint = liveViewPoint;
     const sdkNormX = sdkPoint?.x ?? null;
     const sdkNormY = sdkPoint?.y ?? null;
     const sdkDisplayX = sdkNormX != null ? sdkNormX * displayRect.width : null;
     const sdkDisplayY = sdkNormY != null ? sdkNormY * displayRect.height : null;
     const fallback = fallbackProjection;
-    const finalNormX = sdkNormX ?? fallback?.normX ?? targetProjection.screen.x;
-    const finalNormY = sdkNormY ?? fallback?.normY ?? targetProjection.screen.y;
-    const finalDisplayX = sdkDisplayX ?? fallback?.displayX ?? (targetProjection.inFrame ? px : clampedX);
-    const finalDisplayY = sdkDisplayY ?? fallback?.displayY ?? (targetProjection.inFrame ? py : clampedY);
+
+    // Decision logic based on projection mode
+    let finalNormX, finalNormY, rawDisplayX, rawDisplayY;
+
+    if (projectionMode === 'fallback') {
+      // Auto-Adjust mode: Always use manual fallback calculation
+      finalNormX = fallback?.normX ?? targetProjection.screen.x;
+      finalNormY = fallback?.normY ?? targetProjection.screen.y;
+      rawDisplayX = fallback?.displayX ?? (targetProjection.inFrame ? px : clampedX);
+      rawDisplayY = fallback?.displayY ?? (targetProjection.inFrame ? py : clampedY);
+    } else {
+      // Real or Horizontal modes: Use SDK if valid, otherwise use fallback
+      if (sdkNormX != null && sdkNormY != null) {
+        // SDK returned valid coordinates
+        finalNormX = sdkNormX;
+        finalNormY = sdkNormY;
+        rawDisplayX = sdkDisplayX;
+        rawDisplayY = sdkDisplayY;
+      } else {
+        // SDK returned invalid - use fallback
+        finalNormX = fallback?.normX ?? targetProjection.screen.x;
+        finalNormY = fallback?.normY ?? targetProjection.screen.y;
+        rawDisplayX = fallback?.displayX ?? (targetProjection.inFrame ? px : clampedX);
+        rawDisplayY = fallback?.displayY ?? (targetProjection.inFrame ? py : clampedY);
+      }
+    }
+
+    const finalDisplayX = Number.isFinite(rawDisplayX)
+      ? Math.max(0, Math.min(displayRect.width, rawDisplayX))
+      : clampedX;
+    const finalDisplayY = Number.isFinite(rawDisplayY)
+      ? Math.max(0, Math.min(displayRect.height, rawDisplayY))
+      : clampedY;
     return {
       label: objectTarget.clusterLabel ?? objectTarget.clusterId,
       inFrame: sdkNormX != null && sdkNormY != null

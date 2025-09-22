@@ -341,4 +341,27 @@
         app:layout_constraintEnd_toEndOf="parent"
         tools:ignore="SpUsage" />
 
+    <!-- Small SurfaceViews for SDK projection calculations -->
+    <SurfaceView
+        android:id="@+id/fpv_surface_view"
+        android:layout_width="40dp"
+        android:layout_height="30dp"
+        android:layout_marginEnd="8dp"
+        android:layout_marginBottom="8dp"
+        android:visibility="gone"
+        android:background="@color/black"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent" />
+
+    <SurfaceView
+        android:id="@+id/secondary_surface_view"
+        android:layout_width="40dp"
+        android:layout_height="30dp"
+        android:layout_marginEnd="8dp"
+        android:layout_marginBottom="48dp"
+        android:visibility="gone"
+        android:background="@color/black"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent" />
+
 </androidx.constraintlayout.widget.ConstraintLayout>

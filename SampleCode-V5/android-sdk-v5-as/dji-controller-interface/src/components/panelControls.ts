@@ -5,3 +5,4 @@ export const mapPanelControls = createPanelControls('map.panel', 'mapPanelVisibi
 export const hsiPanelControls = createPanelControls('hsi.panel', 'hsiPanelVisibilityChange');
 export const controllerPanelControls = createPanelControls('controller.panel', 'controllerPanelVisibilityChange');
 export const orientationPanelControls = createPanelControls('orientation.panel', 'orientationPanelVisibilityChange');
+export const projectionPanelControls = createPanelControls('projectionControls.panel', 'projectionControlsVisibilityChange');

@@ -18,6 +18,24 @@ export type LiveViewLocationMessage = {
     longitude: number;
     altitude: number;
   };
+  projection_stats?: {
+    mode: string;
+    aircraft: {
+      lat: number;
+      lon: number;
+      alt: number;
+    };
+    target: {
+      lat: number;
+      lon: number;
+      alt: number;
+      distance: number;
+    };
+    adjusted_alt: number;
+    sample: string;
+    capturedAt: string;
+    camera: string;
+  };
 };
 
 type Listener = (message: LiveViewLocationMessage) => void;
@@ -77,5 +95,42 @@ export function requestLiveViewLocation(params: {
       source: params.source,
     },
   };
+  return api.sendBridgeCommand(command);
+}
+
+export type LookAtMode = 'FREE' | 'FOLLOWING' | 'ZOOM_CIRCLE';
+
+export type GimbalLookAtMessage = {
+  type: 'gimbal_look_at';
+  success: boolean;
+  mode?: string;
+  location?: {
+    latitude: number;
+    longitude: number;
+    altitude: number;
+  };
+  error?: string;
+};
+
+export function gimbalLookAt(params: {
+  latitude: number;
+  longitude: number;
+  altitude: number;
+  mode: LookAtMode;
+}): Promise<any> | undefined {
+  if (typeof window === 'undefined') return undefined;
+  const api = (window as any).electronAPI;
+  if (!api?.sendBridgeCommand) return undefined;
+
+  const command = {
+    type: 'gimbal_look_at',
+    data: {
+      latitude: params.latitude,
+      longitude: params.longitude,
+      altitude: params.altitude,
+      mode: params.mode,
+    },
+  };
+
   return api.sendBridgeCommand(command);
 }

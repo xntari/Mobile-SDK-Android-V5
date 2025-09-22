@@ -273,8 +273,8 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
     if (targetPosition && Number.isFinite(targetPosition.latitude) && Number.isFinite(targetPosition.longitude)) {
       if (!targetMarkerRef.current) {
         const targetEl = document.createElement('div');
-        targetEl.style.width = '14px';
-        targetEl.style.height = '14px';
+        targetEl.style.width = '8px';
+        targetEl.style.height = '8px';
         targetEl.style.borderRadius = '50%';
         targetEl.style.backgroundColor = '#0ea5e9';
         targetEl.style.border = '2px solid white';

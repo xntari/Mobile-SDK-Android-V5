@@ -1,7 +1,16 @@
 package dji.sampleV5.aircraft.data
 
+import android.os.Looper
 import android.util.Log
+import android.view.Surface
+import android.view.SurfaceView
+import android.view.SurfaceHolder
+import android.graphics.SurfaceTexture
+import android.app.Activity
+import android.os.Handler
 import dji.sampleV5.aircraft.models.VirtualStickVM
+import dji.sampleV5.aircraft.models.LookAtVM
+import dji.sampleV5.aircraft.models.CameraStreamDetailVM
 import dji.v5.utils.common.LogUtils
 import dji.sdk.keyvalue.key.FlightControllerKey
 import dji.sdk.keyvalue.key.BatteryKey
@@ -17,6 +26,7 @@ import dji.sdk.keyvalue.value.common.Velocity3D
 import dji.sdk.keyvalue.value.common.ComponentIndexType
 import dji.sdk.keyvalue.value.common.Attitude
 import dji.v5.manager.datacenter.camera.view.PinPoint
+import dji.v5.manager.datacenter.camera.view.PinPointInfo
 import dji.sdk.keyvalue.value.gimbal.GimbalAttitudeRange
 import dji.v5.manager.aircraft.perception.PerceptionManager
 import dji.v5.manager.aircraft.perception.data.ObstacleData
@@ -34,6 +44,7 @@ import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
+import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -47,6 +58,8 @@ import dji.sdk.keyvalue.value.camera.ZoomRatiosRange
 import dji.sdk.keyvalue.value.common.CameraLensType
 import dji.sdk.keyvalue.value.gimbal.GimbalSpeedRotation
 import dji.sdk.keyvalue.value.gimbal.CtrlInfo
+import dji.sdk.keyvalue.value.flightcontroller.LookAtInfo
+import dji.sdk.keyvalue.value.flightcontroller.LookAtMode
 import dji.sdk.keyvalue.value.common.EmptyMsg
 import dji.v5.et.createCamera
 import dji.v5.et.create
@@ -68,6 +81,72 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         private const val TAG = "DJIBridgeServer"
         private const val WEBSOCKET_MAGIC_STRING = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
         private const val PROTOCOL_VERSION = "1.0"
+
+        // Real SurfaceViews for SDK projection
+        private var fpvSurfaceView: SurfaceView? = null
+        private var secondarySurfaceView: SurfaceView? = null
+        private var fpvSurface: Surface? = null
+        private var secondarySurface: Surface? = null
+        private var surfacesReady = false
+        private val surfaceReadyCallbacks = mutableMapOf<ComponentIndexType, () -> Unit>()
+        private var activity: Activity? = null
+
+        // Use the EXACT same ViewModels as the Look At example
+        private val lookAtVM = LookAtVM()
+        private val cameraVM = CameraStreamDetailVM()
+    }
+
+    // Retry helper for camera stream registration
+    private fun registerCameraStreamWithRetry(
+        componentIndex: ComponentIndexType,
+        surface: android.view.Surface,
+        width: Int,
+        height: Int,
+        surfaceName: String,
+        maxRetries: Int = 3,
+        delayMs: Long = 500
+    ) {
+        var retryCount = 0
+        var registered = false
+
+        while (retryCount < maxRetries && !registered) {
+            try {
+                // Register with ViewModels
+                cameraVM.setCameraIndex(componentIndex)
+                cameraVM.putCameraStreamSurface(
+                    surface,
+                    width,
+                    height,
+                    ICameraStreamManager.ScaleType.CENTER_INSIDE
+                )
+
+                // Also register directly with MediaDataCenter
+                MediaDataCenter.getInstance().cameraStreamManager.putCameraStreamSurface(
+                    componentIndex,
+                    surface,
+                    width,
+                    height,
+                    ICameraStreamManager.ScaleType.CENTER_INSIDE
+                )
+
+                // Enable the stream
+                MediaDataCenter.getInstance().cameraStreamManager.enableStream(componentIndex, true)
+
+                registered = true
+                Log.i(TAG, "*** $surfaceName surface registered successfully on attempt ${retryCount + 1} ***")
+
+            } catch (e: Exception) {
+                retryCount++
+                Log.w(TAG, "$surfaceName stream registration failed (attempt $retryCount/$maxRetries): ${e.message}")
+
+                if (retryCount < maxRetries) {
+                    Log.i(TAG, "Retrying $surfaceName registration in ${delayMs}ms...")
+                    Thread.sleep(delayMs)
+                } else {
+                    Log.e(TAG, "Failed to register $surfaceName after $maxRetries attempts", e)
+                }
+            }
+        }
     }
 
     private fun collectGimbalSnapshot(index: ComponentIndexType, keyManager: KeyManager): Map<String, Any?>? {
@@ -285,6 +364,18 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                         }
                     }
                 }
+            } else if (index == ComponentIndexType.FPV) {
+                // FPV camera is fixed focal length with wide FOV
+                val fpvFocalLength = 24.0
+                result["focal_length"] = fpvFocalLength
+                result["zoom_ratio"] = 1.0
+
+                val fpvHorizontalFov = 82.0
+                val fpvVerticalFov = 60.0
+                result["display_fov"] = mapOf(
+                    "horizontal" to fpvHorizontalFov,
+                    "vertical" to fpvVerticalFov
+                )
             }
 
             result
@@ -328,6 +419,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         GIMBAL_FREE_LOOK_UPDATE("gimbal_free_look_update"),
         GIMBAL_FREE_LOOK_STOP("gimbal_free_look_stop"),
         GIMBAL_RESET("gimbal_reset"),
+        GIMBAL_LOOK_AT("gimbal_look_at"),
         FLIGHT_COMMAND("flight_command"),
         SYSTEM_COMMAND("system_command");
         
@@ -351,7 +443,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     private var isRunning = false
     private val clients = ConcurrentHashMap<String, Socket>()
     private val executor: ScheduledExecutorService = Executors.newScheduledThreadPool(4)
-    
+
     // Free Look session state management
     @Volatile private var freeLookActive = false
     @Volatile private var freeLookClientId: String? = null
@@ -374,7 +466,172 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     private val FREELOOK_DEAD_ZONE = 0.000f
     private val FREELOOK_WATCHDOG_MS = 800L
     private val FREELOOK_UPDATE_HZ = 15
-    
+
+    private fun runOnUiThread(action: () -> Unit) {
+        val activity = bridgeActivity
+        if (activity is Activity) {
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                action()
+            } else {
+                activity.runOnUiThread(action)
+            }
+            return
+        }
+
+        val mainLooper = Looper.getMainLooper()
+        if (mainLooper != null) {
+            if (Looper.myLooper() == mainLooper) {
+                action()
+            } else {
+                Handler(mainLooper).post(action)
+            }
+        } else {
+            Log.w(TAG, "Main looper unavailable; executing action inline")
+            action()
+        }
+    }
+
+    private fun enqueueMessage(clientId: String, data: Map<String, Any?>) {
+        executor.execute {
+            try {
+                val message = createMessage(MessageType.CAMERA_LIVE_VIEW_LOCATION, data)
+                clients[clientId]?.let { socket -> sendWebSocketTextFrame(socket, message) }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send camera_live_view_location message", e)
+            }
+        }
+    }
+
+    private fun initializeSurfaceViews() {
+        activity?.let { act ->
+            runOnUiThread {
+                try {
+                    Log.i(TAG, "*** Creating SurfaceViews programmatically for DJIBridgeActivity ***")
+
+                    // Create SurfaceViews programmatically since DJIBridgeActivity doesn't have them in layout
+                    fpvSurfaceView = SurfaceView(act)
+                    secondarySurfaceView = SurfaceView(act)
+
+                    // Add them to the activity with proper dimensions matching Look At example
+                    val parent = act.window.decorView.findViewById<android.view.ViewGroup>(android.R.id.content)
+                    // CRITICAL: Make surfaces take up actual screen space like Look At example
+                    // The Look At example has the surface taking ~85% of screen width
+                    val displayMetrics = act.resources.displayMetrics
+                    val density = displayMetrics.density
+
+                    // Create preview surfaces (~128px wide, maintain 4:3 aspect ratio)
+                    val previewWidth = 128  // Fixed pixel size
+                    val previewHeight = 96   // 4:3 aspect ratio
+
+                    val params = android.widget.FrameLayout.LayoutParams(
+                        previewWidth,
+                        previewHeight
+                    )
+                    params.gravity = android.view.Gravity.BOTTOM or android.view.Gravity.END
+                    params.rightMargin = (8 * density).toInt()
+                    params.bottomMargin = (8 * density).toInt()
+
+                    parent.addView(fpvSurfaceView, params)
+
+                    val secondParams = android.widget.FrameLayout.LayoutParams(previewWidth, previewHeight).apply {
+                        gravity = android.view.Gravity.BOTTOM or android.view.Gravity.END
+                        rightMargin = (8 * density).toInt()
+                        bottomMargin = (110 + 8 * density).toInt()  // Position above first preview
+                    }
+                    parent.addView(secondarySurfaceView, secondParams)
+
+                    // Set up FPV surface callback
+                    fpvSurfaceView?.holder?.addCallback(object : SurfaceHolder.Callback {
+                        override fun surfaceCreated(holder: SurfaceHolder) {
+                            fpvSurface = holder.surface
+                            // Use screen dimensions for SDK (projections need full resolution)
+                            val screenWidth = act.resources.displayMetrics.widthPixels
+                            val screenHeight = act.resources.displayMetrics.heightPixels
+                            holder.setFixedSize(screenWidth, screenHeight)
+                            Log.i(TAG, "*** FPV Surface CREATED successfully with SDK size ${screenWidth}x${screenHeight} ***")
+
+                            // Register with retry logic
+                            registerCameraStreamWithRetry(
+                                componentIndex = ComponentIndexType.FPV,
+                                surface = fpvSurface!!,
+                                width = screenWidth,
+                                height = screenHeight,
+                                surfaceName = "FPV"
+                            )
+                        }
+
+                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+                        override fun surfaceDestroyed(holder: SurfaceHolder) {
+                            fpvSurface?.let { MediaDataCenter.getInstance().cameraStreamManager.removeCameraStreamSurface(it) }
+                            fpvSurface = null
+                        }
+                    })
+
+                    // Set up Secondary surface callback
+                    secondarySurfaceView?.holder?.addCallback(object : SurfaceHolder.Callback {
+                        override fun surfaceCreated(holder: SurfaceHolder) {
+                            secondarySurface = holder.surface
+                            // Use screen dimensions for SDK (projections need full resolution)
+                            val screenWidth = act.resources.displayMetrics.widthPixels
+                            val screenHeight = act.resources.displayMetrics.heightPixels
+                            holder.setFixedSize(screenWidth, screenHeight)
+                            Log.i(TAG, "*** Secondary Surface CREATED successfully with SDK size ${screenWidth}x${screenHeight} ***")
+
+                            // Register with retry logic for H20N/Secondary camera
+                            registerCameraStreamWithRetry(
+                                componentIndex = ComponentIndexType.LEFT_OR_MAIN,
+                                surface = secondarySurface!!,
+                                width = screenWidth,
+                                height = screenHeight,
+                                surfaceName = "H20N/Secondary"
+                            )
+
+                            // Enable through ViewModel too
+                            cameraVM.enableStream(true)
+
+                            // Set the LookAtVM to match
+                            lookAtVM.currentComponentIndexType.value = ComponentIndexType.LEFT_OR_MAIN
+
+                            // Mark surfaces as ready
+                            surfacesReady = true
+                            Log.i(TAG, "*** H20N video stream connected to surface for GPS projections - SURFACES READY ***")
+
+                            // Execute any pending callbacks for LEFT_OR_MAIN
+                            surfaceReadyCallbacks[ComponentIndexType.LEFT_OR_MAIN]?.invoke()
+                            surfaceReadyCallbacks.remove(ComponentIndexType.LEFT_OR_MAIN)
+                        }
+
+                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+                        override fun surfaceDestroyed(holder: SurfaceHolder) {
+                            secondarySurface?.let { MediaDataCenter.getInstance().cameraStreamManager.removeCameraStreamSurface(it) }
+                            secondarySurface = null
+                        }
+                    })
+
+                    // Make surfaces visible (they're already sized at 40dp x 30dp from addView)
+                    fpvSurfaceView?.visibility = android.view.View.VISIBLE
+                    secondarySurfaceView?.visibility = android.view.View.VISIBLE
+
+                    Log.i(TAG, "*** SurfaceViews created with small display size, waiting for surface creation callbacks ***")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to initialize SurfaceViews", e)
+                }
+            }
+        }
+    }
+
+
+    private fun enqueueError(socket: Socket, error: String) {
+        executor.execute {
+            try {
+                sendErrorResponse(socket, error)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send error response: $error", e)
+            }
+        }
+    }
+
+
     // Video streaming
     // ================== DUAL CAMERA STREAMING SUPPORT ==================
     // FPV camera (always present)
@@ -410,6 +667,10 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     private var cachedRadarInformation: RadarInformation? = null
     @Volatile
     private var cachedPerceptionInformation: PerceptionInfo? = null
+
+    // Projection mode for GPS to screen coordinate conversions
+    enum class ProjectionMode { REAL, HORIZONTAL, FALLBACK }
+    private var projectionMode = ProjectionMode.FALLBACK
     
     // Obstacle data listeners (same pattern as official HSI widget)
     private val radarObstacleDataListener = ObstacleDataListener { data -> 
@@ -534,13 +795,19 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             Log.w(TAG, "Server is already running")
             return
         }
-        
+
+        // Initialize real SurfaceViews for SDK projection
+        if (bridgeActivity is Activity) {
+            activity = bridgeActivity
+            initializeSurfaceViews()
+        }
+
         try {
             serverSocket = ServerSocket(port)
             isRunning = true
-            
+
             Log.i(TAG, "DJI Bridge WebSocket server started on port $port")
-            
+
             // Start accepting client connections
             executor.submit { acceptConnections() }
             
@@ -787,9 +1054,12 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     
     private fun handleIncomingCommand(clientId: String, socket: Socket, message: String) {
         try {
-            Log.d(TAG, "Received command from $clientId: $message")
+            Log.i(TAG, "*** INCOMING COMMAND from $clientId: $message ***")
             val json = JSONObject(message)
-            val messageType = MessageType.fromString(json.getString("type"))
+            val typeString = json.getString("type")
+            Log.i(TAG, "*** COMMAND TYPE STRING: '$typeString' ***")
+            val messageType = MessageType.fromString(typeString)
+            Log.i(TAG, "*** PARSED MESSAGE TYPE: $messageType ***")
             
             when (messageType) {
                 MessageType.JOYSTICK_OVERRIDE -> handleJoystickOverride(clientId, json)
@@ -806,6 +1076,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 MessageType.GIMBAL_FREE_LOOK_UPDATE -> handleGimbalFreeLookUpdate(clientId, json)
                 MessageType.GIMBAL_FREE_LOOK_STOP -> handleGimbalFreeLookStop(clientId, json)
                 MessageType.GIMBAL_RESET -> handleGimbalReset(clientId, json)
+                MessageType.GIMBAL_LOOK_AT -> handleGimbalLookAt(clientId, json)
                 MessageType.FLIGHT_COMMAND -> handleFlightCommand(clientId, json)
                 MessageType.SYSTEM_COMMAND -> handleSystemCommand(clientId, json)
                 MessageType.HEARTBEAT -> handleHeartbeat(clientId, socket)
@@ -872,58 +1143,314 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     }
 
     private fun handleCameraLiveViewLocation(clientId: String, command: JSONObject) {
-        try {
-            val data = command.optJSONObject("data") ?: run {
-                clients[clientId]?.let { sendErrorResponse(it, "camera_live_view_location missing data") }
-                return
-            }
+        Log.i(TAG, "*** handleCameraLiveViewLocation called from client: $clientId ***")
+        Log.i(TAG, "*** Command received: ${command.toString()} ***")
 
-            val latitude = data.optDouble("latitude", Double.NaN)
-            val longitude = data.optDouble("longitude", Double.NaN)
-            val altitude = data.optDouble("altitude", Double.NaN)
-            if (latitude.isNaN() || longitude.isNaN() || altitude.isNaN()) {
-                clients[clientId]?.let { sendErrorResponse(it, "camera_live_view_location requires latitude/longitude/altitude") }
-                return
-            }
+        val data = command.optJSONObject("data") ?: run {
+            Log.e(TAG, "*** ERROR: camera_live_view_location missing data ***")
+            clients[clientId]?.let { sendErrorResponse(it, "camera_live_view_location missing data") }
+            return
+        }
 
-            val componentName = data.optString("camera_index", "LEFT_OR_MAIN").uppercase()
-            val component = ComponentIndexType.values().find { it.name == componentName } ?: ComponentIndexType.LEFT_OR_MAIN
+        val latitude = data.optDouble("latitude", Double.NaN)
+        val longitude = data.optDouble("longitude", Double.NaN)
+        val altitude = data.optDouble("altitude", Double.NaN)
 
-            val requestId = data.optString("request_id", "")
-            val source = data.optString("source", "")
+        Log.i(TAG, "*** Parsed coordinates: lat=$latitude, lon=$longitude, alt=$altitude ***")
 
-            val location = LocationCoordinate3D(latitude, longitude, altitude)
-            val manager = MediaDataCenter.getInstance().cameraStreamManager
-            val pinPointInfo = manager.getLiveViewLocationWithGPS(location, component)
+        if (latitude.isNaN() || longitude.isNaN() || altitude.isNaN()) {
+            Log.e(TAG, "*** ERROR: Invalid coordinates ***")
+            clients[clientId]?.let { sendErrorResponse(it, "camera_live_view_location requires latitude/longitude/altitude") }
+            return
+        }
 
-            val pinPoints = pinPointInfo.pinPoints?.mapIndexed { index, pinPoint ->
-                mapOf(
-                    "index" to index,
-                    "x" to pinPoint.x,
-                    "y" to pinPoint.y
+        val componentName = data.optString("camera_index", "LEFT_OR_MAIN").uppercase(Locale.ROOT)
+        val component = ComponentIndexType.values().find { it.name == componentName } ?: ComponentIndexType.LEFT_OR_MAIN
+        val requestId = data.optString("request_id", "")
+        val source = data.optString("source", "")
+
+        val location = LocationCoordinate3D(latitude, longitude, altitude)
+
+        runOnUiThread {
+            try {
+                // Check if surfaces are ready
+                if (!surfacesReady) {
+                    Log.w(TAG, "*** Surfaces not ready yet, deferring projection for $component ***")
+                    surfaceReadyCallbacks[component] = {
+                        Log.i(TAG, "*** Surface ready callback triggered for $component, executing projection ***")
+                        handleCameraLiveViewLocation(clientId, command)
+                    }
+                    return@runOnUiThread
+                }
+
+                // Get the current video stream source and zoom before projection
+                val currentStreamSource = try {
+                    KeyManager.getInstance().getValue(CameraKey.KeyCameraVideoStreamSource.create(component)) as? CameraVideoStreamSourceType
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not get video stream source: ${e.message}")
+                    null
+                }
+
+                val currentZoom = try {
+                    val zoomLens = when(currentStreamSource) {
+                        CameraVideoStreamSourceType.ZOOM_CAMERA -> CameraLensType.CAMERA_LENS_ZOOM
+                        else -> CameraLensType.CAMERA_LENS_WIDE
+                    }
+                    val zoomKey = KeyTools.createCameraKey<Double>(CameraKey.KeyCameraZoomRatios, component, zoomLens)
+                    KeyManager.getInstance().getValue(zoomKey) ?: 1.0
+                } catch (e: Exception) {
+                    1.0
+                }
+
+                Log.i(TAG, "GPS projection request: camera=$component, stream=$currentStreamSource, zoom=$currentZoom, location=(${latitude}, ${longitude}, ${altitude})")
+
+                // Log surface status
+                Log.i(TAG, "*** Surface status: fpvSurface=${fpvSurface != null}, secondarySurface=${secondarySurface != null} ***")
+
+                // CRITICAL: Must ensure video is actually streaming to the surface for projections
+                when (component) {
+                    ComponentIndexType.FPV -> {
+                        if (fpvSurface != null) {
+                            // Register surface with SDK to receive video - use actual screen dimensions
+                            val screenWidth = activity?.resources?.displayMetrics?.widthPixels ?: 1920
+                            val screenHeight = activity?.resources?.displayMetrics?.heightPixels ?: 1080
+                            MediaDataCenter.getInstance().cameraStreamManager.putCameraStreamSurface(
+                                ComponentIndexType.FPV,
+                                fpvSurface!!,
+                                screenWidth,
+                                screenHeight,
+                                ICameraStreamManager.ScaleType.CENTER_INSIDE
+                            )
+                            cameraVM.setCameraIndex(ComponentIndexType.FPV)
+                            Log.i(TAG, "*** FPV video stream activated for GPS projections ***")
+                        } else {
+                            Log.e(TAG, "*** ERROR: FPV surface is NULL! ***")
+                        }
+                    }
+                    ComponentIndexType.LEFT_OR_MAIN -> {
+                        if (secondarySurface != null) {
+                            // CRITICAL: Register surface with SDK to receive H20N video - use actual screen dimensions
+                            val screenWidth = activity?.resources?.displayMetrics?.widthPixels ?: 1920
+                            val screenHeight = activity?.resources?.displayMetrics?.heightPixels ?: 1080
+                            MediaDataCenter.getInstance().cameraStreamManager.putCameraStreamSurface(
+                                ComponentIndexType.LEFT_OR_MAIN,
+                                secondarySurface!!,
+                                screenWidth,
+                                screenHeight,
+                                ICameraStreamManager.ScaleType.CENTER_INSIDE
+                            )
+
+                            // Also update ViewModels
+                            cameraVM.setCameraIndex(ComponentIndexType.LEFT_OR_MAIN)
+                            cameraVM.putCameraStreamSurface(
+                                secondarySurface!!,
+                                screenWidth,
+                                screenHeight,
+                                ICameraStreamManager.ScaleType.CENTER_INSIDE
+                            )
+
+                            Log.i(TAG, "*** H20N video stream activated on surface for GPS projections ***")
+                        } else {
+                            Log.e(TAG, "*** ERROR: Secondary surface is NULL! ***")
+                        }
+                    }
+                    else -> {
+                        Log.w(TAG, "*** No surface available for camera: $component ***")
+                    }
+                }
+
+                // Set the camera index in both ViewModels
+                cameraVM.setCameraIndex(component)
+                lookAtVM.currentComponentIndexType.value = component
+
+                // Important: Give the ViewModels time to update their internal state
+                Handler(Looper.getMainLooper()).postDelayed({
+                    Log.i(TAG, "*** Inside Handler.postDelayed ***")
+
+                    // Get aircraft's current position - CRITICAL for SDK to calculate relative geometry
+                    val aircraftLocation = try {
+                        val key = FlightControllerKey.KeyAircraftLocation3D.create()
+                        KeyManager.getInstance().getValue(key) as? LocationCoordinate3D
+                    } catch (e: Exception) {
+                        Log.e(TAG, "*** Failed to get aircraft location: ${e.message} ***")
+                        null
+                    }
+
+                    // Get additional altitude information to understand reference frame
+                    val takeoffAltitude = try {
+                        KeyManager.getInstance().getValue(FlightControllerKey.KeyTakeoffLocationAltitude.create()) as? Double
+                    } catch (e: Exception) {
+                        null
+                    }
+
+                    // Get barometric altitude which is more reliable
+                    val barometricAltitude = try {
+                        KeyManager.getInstance().getValue(FlightControllerKey.KeyAltitude.create()) as? Double
+                    } catch (e: Exception) {
+                        null
+                    }
+
+                    // Check stream status before projection
+                    val cameraStreamManager = MediaDataCenter.getInstance().cameraStreamManager
+                    Log.i(TAG, "*** Using cameraStreamManager for component $component ***")
+
+                    // Check if we're using the right camera/lens combination
+                    val currentStreamSource = try {
+                        KeyManager.getInstance().getValue(CameraKey.KeyCameraVideoStreamSource.create(component)) as? CameraVideoStreamSourceType
+                    } catch (e: Exception) {
+                        null
+                    }
+                    Log.i(TAG, "*** Current stream source for $component: $currentStreamSource ***")
+
+                    // Set the LookAtVM's current component to match exactly like the Look At example
+                    lookAtVM.currentComponentIndexType.value = component
+                    Log.i(TAG, "*** Set lookAtVM.currentComponentIndexType to $component ***")
+
+                    // Handle altitude reference frame issues
+                    // Aircraft altitude from SDK is typically MSL (Mean Sea Level)
+                    // If your targets are also MSL, use them directly
+                    // If targets are AGL, convert to MSL by adding takeoff altitude
+
+                    // Get aircraft altitude - SDK typically returns 0 when on ground
+                    val aircraftAlt = aircraftLocation?.altitude ?: 0.0
+                    val targetAlt = location.altitude
+                    val altDiff = targetAlt - aircraftAlt
+
+                    // For display purposes, try to get real altitude
+                    val realAircraftAlt = when {
+                        takeoffAltitude != null && barometricAltitude != null -> {
+                            takeoffAltitude + barometricAltitude
+                        }
+                        barometricAltitude != null -> {
+                            barometricAltitude
+                        }
+                        else -> aircraftAlt
+                    }
+
+                    Log.i(TAG, "*** Altitudes: aircraft=$aircraftAlt (display=$realAircraftAlt), target=$targetAlt, diff=$altDiff ***")
+
+                    // Apply projection mode to determine altitude handling
+                    // SDK REQUIRES matching altitudes or it returns OUT_OF_SCREEN
+                    val adjustedLocation = when (projectionMode) {
+                        ProjectionMode.REAL -> {
+                            // For "real" mode with SDK - we need to handle altitude mismatch
+                            // SDK returns OUT_OF_SCREEN if altitude difference is too large
+                            when {
+                                aircraftAlt == 0.0 && targetAlt > 100 -> {
+                                    // Aircraft on ground, target at high altitude - use aircraft altitude
+                                    LocationCoordinate3D(location.latitude, location.longitude, aircraftAlt)
+                                }
+                                Math.abs(altDiff) < 1000 -> {
+                                    // Reasonable difference - try with actual altitude
+                                    location
+                                }
+                                else -> {
+                                    // Huge difference - use aircraft altitude
+                                    LocationCoordinate3D(location.latitude, location.longitude, aircraftAlt)
+                                }
+                            }
+                        }
+                        ProjectionMode.HORIZONTAL -> {
+                            // Always project at aircraft altitude for horizontal plane
+                            LocationCoordinate3D(location.latitude, location.longitude, aircraftAlt)
+                        }
+                        ProjectionMode.FALLBACK -> {
+                            // Fallback - use aircraft altitude for SDK call
+                            LocationCoordinate3D(location.latitude, location.longitude, aircraftAlt)
+                        }
+                    }
+
+                    Log.i(TAG, "*** Altitude: realAircraft=$realAircraftAlt, rawAircraft=$aircraftAlt, target=$targetAlt, diff=$altDiff, adjusted=${adjustedLocation.altitude}, mode=$projectionMode ***")
+
+                    // Try adding the point to LookAtVM first, like the Look At example does
+                    lookAtVM.addNewPinPoint(adjustedLocation)
+                    Log.i(TAG, "*** Added point to LookAtVM ***")
+
+                    // Try both the LookAtVM and direct SDK call
+                    val pinPointInfo = try {
+                        Log.i(TAG, "*** Calling lookAtVM.getLiveViewLocationWithGPS ***")
+                        val resultFromVM = lookAtVM.getLiveViewLocationWithGPS(adjustedLocation)
+                        Log.i(TAG, "*** VM result: result=${resultFromVM.result}, pinPoints=${resultFromVM.pinPoints?.size}, first point=${resultFromVM.pinPoints?.firstOrNull()?.let { "x=${it.x}, y=${it.y}" }} ***")
+
+                        // Also try calling the SDK directly with the exact same component
+                        Log.i(TAG, "*** Calling MediaDataCenter directly for component $component ***")
+                        val resultFromSDK = MediaDataCenter.getInstance().cameraStreamManager.getLiveViewLocationWithGPS(adjustedLocation, component)
+                        Log.i(TAG, "*** SDK result for $component: result=${resultFromSDK.result}, pinPoints=${resultFromSDK.pinPoints?.size}, first point=${resultFromSDK.pinPoints?.firstOrNull()?.let { "x=${it.x}, y=${it.y}" }} ***")
+
+                        // The SDK needs actual video streaming through the surface for projections to work
+                        if (resultFromSDK.pinPoints?.firstOrNull()?.y == 0.0) {
+                            Log.e(TAG, "*** CRITICAL: SDK returns y=0 even with video streaming ***")
+                            Log.e(TAG, "*** Source: $currentStreamSource ***")
+                            Log.e(TAG, "*** Surface status: fpvSurface=${fpvSurface != null}, secondarySurface=${secondarySurface != null} ***")
+
+                            // Try waiting longer before projection
+                            Thread.sleep(500)
+                            Log.i(TAG, "*** Retrying after 500ms delay ***")
+                            val retryResult = MediaDataCenter.getInstance().cameraStreamManager.getLiveViewLocationWithGPS(adjustedLocation, component)
+                            Log.i(TAG, "*** Retry result: result=${retryResult.result}, first point=${retryResult.pinPoints?.firstOrNull()?.let { "x=${it.x}, y=${it.y}" }} ***")
+                            if (retryResult.pinPoints?.firstOrNull()?.y != 0.0) {
+                                retryResult
+                            } else {
+                                resultFromSDK
+                            }
+                        } else {
+                            resultFromSDK
+                        }
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "*** getLiveViewLocationWithGPS CRASHED: ${t.message} ***", t)
+                        clients[clientId]?.let { socket -> enqueueError(socket, "camera_live_view_location failed: ${t.message}") }
+                        return@postDelayed
+                    }
+
+                val pinPoints = pinPointInfo.pinPoints?.mapIndexed { index, pinPoint ->
+                    mapOf(
+                        "index" to index,
+                        "x" to pinPoint.x,
+                        "y" to pinPoint.y
+                    )
+                } ?: emptyList<Map<String, Any>>()
+
+                Log.d(TAG, "LiveView projection [$component/$source] -> result=${pinPointInfo.result} pinPoints=${pinPoints}")
+
+                val responseData = mapOf(
+                    "component" to component.name,
+                    "request_id" to requestId,
+                    "source" to source,
+                    "valid" to pinPointInfo.isValid,
+                    "result" to pinPointInfo.result?.toString(),
+                    "point_direction" to pinPointInfo.pointDirection?.toString(),
+                    "pin_points" to pinPoints,
+                    "request" to mapOf(
+                        "latitude" to latitude,
+                        "longitude" to longitude,
+                        "altitude" to altitude
+                    ),
+                    "projection_stats" to mapOf(
+                        "mode" to projectionMode.name.lowercase(),
+                        "aircraft" to mapOf(
+                            "lat" to (aircraftLocation?.latitude ?: 0.0),
+                            "lon" to (aircraftLocation?.longitude ?: 0.0),
+                            "alt" to realAircraftAlt  // Show estimated real altitude for display
+                        ),
+                        "target" to mapOf(
+                            "lat" to location.latitude,
+                            "lon" to location.longitude,
+                            "alt" to targetAlt,
+                            "distance" to 0.0  // UI calculates this
+                        ),
+                        "adjusted_alt" to adjustedLocation.altitude,  // What we actually sent to SDK
+                        "sample" to requestId,
+                        "capturedAt" to SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()),
+                        "camera" to component.name
+                    )
                 )
-            } ?: emptyList<Map<String, Any>>()
 
-            val responseData = mapOf(
-                "component" to component.name,
-                "request_id" to requestId,
-                "source" to source,
-                "valid" to pinPointInfo.isValid,
-                "result" to pinPointInfo.result?.toString(),
-                "point_direction" to pinPointInfo.pointDirection?.toString(),
-                "pin_points" to pinPoints,
-                "request" to mapOf(
-                    "latitude" to latitude,
-                    "longitude" to longitude,
-                    "altitude" to altitude
-                )
-            )
-
-            val message = createMessage(MessageType.CAMERA_LIVE_VIEW_LOCATION, responseData)
-            clients[clientId]?.let { sendWebSocketTextFrame(it, message) }
-        } catch (e: Exception) {
-            Log.e(TAG, "camera_live_view_location error: ${e.message}", e)
-            clients[clientId]?.let { sendErrorResponse(it, "camera_live_view_location failed: ${e.message}") }
+                    enqueueMessage(clientId, responseData)
+                }, 50) // Small delay to let ViewModels update
+            } catch (e: Exception) {
+                Log.e(TAG, "camera_live_view_location projection failed", e)
+                clients[clientId]?.let { socket -> enqueueError(socket, "camera_live_view_location failed: ${e.message}") }
+            }
         }
     }
 
@@ -1023,6 +1550,58 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         }
     }
 
+    private fun handleGimbalLookAt(clientId: String, command: JSONObject) {
+        try {
+            val data = command.optJSONObject("data") ?: JSONObject()
+            val latitude = data.getDouble("latitude")
+            val longitude = data.getDouble("longitude")
+            val altitude = data.getDouble("altitude")
+            val modeName = data.optString("mode", "LOOK_AT_GIMBAL_FREE").uppercase()
+
+            // Parse look at mode
+            val lookAtMode = when(modeName) {
+                "LOOK_AT_GIMBAL_FREE", "FREE" -> LookAtMode.LOOK_AT_GIMBAL_FREE
+                "LOOK_AT_GIMBAL_FOLLOWING", "FOLLOWING", "FOLLOW" -> LookAtMode.LOOK_AT_GIMBAL_FOLLOWING
+                "LOOK_AT_ZOOM_CIRCLE", "ZOOM_CIRCLE" -> LookAtMode.LOOK_AT_ZOOM_CIRCLE
+                else -> LookAtMode.LOOK_AT_GIMBAL_FREE
+            }
+
+            val location = LocationCoordinate3D(latitude, longitude, altitude)
+            val lookAtInfo = LookAtInfo().apply {
+                this.location = location
+                this.mode = lookAtMode
+            }
+
+            // Execute look at command
+            val lookAtKey = KeyTools.createKey(FlightControllerKey.KeyLookAt)
+            lookAtKey.action(lookAtInfo,
+                { // Success callback
+                    Log.i(TAG, "Gimbal look at successful: mode=$lookAtMode")
+                    val responseData = mapOf(
+                        "success" to true,
+                        "mode" to lookAtMode.name,
+                        "location" to mapOf(
+                            "latitude" to latitude,
+                            "longitude" to longitude,
+                            "altitude" to altitude
+                        )
+                    )
+                    val message = createMessage(MessageType.GIMBAL_LOOK_AT, responseData)
+                    clients[clientId]?.let { sendWebSocketTextFrame(it, message) }
+                },
+                { error -> // Error callback
+                    Log.e(TAG, "Gimbal look at failed: ${error.description()}")
+                    clients[clientId]?.let {
+                        sendErrorResponse(it, "Gimbal look at failed: ${error.description()}")
+                    }
+                }
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "handleGimbalLookAt error: ${e.message}", e)
+            clients[clientId]?.let { sendErrorResponse(it, "Look at failed: ${e.message}") }
+        }
+    }
+
     private fun handleFlightCommand(clientId: String, command: JSONObject) {
         Log.i(TAG, "Flight command from $clientId: $command")
         // TODO: Implement flight mode changes, RTH, etc.
@@ -1030,27 +1609,48 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     
     private fun handleSystemCommand(clientId: String, command: JSONObject) {
         Log.i(TAG, "System command from $clientId: $command")
-        
+
         try {
             val action = command.optString("action", "")
-            
-            when (action) {
-                "start_video_streaming" -> {
+            val type = command.optString("type", "")
+
+            // Handle both action-based and type-based commands
+            when {
+                type == "set_projection_mode" -> {
+                    val mode = command.optString("mode", "fallback")
+                    projectionMode = when (mode.lowercase()) {
+                        "real" -> ProjectionMode.REAL
+                        "horizontal" -> ProjectionMode.HORIZONTAL
+                        else -> ProjectionMode.FALLBACK
+                    }
+                    Log.i(TAG, "Projection mode set to: $projectionMode")
+
+                    val response = createMessage(MessageType.SYSTEM_STATUS, mapOf(
+                        "projection_mode" to projectionMode.name.lowercase(),
+                        "success" to true
+                    ))
+                    clients[clientId]?.let { socket -> sendWebSocketTextFrame(socket, response) }
+                }
+                type == "clear_projection_stats" -> {
+                    // Clear any cached projection stats if needed
+                    Log.i(TAG, "Clearing projection stats")
+                }
+                action == "start_video_streaming" -> {
                     Log.i(TAG, "Starting video streaming via system command")
                     startVideoStreaming()
                 }
-                "stop_video_streaming" -> {
+                action == "stop_video_streaming" -> {
                     Log.i(TAG, "Stopping video streaming via system command")
                     stopVideoStreaming()
                 }
-                "get_video_stats" -> {
+                action == "get_video_stats" -> {
                     Log.i(TAG, "Getting video streaming stats")
                     val stats = getVideoStreamingStats()
                     val response = createMessage(MessageType.SYSTEM_STATUS, stats)
                     clients[clientId]?.let { socket -> sendWebSocketTextFrame(socket, response) }
                 }
                 else -> {
-                    Log.w(TAG, "Unknown system command action: $action")
+                    Log.w(TAG, "Unknown system command action: $action, type: $type")
                     clients[clientId]?.let { socket ->
                         sendErrorResponse(socket, "Unknown system command action: $action")
                     }
@@ -1196,6 +1796,97 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     // Removed precise look iterative and tap variants per instruction; use tap target only via GIMBAL_TAP_TARGET
 
     // Map current video stream source to camera lens type
+    private fun calculateScreenX(targetBearing: Double, gimbalYawRelative: Double, streamSource: CameraVideoStreamSourceType?, zoomRatio: Double): Double {
+        // Get horizontal FOV based on camera and zoom
+        val baseFOV = when(streamSource) {
+            CameraVideoStreamSourceType.WIDE_CAMERA -> 84.0  // Wide camera FOV
+            CameraVideoStreamSourceType.ZOOM_CAMERA -> 84.0 / zoomRatio  // Zoom camera FOV changes with zoom
+            CameraVideoStreamSourceType.INFRARED_CAMERA -> 40.0  // Thermal camera FOV
+            else -> 84.0  // Default
+        }
+
+        // Calculate angle difference between target bearing and gimbal yaw
+        var angleDiff = targetBearing - gimbalYawRelative
+        while (angleDiff > 180) angleDiff -= 360
+        while (angleDiff < -180) angleDiff += 360
+
+        // Convert angle to normalized screen coordinate (0-1)
+        // Center is 0.5, edges are 0 and 1
+        val normalizedX = 0.5 + (angleDiff / baseFOV)
+
+        return normalizedX.coerceIn(0.0, 1.0)
+    }
+
+    private fun calculateProjectedY(targetLat: Double, targetLon: Double, targetAlt: Double,
+                                   aircraftLocation: LocationCoordinate3D, gimbalPitch: Double,
+                                   streamSource: CameraVideoStreamSourceType?, zoomRatio: Double): Double {
+        // Get vertical FOV based on camera and zoom
+        val baseFOV = when(streamSource) {
+            CameraVideoStreamSourceType.WIDE_CAMERA -> 53.0  // Wide camera vertical FOV
+            CameraVideoStreamSourceType.ZOOM_CAMERA -> 53.0 / zoomRatio  // Zoom camera FOV changes with zoom
+            CameraVideoStreamSourceType.INFRARED_CAMERA -> 31.0  // Thermal camera vertical FOV
+            else -> 53.0  // Default
+        }
+
+        // Calculate distance to target
+        val R = 6371000.0 // Earth radius in meters
+        val dLat = Math.toRadians(targetLat - aircraftLocation.latitude)
+        val dLon = Math.toRadians(targetLon - aircraftLocation.longitude)
+        val a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(Math.toRadians(aircraftLocation.latitude)) * Math.cos(Math.toRadians(targetLat)) *
+                Math.sin(dLon/2) * Math.sin(dLon/2)
+        val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
+        val horizontalDistance = R * c
+
+        // Calculate altitude difference and angle
+        val altitudeDiff = targetAlt - aircraftLocation.altitude
+        val angleToTarget = Math.toDegrees(Math.atan2(altitudeDiff, horizontalDistance))
+
+        // Calculate angle difference from gimbal pitch
+        val angleDiff = angleToTarget - (-gimbalPitch) // Gimbal pitch is negative when pointing down
+
+        // Convert to screen coordinate (0=top, 1=bottom)
+        val normalizedY = 0.5 - (angleDiff / baseFOV)
+
+        Log.d(TAG, "*** Y calculation: gimbalPitch=$gimbalPitch, angleToTarget=$angleToTarget, angleDiff=$angleDiff, FOV=$baseFOV, y=$normalizedY ***")
+
+        return normalizedY.coerceIn(0.0, 1.0)
+    }
+
+    private fun calculateScreenY(targetLat: Double, targetLon: Double, targetAlt: Double,
+                                 aircraftLocation: LocationCoordinate3D, gimbalPitch: Double,
+                                 streamSource: CameraVideoStreamSourceType?, zoomRatio: Double): Double {
+        // Get vertical FOV based on camera and zoom
+        val baseFOV = when(streamSource) {
+            CameraVideoStreamSourceType.WIDE_CAMERA -> 53.0  // Wide camera vertical FOV
+            CameraVideoStreamSourceType.ZOOM_CAMERA -> 53.0 / zoomRatio  // Zoom camera FOV changes with zoom
+            CameraVideoStreamSourceType.INFRARED_CAMERA -> 31.0  // Thermal camera vertical FOV
+            else -> 53.0  // Default
+        }
+
+        // Calculate distance to target
+        val R = 6371000.0 // Earth radius in meters
+        val dLat = Math.toRadians(targetLat - aircraftLocation.latitude)
+        val dLon = Math.toRadians(targetLon - aircraftLocation.longitude)
+        val a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(Math.toRadians(aircraftLocation.latitude)) * Math.cos(Math.toRadians(targetLat)) *
+                Math.sin(dLon/2) * Math.sin(dLon/2)
+        val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
+        val horizontalDistance = R * c
+
+        // Calculate altitude difference and angle
+        val altitudeDiff = targetAlt - aircraftLocation.altitude
+        val angleToTarget = Math.toDegrees(Math.atan2(altitudeDiff, horizontalDistance))
+
+        // Calculate angle difference from gimbal pitch
+        val angleDiff = angleToTarget - (-gimbalPitch) // Gimbal pitch is negative when pointing down
+
+        // Convert to screen coordinate (0=top, 1=bottom)
+        val normalizedY = 0.5 - (angleDiff / baseFOV)
+
+        return normalizedY.coerceIn(0.0, 1.0)
+    }
+
     private fun getActiveCameraLens(cameraIndex: ComponentIndexType): CameraLensType {
         return try {
             val src = KeyManager.getInstance().getValue(CameraKey.KeyCameraVideoStreamSource.create(cameraIndex)) as? CameraVideoStreamSourceType
@@ -1270,10 +1961,45 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         val tp = call(info, "getTargetPoint")
         val tx = (call(tp, "getX") as? Number)?.toDouble()
         val ty = (call(tp, "getY") as? Number)?.toDouble()
+
+        // Get current aircraft altitude and ground elevation for correction
+        val aircraftLocation = try {
+            KeyManager.getInstance().getValue(FlightControllerKey.KeyAircraftLocation3D.create()) as? LocationCoordinate3D
+        } catch (e: Exception) { null }
+
+        val takeoffAltitude = capturedTakeoffAltitude ?: try {
+            KeyManager.getInstance().getValue(FlightControllerKey.KeyTakeoffLocationAltitude.create()) as? Double
+        } catch (e: Exception) { null } ?: 109.0  // Default ground elevation
+
         val data = mutableMapOf<String, Any>()
         distance?.let { data["distance_m"] = it }
-        if (lat != null && lon != null) {
-            data["waypoint"] = mapOf("lat" to lat, "lon" to lon, "alt_m" to (alt ?: 0.0))
+        if (lat != null && lon != null && alt != null) {
+            // The laser rangefinder altitude might be relative or absolute
+            // DJI Pilot likely expects AMSL (absolute), so we may need to correct it
+
+            // Log both raw and corrected values for debugging
+            val rawAlt = alt
+            val aircraftAlt = aircraftLocation?.altitude ?: 0.0
+
+            // Check if the altitude seems to be relative (close to aircraft altitude difference)
+            // or absolute (larger values suggesting AMSL)
+            val correctedAlt = if (alt < 200) {
+                // Likely relative altitude - add ground elevation to get AMSL
+                alt + takeoffAltitude
+            } else {
+                // Likely already AMSL
+                alt
+            }
+
+            Log.i("CAMERA_LASER", "LRF altitude: raw=$rawAlt, aircraft=$aircraftAlt, takeoff=$takeoffAltitude, corrected=$correctedAlt")
+
+            data["waypoint"] = mapOf(
+                "lat" to lat,
+                "lon" to lon,
+                "alt_m" to correctedAlt,
+                "alt_raw" to rawAlt,  // Include raw value for debugging
+                "alt_relative" to (rawAlt - takeoffAltitude)  // Relative altitude for reference
+            )
         }
         if (tx != null && ty != null) {
             data["target_point"] = mapOf("x" to tx, "y" to ty)
@@ -1939,9 +2665,11 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
 
                 // Gimbal + optics snapshot for H20N (LEFT_OR_MAIN)
                 "gimbals" to listOfNotNull(
-                    collectGimbalSnapshot(ComponentIndexType.LEFT_OR_MAIN, keyManager)
+                    collectGimbalSnapshot(ComponentIndexType.LEFT_OR_MAIN, keyManager),
+                    collectGimbalSnapshot(ComponentIndexType.FPV, keyManager)
                 ),
-                "camera_optics" to collectCameraOpticsSnapshot(ComponentIndexType.LEFT_OR_MAIN, keyManager)
+                "camera_optics" to collectCameraOpticsSnapshot(ComponentIndexType.LEFT_OR_MAIN, keyManager),
+                "fpv_optics" to collectCameraOpticsSnapshot(ComponentIndexType.FPV, keyManager).takeIf { it.isNotEmpty() }
             )
         } catch (e: Exception) {
             Log.w(TAG, "Failed to collect telemetry data: ${e.message}")
@@ -2182,11 +2910,11 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             
             // ================== START FPV CAMERA STREAM (Always Present) ==================
             Log.i(TAG, "Starting FPV video streaming from camera ${fpvCameraIndex.name}")
-            
+
             try {
                 // Add FPV stream listener
                 cameraStreamManager.addReceiveStreamListener(fpvCameraIndex, fpvVideoStreamListener)
-                
+
                 // Enable FPV camera stream
                 cameraStreamManager.enableStream(fpvCameraIndex, true)
                 
@@ -2198,18 +2926,34 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 Log.i(TAG, "FPV video streaming started successfully")
                 
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to start FPV video streaming", e)
+                Log.e(TAG, "Failed to start FPV video streaming, will retry", e)
                 isFpvStreamEnabled = false
+
+                // Retry FPV stream registration with the existing surface
+                fpvSurface?.let { surface ->
+                    Thread {
+                        Thread.sleep(1000)  // Wait 1 second before retry
+                        val screenWidth = activity?.resources?.displayMetrics?.widthPixels ?: 1920
+                        val screenHeight = activity?.resources?.displayMetrics?.heightPixels ?: 1080
+                        registerCameraStreamWithRetry(
+                            componentIndex = ComponentIndexType.FPV,
+                            surface = surface,
+                            width = screenWidth,
+                            height = screenHeight,
+                            surfaceName = "FPV (retry from streaming)"
+                        )
+                    }.start()
+                }
             }
             
             // ================== START SECONDARY CAMERA STREAM (Optional) ==================
             if (isSecondaryCameraAvailable) {
                 Log.i(TAG, "Starting secondary video streaming from camera ${secondaryCameraIndex.name}")
-                
+
                 try {
                     // Add secondary stream listener
                     cameraStreamManager.addReceiveStreamListener(secondaryCameraIndex, secondaryVideoStreamListener)
-                    
+
                     // Enable secondary camera stream
                     cameraStreamManager.enableStream(secondaryCameraIndex, true)
                     
@@ -2221,9 +2965,26 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                     Log.i(TAG, "Secondary video streaming started successfully")
                     
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to start secondary video streaming", e)
+                    Log.e(TAG, "Failed to start secondary video streaming, will retry", e)
                     isSecondaryStreamEnabled = false
-                    Log.w(TAG, "Continuing with FPV-only streaming")
+
+                    // Retry secondary stream registration with the existing surface
+                    secondarySurface?.let { surface ->
+                        Thread {
+                            Thread.sleep(1000)  // Wait 1 second before retry
+                            val screenWidth = activity?.resources?.displayMetrics?.widthPixels ?: 1920
+                            val screenHeight = activity?.resources?.displayMetrics?.heightPixels ?: 1080
+                            registerCameraStreamWithRetry(
+                                componentIndex = ComponentIndexType.LEFT_OR_MAIN,
+                                surface = surface,
+                                width = screenWidth,
+                                height = screenHeight,
+                                surfaceName = "H20N/Secondary (retry from streaming)"
+                            )
+                        }.start()
+                    }
+
+                    Log.w(TAG, "Continuing with FPV-only streaming while retrying secondary")
                 }
             } else {
                 Log.i(TAG, "Secondary camera not available - streaming FPV only")
@@ -2297,12 +3058,12 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                     
                     // Remove FPV stream listener
                     cameraStreamManager.removeReceiveStreamListener(fpvVideoStreamListener)
-                    
+
                     // Disable FPV camera stream
                     cameraStreamManager.enableStream(fpvCameraIndex, false)
-                    
+
                     Log.i(TAG, "FPV streaming stopped. Stats: ${fpvFramesStreamed} frames, ${fpvBytesStreamed / 1024 / 1024} MB")
-                    
+
                 } catch (e: Exception) {
                     Log.e(TAG, "Error stopping FPV video streaming", e)
                 }
@@ -2317,12 +3078,12 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                     
                     // Remove secondary stream listener
                     cameraStreamManager.removeReceiveStreamListener(secondaryVideoStreamListener)
-                    
+
                     // Disable secondary camera stream
                     cameraStreamManager.enableStream(secondaryCameraIndex, false)
-                    
+
                     Log.i(TAG, "Secondary streaming stopped. Stats: ${secondaryFramesStreamed} frames, ${secondaryBytesStreamed / 1024 / 1024} MB")
-                    
+
                 } catch (e: Exception) {
                     Log.e(TAG, "Error stopping secondary video streaming", e)
                 }

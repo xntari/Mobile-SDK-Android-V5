@@ -3,7 +3,7 @@ import { visionPanelControls } from './VisionPanel';
 import { visionRTPanelControls } from './VisionRealtimePanel';
 import { agentPanelControls } from './AgentPanel';
 import { fpvCameraPanelControls, h20nCameraPanelControls } from './CameraPanel';
-import { mapPanelControls, hsiPanelControls, controllerPanelControls, orientationPanelControls } from './panelControls';
+import { mapPanelControls, hsiPanelControls, controllerPanelControls, orientationPanelControls, projectionPanelControls } from './panelControls';
 import {
   getSavedLayouts,
   saveLayout,
@@ -77,6 +77,12 @@ const panelControls: PanelControl[] = [
     title: 'Orientation Debug',
     isVisible: orientationPanelControls.isVisible,
     setVisible: orientationPanelControls.setVisible
+  },
+  {
+    id: 'projection',
+    title: 'Projection Controls',
+    isVisible: projectionPanelControls.isVisible,
+    setVisible: projectionPanelControls.setVisible
   }
 ];
 

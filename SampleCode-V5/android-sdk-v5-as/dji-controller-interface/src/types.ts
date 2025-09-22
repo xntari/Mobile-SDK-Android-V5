@@ -89,6 +89,15 @@ export interface TelemetryData extends BridgeMessage {
     display_fov?: { horizontal?: number; vertical?: number };
     laser_measurement?: string;
   };
+  fpv_optics?: {
+    index?: string;
+    lens?: string;
+    lens_type?: string;
+    zoom_ratio?: number;
+    zoom_range?: { min?: number; max?: number };
+    focal_length?: number;
+    display_fov?: { horizontal?: number; vertical?: number };
+  };
 }
 
 export interface BatteryData extends BridgeMessage {
