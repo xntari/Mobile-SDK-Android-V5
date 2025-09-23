@@ -27,6 +27,7 @@ import { bridgeManager } from "../bridgeManager";
 import { OrientationPanel } from "./OrientationPanel";
 import { ProjectionControls } from "./ProjectionControls";
 import { FlightCommandsPanel } from "./FlightCommandsPanel";
+import { PreflightPanel } from "./PreflightPanel";
 
 export const App: React.FC = () => {
   const { bridgeData, connectionStatus } = useStableBridgeData();
@@ -382,6 +383,11 @@ export const App: React.FC = () => {
             telemetry={bridgeData.telemetry}
             history={bridgeData.flightCommandLog}
             controller={bridgeData.controller}
+          />
+
+          <PreflightPanel
+            preflight={bridgeData.preflight}
+            history={bridgeData.flightCommandLog}
           />
 
           <OrientationPanel

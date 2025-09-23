@@ -52,6 +52,15 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
     return true;
   });
   useEffect(()=>{ try { localStorage.setItem('fpv.hud.enabled', JSON.stringify(hudEnabled)); } catch{} }, [hudEnabled]);
+  const [hudTheme, setHudTheme] = useState<'classic' | 'contrast'>(() => {
+    try {
+      const raw = localStorage.getItem('fpv.hud.theme');
+      if (raw === 'contrast') return 'contrast';
+    } catch {}
+    return 'classic';
+  });
+  useEffect(()=>{ try { localStorage.setItem('fpv.hud.theme', hudTheme); } catch{} }, [hudTheme]);
+  const toggleHudTheme = () => setHudTheme(prev => prev === 'contrast' ? 'classic' : 'contrast');
 
   useEffect(() => {
     const unsubscribe = objectMemoryTargetStore.subscribe(setObjectTarget);
@@ -1284,15 +1293,31 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(({
                   {hudEnabled? 'On':'Off'}
                 </button>
               </div>
+              <div>
+                <span className="text-gray-400">Style: </span>
+                <button
+                  className={`px-2 py-0.5 rounded text-xs ${hudTheme === 'contrast' ? 'bg-status-good/20 text-status-good border border-status-good/60' : 'bg-gray-700 text-gray-200'}`}
+                  onClick={toggleHudTheme}
+                >
+                  {hudTheme === 'contrast' ? 'High Contrast' : 'Classic'}
+                </button>
+              </div>
             </div>
           </div>
           
           {/* HUD Overlay - Center of camera view */}
           {hudEnabled && (
-            <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-30">
+            <div
+              className={`absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-30 ${
+                hudTheme === 'contrast'
+                  ? 'px-6 py-4 rounded-xl border border-status-good/60 bg-black/60 shadow-[0_0_24px_rgba(124,255,104,0.45)] backdrop-blur-sm'
+                  : ''
+              }`}
+            >
               <FlightDisplay
                 telemetryData={telemetryData}
-                size="compact"
+                size={hudTheme === 'contrast' ? 'normal' : 'compact'}
+                theme={hudTheme}
               />
             </div>
           )}

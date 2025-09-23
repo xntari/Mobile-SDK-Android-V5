@@ -78,8 +78,6 @@ import dji.v5.manager.aircraft.virtualstick.VirtualStickState
 import dji.v5.manager.aircraft.virtualstick.VirtualStickStateListener
 import dji.sdk.keyvalue.value.flightcontroller.FlightControlAuthority
 import dji.sdk.keyvalue.value.flightcontroller.FlightControlAuthorityChangeReason
-import dji.v5.manager.intelligent.IntelligentFlightManager
-import dji.v5.manager.intelligent.flyto.FlyToTarget
 import dji.v5.et.createCamera
 import dji.v5.et.create
 import dji.v5.et.action
@@ -430,6 +428,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         VIDEO_FRAME("video_frame"),
         CAMERA_STATUS("camera_status"),
         BATTERY_STATUS("battery_status"),
+        PREFLIGHT_STATUS("preflight_status"),
         GPS_DATA("gps_data"),
         SYSTEM_STATUS("system_status"),
         
@@ -497,6 +496,14 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
 
     // Precise Look state
     @Volatile private var preciseActive = false
+    private var landingMonitorFuture: java.util.concurrent.ScheduledFuture<*>? = null
+    private var landingMonitorClientId: String? = null
+    private var landingMonitorStartedAt: Long = 0L
+    private val landingMonitorTimeoutMs = 15_000L
+    private val landingMonitorAltitudeThreshold = 0.6
+
+    private var preflightFuture: java.util.concurrent.ScheduledFuture<*>? = null
+
     private var preciseFuture: java.util.concurrent.ScheduledFuture<*>? = null
 
     // Virtual stick state tracking
@@ -855,7 +862,8 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             executor.submit { acceptConnections() }
             
             // Start streaming controller data
-            startControllerDataStreaming()
+            telemetryStreamer.start()
+            startPreflightStreaming()
             
             // Register obstacle data listeners (same pattern as HSI widget)
             setupObstacleDataListeners()
@@ -868,9 +876,13 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     
     fun stop() {
         if (!isRunning) return
-        
+
         isRunning = false
-        
+
+        telemetryStreamer.stop()
+        stopPreflightStreaming()
+        cancelLandingMonitor()
+
         // Stop video streaming
         stopVideoStreaming()
         
@@ -1645,239 +1657,114 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         }
     }
 
+    private val diagnosticAggregator = DiagnosticAggregator()
+
+    private val flightCommandHandler = FlightCommandHandler(
+        runOnUiThread = ::runOnUiThread,
+        sendFlightCommandResponse = { clientId, action, success, message, error, extra ->
+            sendFlightCommandResponse(
+                clientId = clientId,
+                action = action,
+                success = success,
+                error = error,
+                message = message,
+                extra = extra ?: emptyMap()
+            )
+        },
+        diagnosticExtrasProvider = { action -> diagnosticAggregator.collectForFlightAction(action) },
+        postActionHook = { clientId, action, success -> handleFlightActionPostHook(clientId, action, success) }
+    )
+
+    private val telemetryStreamer = TelemetryStreamer(
+        scheduler = executor,
+        tag = TAG,
+        hasClients = { clients.isNotEmpty() },
+        controllerSupplier = ::getControllerData,
+        telemetrySupplier = ::createTelemetryDataMessage,
+        batterySupplier = ::createBatteryStatusMessage,
+        broadcast = ::broadcastToClients
+    )
+
     private fun handleFlightCommand(clientId: String, command: JSONObject) {
-        Log.i(TAG, "Flight command from $clientId: $command")
+        flightCommandHandler.handle(clientId, command)
+    }
 
-        val data = command.optJSONObject("data")
-        if (data == null) {
-            sendFlightCommandResponse(clientId, "unknown", success = false, message = "flight_command missing data payload")
-            return
-        }
-
-        val actionRaw = data.optString("action", "")
-        val action = actionRaw.lowercase(Locale.ROOT)
-        if (action.isBlank()) {
-            sendFlightCommandResponse(clientId, actionRaw.ifBlank { "unknown" }, success = false, message = "flight_command requires an action")
-            return
-        }
-
-        val params = data.optJSONObject("params")
-
-        when (action) {
-            "arm_motors" -> {
-                Log.w(TAG, "Deprecated arm_motors command from $clientId")
-                sendFlightCommandResponse(clientId, action, success = false, message = "Manual motor control deprecated; use takeoff/land")
+    private fun startPreflightStreaming() {
+        stopPreflightStreaming()
+        preflightFuture = executor.scheduleAtFixedRate({
+            try {
+                if (clients.isEmpty()) return@scheduleAtFixedRate
+                val snapshot = diagnosticAggregator.buildPreflightSnapshot()
+                val message = createMessage(MessageType.PREFLIGHT_STATUS, snapshot, Priority.HIGH)
+                broadcastToClients(message)
+            } catch (t: Throwable) {
+                Log.e(TAG, "Error streaming preflight status: ${t.message}", t)
             }
+        }, 0, 2, TimeUnit.SECONDS)
+    }
 
-            "arm_motors_virtual" -> {
-                Log.w(TAG, "Deprecated arm_motors_virtual command from $clientId")
-                sendFlightCommandResponse(clientId, action, success = false, message = "Manual motor control deprecated; use takeoff/land")
-            }
+    private fun stopPreflightStreaming() {
+        preflightFuture?.cancel(true)
+        preflightFuture = null
+    }
 
-            "disarm_motors" -> {
-                Log.w(TAG, "Deprecated disarm_motors command from $clientId")
-                sendFlightCommandResponse(clientId, action, success = false, message = "Manual motor control deprecated; use land")
-            }
-
-            "compass_calibrate_start" -> performFlightControllerAction(clientId, action) { success, failure ->
-                FlightControllerKey.KeyStartCompassCalibration.create().action({ success(it) }, failure)
-            }
-
-            "compass_calibrate_stop" -> performFlightControllerAction(clientId, action) { success, failure ->
-                FlightControllerKey.KeyStopCompassCalibration.create().action({ success(it) }, failure)
-            }
-
-            "takeoff" -> performFlightControllerAction(clientId, action) { success, failure ->
-                FlightControllerKey.KeyStartTakeoff.create().action({ success(it) }, failure)
-            }
-
-            "land" -> performFlightControllerAction(clientId, action) { success, failure ->
-                FlightControllerKey.KeyStartAutoLanding.create().action({ success(it) }, failure)
-            }
-
-            "cancel_landing" -> performFlightControllerAction(clientId, action) { success, failure ->
-                FlightControllerKey.KeyStopAutoLanding.create().action({ success(it) }, failure)
-            }
-
-            "confirm_landing" -> performFlightControllerAction(clientId, action) { success, failure ->
-                FlightControllerKey.KeyConfirmLanding.create().action({ success(it) }, failure)
-            }
-
-            "return_home_start" -> performFlightControllerAction(clientId, action) { success, failure ->
-                FlightControllerKey.KeyStartGoHome.create().action({ success(it) }, failure)
-            }
-
-            "return_home_stop" -> performFlightControllerAction(clientId, action) { success, failure ->
-                FlightControllerKey.KeyStopGoHome.create().action({ success(it) }, failure)
-            }
-
-            "virtual_stick_enable" -> toggleVirtualStick(clientId, action, enable = true)
-            "virtual_stick_disable" -> toggleVirtualStick(clientId, action, enable = false)
-            "virtual_stick_override" -> handleVirtualStickOverride(clientId, action, params)
-            "fly_to_prepare" -> handleFlyToPrepare(clientId, action, params)
-            else -> {
-                Log.w(TAG, "Unsupported flight command action '$actionRaw' from $clientId")
-                sendFlightCommandResponse(clientId, actionRaw, success = false, message = "unsupported action")
-            }
+    private fun handleFlightActionPostHook(clientId: String, action: String, success: Boolean) {
+        when (action.lowercase(Locale.ROOT)) {
+            "land", "force_land_start" -> if (success) startLandingMonitor(clientId) else cancelLandingMonitor()
+            "cancel_landing", "force_land_stop", "takeoff" -> cancelLandingMonitor()
         }
     }
 
-    private fun performFlightControllerAction(
-        clientId: String,
-        action: String,
-        executor: (success: (EmptyMsg?) -> Unit, failure: (IDJIError) -> Unit) -> Unit
-    ) {
-        runOnUiThread {
+    private fun startLandingMonitor(clientId: String) {
+        cancelLandingMonitor()
+        landingMonitorClientId = clientId
+        landingMonitorStartedAt = System.currentTimeMillis()
+        landingMonitorFuture = executor.scheduleAtFixedRate({
             try {
-                executor(
-                    { sendFlightCommandResponse(clientId, action, success = true) },
-                    { error -> sendFlightCommandResponse(clientId, action, success = false, error = error) }
-                )
-            } catch (e: Exception) {
-                Log.e(TAG, "Flight action '$action' failed: ${e.message}", e)
-                sendFlightCommandResponse(clientId, action, success = false, message = e.message ?: "exception")
-            }
-        }
-    }
+                val keyManager = KeyManager.getInstance()
+                val motorsOn = (keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyAreMotorsOn)) as? Boolean) ?: false
+                val altitude = (keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyAltitude)) as? Number)?.toDouble() ?: Double.NaN
+                val elapsed = System.currentTimeMillis() - landingMonitorStartedAt
 
-    private fun toggleVirtualStick(clientId: String, action: String, enable: Boolean) {
-        runOnUiThread {
-            try {
-                val manager = VirtualStickManager.getInstance()
-                val callback = object : CommonCallbacks.CompletionCallback {
-                    override fun onSuccess() {
-                        sendFlightCommandResponse(clientId, action, success = true, extra = mapOf("enabled" to enable))
-                    }
-
-                    override fun onFailure(error: IDJIError) {
-                        sendFlightCommandResponse(clientId, action, success = false, error = error)
-                    }
+                val altitudeOk = altitude.isNaN() || altitude <= landingMonitorAltitudeThreshold
+                if (!motorsOn && altitudeOk) {
+                    cancelLandingMonitor()
+                    return@scheduleAtFixedRate
                 }
-                if (enable) {
-                    manager.enableVirtualStick(callback)
-                } else {
-                    manager.disableVirtualStick(callback)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "toggleVirtualStick($enable) failed: ${e.message}", e)
-                sendFlightCommandResponse(clientId, action, success = false, message = e.message ?: "exception")
-            }
-        }
-    }
 
-    private fun handleVirtualStickOverride(clientId: String, action: String, params: JSONObject?) {
-        if (params == null) {
-            sendFlightCommandResponse(clientId, action, success = false, message = "virtual_stick_override requires params")
-            return
-        }
+                if (elapsed >= landingMonitorTimeoutMs) {
+                    val targetClientId = landingMonitorClientId
+                    cancelLandingMonitor()
 
-        val yaw = params.optDouble("yaw", Double.NaN)
-        val throttle = params.optDouble("throttle", Double.NaN)
-        val roll = params.optDouble("roll", Double.NaN)
-        val pitch = params.optDouble("pitch", Double.NaN)
-
-        runOnUiThread {
-            try {
-                val manager = VirtualStickManager.getInstance()
-                val leftHorizontal = mapNormalizedStickValue(yaw)
-                val leftVertical = mapNormalizedStickValue(throttle)
-                val rightHorizontal = mapNormalizedStickValue(roll)
-                val rightVertical = mapNormalizedStickValue(pitch)
-
-                manager.leftStick.horizontalPosition = leftHorizontal
-                manager.leftStick.verticalPosition = leftVertical
-                manager.rightStick.horizontalPosition = rightHorizontal
-                manager.rightStick.verticalPosition = rightVertical
-
-                val extra = mapOf(
-                    "joystick" to mapOf(
-                        "left_horizontal" to leftHorizontal,
-                        "left_vertical" to leftVertical,
-                        "right_horizontal" to rightHorizontal,
-                        "right_vertical" to rightVertical
+                    val monitorExtra = mutableMapOf<String, Any?>(
+                        "landing_monitor" to mapOf(
+                            "elapsed_ms" to elapsed,
+                            "motors_on" to motorsOn,
+                            "altitude" to altitude
+                        )
                     )
-                )
-                sendFlightCommandResponse(clientId, action, success = true, extra = extra)
-            } catch (e: Exception) {
-                Log.e(TAG, "virtual_stick_override failed: ${e.message}", e)
-                sendFlightCommandResponse(clientId, action, success = false, message = e.message ?: "exception")
-            }
-        }
-    }
-
-    private fun mapNormalizedStickValue(value: Double): Int {
-        if (value.isNaN()) return 0
-        val normalized = value.coerceIn(-1.0, 1.0)
-        return (normalized * 660).toInt().coerceIn(-660, 660)
-    }
-
-    private fun handleFlyToPrepare(clientId: String, action: String, params: JSONObject?) {
-        if (params == null) {
-            sendFlightCommandResponse(clientId, action, success = false, message = "fly_to_prepare requires params")
-            return
-        }
-
-        val targetJson = params.optJSONObject("target_location")
-        if (targetJson == null) {
-            sendFlightCommandResponse(clientId, action, success = false, message = "fly_to_prepare requires target_location")
-            return
-        }
-
-        val latitude = targetJson.optDouble("latitude", Double.NaN)
-        val longitude = targetJson.optDouble("longitude", Double.NaN)
-        if (latitude.isNaN() || longitude.isNaN()) {
-            sendFlightCommandResponse(clientId, action, success = false, message = "target_location must include latitude and longitude")
-            return
-        }
-
-        val altitude = if (targetJson.has("altitude")) targetJson.optDouble("altitude", Double.NaN) else Double.NaN
-        val maxSpeed = if (params.has("max_speed")) params.optDouble("max_speed", Double.NaN) else Double.NaN
-        val securityTakeoffHeight = if (params.has("security_takeoff_height")) params.optDouble("security_takeoff_height", Double.NaN) else Double.NaN
-        val mode = params.optString("mode", "")
-
-        val targetLocation = LocationCoordinate3D(latitude, longitude, if (altitude.isNaN()) 0.0 else altitude)
-        val flyToTarget = FlyToTarget()
-        flyToTarget.targetLocation = targetLocation
-        if (!altitude.isNaN()) {
-            flyToTarget.targetLocation.altitude = altitude
-        }
-        if (!maxSpeed.isNaN()) {
-            flyToTarget.maxSpeed = maxSpeed.toInt()
-        }
-        if (!securityTakeoffHeight.isNaN()) {
-            flyToTarget.securityTakeoffHeight = securityTakeoffHeight.toInt()
-        }
-
-        runOnUiThread {
-            try {
-                IntelligentFlightManager.getInstance().flyToMissionManager.startMission(
-                    flyToTarget,
-                    null,
-                    object : CommonCallbacks.CompletionCallback {
-                        override fun onSuccess() {
-                            val extra = mutableMapOf<String, Any?>(
-                                "target_location" to mapOf(
-                                    "latitude" to latitude,
-                                    "longitude" to longitude,
-                                    "altitude" to if (altitude.isNaN()) null else altitude
-                                )
-                            )
-                            if (!maxSpeed.isNaN()) extra["max_speed"] = maxSpeed
-                            if (!securityTakeoffHeight.isNaN()) extra["security_takeoff_height"] = securityTakeoffHeight
-                            if (mode.isNotBlank()) extra["mode"] = mode
-                            sendFlightCommandResponse(clientId, action, success = true, extra = extra)
-                        }
-
-                        override fun onFailure(error: IDJIError) {
-                            sendFlightCommandResponse(clientId, action, success = false, error = error)
-                        }
+                    diagnosticAggregator.collectForFlightAction("land_monitor")?.let { monitorExtra.putAll(it) }
+                    targetClientId?.let { id ->
+                        sendFlightCommandResponse(
+                            clientId = id,
+                            action = "land_monitor",
+                            success = false,
+                            message = "Landing not confirmed within ${landingMonitorTimeoutMs / 1000}s",
+                            extra = monitorExtra
+                        )
                     }
-                )
-            } catch (e: Exception) {
-                Log.e(TAG, "fly_to_prepare failed: ${e.message}", e)
-                sendFlightCommandResponse(clientId, action, success = false, message = e.message ?: "exception")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Landing monitor error: ${t.message}", t)
             }
-        }
+        }, 4_000, 1_000, TimeUnit.MILLISECONDS)
+    }
+
+    private fun cancelLandingMonitor() {
+        landingMonitorFuture?.cancel(true)
+        landingMonitorFuture = null
+        landingMonitorClientId = null
+        landingMonitorStartedAt = 0L
     }
 
     private fun sendFlightCommandResponse(
@@ -2601,53 +2488,6 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         val digest = MessageDigest.getInstance("SHA-1")
         val hash = digest.digest(combined.toByteArray(StandardCharsets.UTF_8))
         return Base64.getEncoder().encodeToString(hash)
-    }
-    
-    private fun startControllerDataStreaming() {
-        // Stream controller data every 50ms (20Hz) to connected clients
-        executor.scheduleAtFixedRate({
-            try {
-                if (clients.isNotEmpty()) {
-                    val controllerData = getControllerData()
-                    Log.d(TAG, "Streaming controller data to ${clients.size} clients: ${controllerData.length} bytes")
-                    broadcastToClients(controllerData)
-                } else {
-                    Log.d(TAG, "No clients connected - not streaming controller data")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error streaming controller data", e)
-            }
-        }, 100, 50, TimeUnit.MILLISECONDS)
-        
-        // Stream telemetry data every 200ms (5Hz) to connected clients
-        executor.scheduleAtFixedRate({
-            try {
-                if (clients.isNotEmpty()) {
-                    val telemetryData = createTelemetryDataMessage()
-                    Log.d(TAG, "Streaming telemetry to ${clients.size} clients: ${telemetryData.length} bytes")
-                    broadcastToClients(telemetryData)
-                } else {
-                    Log.d(TAG, "No clients connected - not streaming telemetry")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error streaming telemetry data", e)
-            }
-        }, 200, 200, TimeUnit.MILLISECONDS)
-        
-        // Stream battery data every 1000ms (1Hz) to connected clients
-        executor.scheduleAtFixedRate({
-            try {
-                if (clients.isNotEmpty()) {
-                    val batteryData = createBatteryStatusMessage()
-                    Log.d(TAG, "Streaming battery status to ${clients.size} clients: ${batteryData.length} bytes")
-                    broadcastToClients(batteryData)
-                } else {
-                    Log.d(TAG, "No clients connected - not streaming battery data")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error streaming battery data", e)
-            }
-        }, 500, 1000, TimeUnit.MILLISECONDS)
     }
     
     // Message creation utilities with proper JSON serialization

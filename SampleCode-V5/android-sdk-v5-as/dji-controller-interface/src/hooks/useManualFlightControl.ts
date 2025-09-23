@@ -17,6 +17,28 @@ interface AxisState {
   pitch: number;
 }
 
+type SensitivityPreset = "precision" | "normal" | "aggressive";
+
+const SENSITIVITY_PRESETS: Record<
+  SensitivityPreset,
+  { pitch: number; roll: number; throttle: number; yaw: number }
+> = {
+  precision: { pitch: 0.35, roll: 0.35, throttle: 0.35, yaw: 0.3 },
+  normal: { pitch: 0.6, roll: 0.6, throttle: 0.6, yaw: 0.5 },
+  aggressive: { pitch: 0.85, roll: 0.85, throttle: 0.75, yaw: 0.7 },
+};
+
+type ManualNotification = {
+  type: "kill" | "override";
+  message: string;
+  timestamp: number;
+};
+
+interface ManualAnalytics {
+  commandCount: number;
+  sessionStart: number | null;
+}
+
 const createZeroAxes = (): AxisState => ({
   yaw: 0,
   throttle: 0,
@@ -25,10 +47,6 @@ const createZeroAxes = (): AxisState => ({
 });
 const AXIS_EPSILON = 0.02;
 const CONTROL_TICK_MS = 60; // ~16 Hz command stream
-const PITCH_SCALE = 0.6;
-const ROLL_SCALE = 0.6;
-const THROTTLE_SCALE = 0.6;
-const YAW_SCALE = 0.5;
 const MOUSE_YAW_SENSITIVITY = 1 / 300;
 const MOUSE_YAW_DECAY = 0.65;
 
@@ -60,6 +78,8 @@ interface ManualFlightControlState {
   pointerLocked: boolean;
   lastCommandMs: number | null;
   error: string | null;
+  notification: ManualNotification | null;
+  analytics: ManualAnalytics;
 }
 
 interface VirtualStickSnapshot {
@@ -76,8 +96,11 @@ interface ManualFlightControlHook {
   start: () => Promise<void>;
   stop: () => Promise<void>;
   kill: () => Promise<void>;
+  acknowledgeNotification: () => void;
   togglePointerLock: () => void;
   pointerLockSupported: boolean;
+  sensitivity: SensitivityPreset;
+  setSensitivity: (preset: SensitivityPreset) => void;
 }
 
 const clamp = (value: number, min: number, max: number) =>
@@ -113,6 +136,8 @@ export const useManualFlightControl = (
     pointerLocked: false,
     lastCommandMs: null,
     error: null,
+    notification: null,
+    analytics: { commandCount: 0, sessionStart: null },
   });
 
   const stateRef = useRef(state);
@@ -120,13 +145,54 @@ export const useManualFlightControl = (
     stateRef.current = state;
   }, [state]);
 
+  const [sensitivity, setSensitivity] = useState<SensitivityPreset>(() => {
+    try {
+      const raw = localStorage.getItem("manualControl.sensitivity");
+      if (raw === "precision" || raw === "aggressive" || raw === "normal") {
+        return raw as SensitivityPreset;
+      }
+    } catch {}
+    return "normal";
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("manualControl.sensitivity", sensitivity);
+    } catch {}
+  }, [sensitivity]);
+
+  const preset = useMemo(() => SENSITIVITY_PRESETS[sensitivity], [sensitivity]);
+
   const keysRef = useRef<Set<string>>(new Set());
   const mouseYawRef = useRef(0);
   const tickTimerRef = useRef<number | null>(null);
   const sendingRef = useRef(false);
   const lastCommandRef = useRef<number | null>(null);
+  const lastOverrideEventRef = useRef<string | null>(null);
 
   const pointerSupported = useMemo(pointerLockAvailable, []);
+
+  const createNotification = useCallback(
+    (
+      type: ManualNotification["type"],
+      message: string,
+    ): ManualNotification => ({
+      type,
+      message,
+      timestamp: Date.now(),
+    }),
+    [],
+  );
+
+  const acknowledgeNotification = useCallback(() => {
+    setState((prev) =>
+      prev.notification
+        ? {
+            ...prev,
+            notification: null,
+          }
+        : prev,
+    );
+  }, []);
 
   const computeAxisWithKeys = useCallback(
     (positive: string[], negative: string[], scale: number) => {
@@ -143,25 +209,25 @@ export const useManualFlightControl = (
       pitch: computeAxisWithKeys(
         KEY_GROUPS.forward,
         KEY_GROUPS.backward,
-        PITCH_SCALE,
+        preset.pitch,
       ),
       roll: computeAxisWithKeys(
         KEY_GROUPS.rollRight,
         KEY_GROUPS.rollLeft,
-        ROLL_SCALE,
+        preset.roll,
       ),
       throttle: computeAxisWithKeys(
         KEY_GROUPS.throttleUp,
         KEY_GROUPS.throttleDown,
-        THROTTLE_SCALE,
+        preset.throttle,
       ),
       yaw: computeAxisWithKeys(
         KEY_GROUPS.yawRight,
         KEY_GROUPS.yawLeft,
-        YAW_SCALE,
+        preset.yaw,
       ),
     }),
-    [computeAxisWithKeys],
+    [computeAxisWithKeys, preset],
   );
 
   const updateAxesSnapshot = useCallback(() => {
@@ -273,6 +339,10 @@ export const useManualFlightControl = (
           setState((prev) => ({
             ...prev,
             lastCommandMs: now,
+            analytics: {
+              ...prev.analytics,
+              commandCount: prev.analytics.commandCount + 1,
+            },
           }));
         }
 
@@ -328,7 +398,14 @@ export const useManualFlightControl = (
         axes: createZeroAxes(),
         lastCommandMs: Date.now(),
         error: null,
+        notification: null,
+        analytics: { commandCount: 0, sessionStart: Date.now() },
       }));
+      console.info(
+        "[ManualControl] Virtual stick enabled (sensitivity:",
+        sensitivity,
+        ")",
+      );
     } catch (error) {
       const message =
         error instanceof Error
@@ -339,9 +416,10 @@ export const useManualFlightControl = (
         active: false,
         status: "error",
         error: message,
+        analytics: { commandCount: 0, sessionStart: null },
       }));
     }
-  }, [sendFlightCommand]);
+  }, [sendFlightCommand, sensitivity]);
 
   const stop = useCallback(async () => {
     if (!stateRef.current.active && stateRef.current.status !== "arming") {
@@ -355,6 +433,7 @@ export const useManualFlightControl = (
       status: "stopping",
       axes: createZeroAxes(),
       pointerLocked: false,
+      analytics: { ...prev.analytics, sessionStart: null },
     }));
 
     try {
@@ -380,7 +459,9 @@ export const useManualFlightControl = (
         ...prev,
         status: "idle",
         error: null,
+        analytics: { ...prev.analytics, sessionStart: null },
       }));
+      console.info("[ManualControl] Virtual stick disabled");
     } catch (error) {
       const message =
         error instanceof Error
@@ -390,12 +471,17 @@ export const useManualFlightControl = (
         ...prev,
         status: "error",
         error: message,
+        analytics: { ...prev.analytics, sessionStart: null },
       }));
     }
   }, [cleanupSession, sendFlightCommand]);
 
   const kill = useCallback(async () => {
     cleanupSession({ exitPointerLock: true });
+    const killNotification = createNotification(
+      "kill",
+      "Kill switch executed; manual control released",
+    );
     setState((prev) => ({
       ...prev,
       active: false,
@@ -403,6 +489,8 @@ export const useManualFlightControl = (
       axes: createZeroAxes(),
       pointerLocked: false,
       error: null,
+      notification: killNotification,
+      analytics: { commandCount: 0, sessionStart: null },
     }));
 
     try {
@@ -424,7 +512,7 @@ export const useManualFlightControl = (
         error: message,
       }));
     }
-  }, [cleanupSession, sendFlightCommand]);
+  }, [cleanupSession, createNotification, sendFlightCommand]);
 
   const handleKeyDown = useCallback(
     (event: KeyboardEvent) => {
@@ -608,22 +696,44 @@ export const useManualFlightControl = (
         axes: createZeroAxes(),
         pointerLocked: false,
         error: prev.error ?? "Virtual stick disabled externally",
+        analytics: { commandCount: 0, sessionStart: null },
       }));
+      lastOverrideEventRef.current = null;
       return;
     }
 
-    if (manualOverride || (owner && owner !== "APP" && owner !== "UNKNOWN")) {
+    const authorityTransferred =
+      manualOverride || (owner && owner !== "APP" && owner !== "UNKNOWN");
+    if (authorityTransferred) {
       cleanupSession({ exitPointerLock: true });
-      setState((prev) => ({
-        ...prev,
-        active: false,
-        status: "lost",
-        axes: createZeroAxes(),
-        pointerLocked: false,
-        error: `Virtual stick authority transferred to ${owner || "controller"}`,
-      }));
+      const overrideKey = `${owner ?? "unknown"}-${manualOverride}`;
+      setState((prev) => {
+        const overrideMessage = `Virtual stick authority transferred to ${
+          owner || "controller"
+        }`;
+        const nextState: ManualFlightControlState = {
+          ...prev,
+          active: false,
+          status: "lost",
+          axes: createZeroAxes(),
+          pointerLocked: false,
+          error: overrideMessage,
+          notification: prev.notification,
+          analytics: { commandCount: 0, sessionStart: null },
+        };
+        if (lastOverrideEventRef.current !== overrideKey) {
+          nextState.notification = createNotification(
+            "override",
+            overrideMessage,
+          );
+          lastOverrideEventRef.current = overrideKey;
+        }
+        return nextState;
+      });
+    } else {
+      lastOverrideEventRef.current = null;
     }
-  }, [cleanupSession, controller, state.active]);
+  }, [cleanupSession, controller, state.active, createNotification]);
 
   useEffect(
     () => () => {
@@ -661,7 +771,10 @@ export const useManualFlightControl = (
     start,
     stop,
     kill,
+    acknowledgeNotification,
     togglePointerLock,
     pointerLockSupported: pointerSupported,
+    sensitivity,
+    setSensitivity,
   };
 };

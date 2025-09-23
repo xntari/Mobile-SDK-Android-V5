@@ -4,13 +4,35 @@ import { TelemetryData } from '../types';
 interface FlightDisplayProps {
   telemetryData: TelemetryData | null;
   size?: 'compact' | 'normal';
+  theme?: 'classic' | 'contrast';
 }
 
 export const FlightDisplay: React.FC<FlightDisplayProps> = ({ 
   telemetryData, 
-  size = 'compact' 
+  size = 'compact',
+  theme = 'classic'
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  const themeStyles = theme === 'contrast'
+    ? {
+        color: '#8aff68',
+        lineWidth: 2.6,
+        headingFont: '24px monospace',
+        labelFont: '18px monospace',
+        ladderFont: '16px monospace',
+        velocityFont: '14px monospace',
+        background: 'rgba(0,0,0,0.65)'
+      }
+    : {
+        color: '#00FF00',
+        lineWidth: 2,
+        headingFont: '16px monospace',
+        labelFont: '14px monospace',
+        ladderFont: '12px monospace',
+        velocityFont: '12px monospace',
+        background: undefined as string | undefined
+      };
 
   const drawHUD = (
     ctx: CanvasRenderingContext2D,
@@ -26,9 +48,16 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
     const centerY = height / 2;
     
     // Set green color for all HUD elements
-    ctx.strokeStyle = '#00FF00';
-    ctx.fillStyle = '#00FF00';
-    ctx.lineWidth = 2;
+    if (themeStyles.background) {
+      ctx.save();
+      ctx.fillStyle = themeStyles.background;
+      ctx.fillRect(0, 0, width, height);
+      ctx.restore();
+    }
+
+    ctx.strokeStyle = themeStyles.color;
+    ctx.fillStyle = themeStyles.color;
+    ctx.lineWidth = themeStyles.lineWidth;
 
     if (attitude) {
       ctx.save();
@@ -61,7 +90,7 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
         
         // Add pitch labels
         if (pitch % 20 === 0) {
-          ctx.font = '12px monospace';
+          ctx.font = themeStyles.ladderFont;
           ctx.textAlign = 'center';
           ctx.fillText(Math.abs(pitch).toString(), -lineLength/2 - 15, lineY + 4);
           ctx.fillText(Math.abs(pitch).toString(), lineLength/2 + 15, lineY + 4);
@@ -92,7 +121,7 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
     ctx.stroke();
     
     // Draw altitude on far right side
-    ctx.font = '16px monospace';
+    ctx.font = themeStyles.labelFont;
     ctx.textAlign = 'left';
     ctx.fillText(`${Math.round(altitude)}m`, width - 80, centerY - 20);
     ctx.fillText('AMSL', width - 80, centerY - 5);
@@ -103,12 +132,14 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
     ctx.fillText('m/s', 80, centerY - 5);
     
     // Draw heading at top
+    ctx.font = themeStyles.headingFont;
     ctx.textAlign = 'center';
     ctx.fillText(`${Math.round(heading).toString().padStart(3, '0')}°`, centerX, 40);
     ctx.fillText('HDG', centerX, 60);
 
     if (velocity) {
       ctx.textAlign = 'left';
+      ctx.font = themeStyles.velocityFont;
       const baseX = 20;
       let baseY = height - 70;
       ctx.fillText(`VX ${velocity.x.toFixed(1)} m/s`, baseX, baseY);
@@ -156,7 +187,7 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
       heading,
       telemetryData?.velocity_vector
     );
-  }, [telemetryData, size]);
+  }, [telemetryData, size, theme]);
 
   const sizeConfig = size === 'compact' 
     ? { width: 300, height: 200 }

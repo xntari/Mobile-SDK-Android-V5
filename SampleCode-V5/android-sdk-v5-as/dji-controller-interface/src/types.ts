@@ -9,6 +9,20 @@ export interface TelemetryDiagnosticEntry {
   level_value?: number | null;
 }
 
+export interface DeviceStatusInfo {
+  code?: string;
+  label?: string;
+  description?: string;
+  level?: string;
+}
+
+export interface LandingMonitorInfo {
+  elapsed_ms?: number;
+  motors_on?: boolean;
+  altitude?: number;
+  [key: string]: any;
+}
+
 export interface BridgeMessage {
   type: string;
   version: string;
@@ -38,6 +52,16 @@ export interface FlightCommandAck extends BridgeMessage {
   max_speed?: number;
   security_takeoff_height?: number;
   mode?: string;
+  diagnostics?: TelemetryDiagnosticEntry[];
+  device_status?: DeviceStatusInfo | null;
+  source?: string;
+  landing_monitor?: LandingMonitorInfo;
+}
+
+export interface PreflightStatus extends BridgeMessage {
+  type: 'preflight_status';
+  diagnostics: TelemetryDiagnosticEntry[];
+  device_status?: DeviceStatusInfo | null;
 }
 
 export interface ControllerData extends BridgeMessage {
@@ -191,12 +215,14 @@ export interface BridgeDataState {
   battery: BatteryData | null;
   camera: CameraData | null;
   flightCommandLog: FlightCommandAck[];
+  preflight: PreflightStatus | null;
   lastUpdated: {
     controller?: number;
     telemetry?: number;
     battery?: number;
     camera?: number;
     flightCommand?: number;
+    preflight?: number;
   };
 }
 

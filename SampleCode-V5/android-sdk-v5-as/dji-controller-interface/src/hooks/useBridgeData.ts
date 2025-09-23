@@ -7,8 +7,42 @@ import {
   CameraData,
   ConnectionStatus,
   FlightCommandAck,
-  BridgeCommand 
+  BridgeCommand,
+  PreflightStatus,
+  TelemetryDiagnosticEntry,
+  DeviceStatusInfo
 } from '../types';
+
+const sanitizeDiagnostic = (entry: any): TelemetryDiagnosticEntry | null => {
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+  const code = entry.code ?? entry.information_code;
+  const level = entry.warning_level ?? entry.level;
+  return {
+    code: typeof code === 'string' || typeof code === 'number' ? String(code) : undefined,
+    title: typeof entry.title === 'string' ? entry.title : undefined,
+    description: typeof entry.description === 'string' ? entry.description : undefined,
+    component_id: typeof entry.component_id === 'number' ? entry.component_id : undefined,
+    sensor_index: typeof entry.sensor_index === 'number' ? entry.sensor_index : undefined,
+    level: typeof level === 'string' ? level.toLowerCase() : undefined,
+    level_value: typeof entry.level_value === 'number' ? entry.level_value : null,
+  };
+};
+
+const sanitizeDeviceStatus = (status: any): DeviceStatusInfo | null => {
+  if (!status || typeof status !== 'object') {
+    return null;
+  }
+  return {
+    code: typeof status.code === 'string' ? status.code : (typeof status.status_code === 'string' ? status.status_code : undefined),
+    label: typeof status.label === 'string' ? status.label : undefined,
+    description: typeof status.description === 'string' ? status.description : undefined,
+    level: typeof status.level === 'string'
+      ? status.level.toLowerCase()
+      : (typeof status.warning_level === 'string' ? status.warning_level.toLowerCase() : undefined),
+  };
+};
 
 export const useBridgeData = () => {
   const [bridgeData, setBridgeData] = useState<BridgeDataState>({
@@ -17,6 +51,7 @@ export const useBridgeData = () => {
     battery: null,
     camera: null,
     flightCommandLog: [],
+    preflight: null,
     lastUpdated: {},
   });
 
@@ -99,6 +134,29 @@ export const useBridgeData = () => {
         }));
         break;
 
+      case 'preflight_status':
+        const diagList = Array.isArray(message.diagnostics)
+          ? (message.diagnostics as any[])
+              .map(entry => sanitizeDiagnostic(entry))
+              .filter(Boolean) as TelemetryDiagnosticEntry[]
+          : [];
+        const deviceStatus = sanitizeDeviceStatus(message.device_status);
+        const snapshot = {
+          type: 'preflight_status',
+          version: message.version || '1.0',
+          timestamp: message.timestamp || timestamp,
+          priority: message.priority || 'normal',
+          diagnostics: diagList,
+          device_status: deviceStatus || undefined,
+        } as PreflightStatus;
+
+        setBridgeData(prev => ({
+          ...prev,
+          preflight: snapshot,
+          lastUpdated: { ...prev.lastUpdated, preflight: timestamp }
+        }));
+        break;
+
       case 'flight_command':
         setBridgeData(prev => {
           const ack = {
@@ -106,6 +164,17 @@ export const useBridgeData = () => {
             status: message.status || message.result || 'unknown',
             action: message.action || 'unknown'
           } as FlightCommandAck;
+          if (Array.isArray(message.diagnostics)) {
+            ack.diagnostics = (message.diagnostics as any[])
+              .map(entry => sanitizeDiagnostic(entry))
+              .filter(Boolean) as TelemetryDiagnosticEntry[];
+          }
+          if (message.device_status) {
+            ack.device_status = sanitizeDeviceStatus(message.device_status);
+          }
+          if (message.landing_monitor && typeof message.landing_monitor === 'object') {
+            ack.landing_monitor = { ...message.landing_monitor } as any;
+          }
           const history = [...prev.flightCommandLog, ack];
           const MAX_HISTORY = 20;
           const trimmed = history.length > MAX_HISTORY ? history.slice(history.length - MAX_HISTORY) : history;
@@ -135,6 +204,7 @@ export const useBridgeData = () => {
         battery: null,
         camera: null,
         flightCommandLog: [],
+        preflight: null,
         lastUpdated: {},
       });
     }

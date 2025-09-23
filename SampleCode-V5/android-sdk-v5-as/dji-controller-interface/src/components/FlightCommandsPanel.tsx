@@ -1,8 +1,14 @@
 import React from "react";
 import { Panel } from "./Panel";
-import { TelemetryData, FlightCommandAck, ControllerData } from "../types";
+import {
+  TelemetryData,
+  FlightCommandAck,
+  ControllerData,
+  TelemetryDiagnosticEntry,
+} from "../types";
 import { useBridgeCommands } from "../hooks/useBridgeCommands";
 import { useManualFlightControl } from "../hooks/useManualFlightControl";
+import { Notification } from "./Modal";
 
 interface FlightCommandsPanelProps {
   telemetry: TelemetryData | null;
@@ -22,6 +28,25 @@ type CommandSpec = {
   params?:
     | Record<string, any>
     | ((telemetry: TelemetryData | null) => Record<string, any> | undefined);
+};
+
+const diagnosticLevelClass = (level?: string | null) => {
+  if (!level) return "text-gray-400";
+  const normalized = level.toLowerCase();
+  if (normalized.includes("error") || normalized.includes("critical"))
+    return "text-status-error";
+  if (normalized.includes("warn") || normalized.includes("caution"))
+    return "text-yellow-300";
+  if (normalized.includes("good") || normalized.includes("normal"))
+    return "text-status-good";
+  return "text-gray-400";
+};
+
+const summarizeDiagnostic = (diag: TelemetryDiagnosticEntry): string => {
+  if (diag.title) return diag.title;
+  if (diag.description) return diag.description;
+  if (diag.code) return String(diag.code);
+  return "Diagnostic";
 };
 
 const COMMAND_GROUPS: Array<{ title: string; commands: CommandSpec[] }> = [
@@ -69,6 +94,23 @@ const COMMAND_GROUPS: Array<{ title: string; commands: CommandSpec[] }> = [
         action: "confirm_landing",
         label: "Confirm Landing",
         tone: "success",
+      },
+    ],
+  },
+  {
+    title: "Emergency",
+    commands: [
+      {
+        action: "force_land_start",
+        label: "Force Land",
+        tone: "danger",
+        requireConfirm: true,
+        confirmationText: "FORCE?",
+      },
+      {
+        action: "force_land_stop",
+        label: "Abort Force",
+        tone: "danger",
       },
     ],
   },
@@ -237,6 +279,13 @@ const CommandButton: React.FC<CommandButtonProps> = ({
               ? (pendingMessage ?? "No bridge response")
               : "Awaiting command"}
       </div>
+      {ack?.diagnostics && ack.diagnostics.length > 0 && (
+        <div
+          className={`text-[10px] leading-tight ${diagnosticLevelClass(ack.diagnostics[0].level)}`}
+        >
+          {summarizeDiagnostic(ack.diagnostics[0])}
+        </div>
+      )}
       {(failureMessage || localError) && (
         <div className="text-[11px] text-status-error leading-tight">
           {failureMessage ?? localError}
@@ -290,6 +339,60 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
   >(new Map());
   const pendingMetaRef = React.useRef(pendingMeta);
   const manualControl = useManualFlightControl(controller);
+  const audioContextRef = React.useRef<AudioContext | null>(null);
+  const lastManualCueRef = React.useRef<number | null>(null);
+  const manualState = manualControl.state;
+
+  const playManualCue = React.useCallback((type: "kill" | "override") => {
+    try {
+      const AudioCtor = (window.AudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext) as typeof AudioContext | undefined;
+      if (!AudioCtor) {
+        return;
+      }
+      const context = audioContextRef.current ?? new AudioCtor();
+      audioContextRef.current = context;
+      if (context.state === "suspended") {
+        context.resume().catch(() => undefined);
+      }
+
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      const now = context.currentTime;
+      const frequency = type === "kill" ? 440 : 640;
+
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(frequency, now);
+
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(
+        type === "kill" ? 0.35 : 0.25,
+        now + 0.015,
+      );
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.4);
+
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+
+      oscillator.start(now);
+      oscillator.stop(now + 0.45);
+    } catch (error) {
+      console.warn("Manual control audio cue failed", error);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    const notification = manualState.notification;
+    if (!notification) {
+      return;
+    }
+    if (lastManualCueRef.current === notification.timestamp) {
+      return;
+    }
+    lastManualCueRef.current = notification.timestamp;
+    playManualCue(notification.type);
+  }, [manualState.notification, playManualCue]);
 
   React.useEffect(() => {
     pendingMetaRef.current = pendingMeta;
@@ -422,8 +525,8 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
     return [...history].reverse().slice(0, 6);
   }, [history]);
 
-  const manualState = manualControl.state;
   const manualAxes = manualState.axes;
+  const manualNotification = manualState.notification;
   const manualStatusClass =
     manualState.status === "active"
       ? "text-status-good"
@@ -442,246 +545,336 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
     virtualStick.manualOverride || (vsOwner !== "APP" && vsOwner !== "UNKNOWN")
       ? "text-status-error"
       : "text-gray-300";
+  const lastDiagnostic = lastAck?.diagnostics?.[0];
 
   return (
-    <Panel
-      title="Flight Commands"
-      storageKey="flight.commands.panel"
-      visibilityEventType="flightCommandsPanelVisibilityChange"
-      defaultPosition={{ x: 1040, y: 340 }}
-      defaultSize={{ w: 320, h: 420 }}
-    >
-      <div className="flex flex-col gap-4 text-xs text-gray-200 h-full overflow-y-auto">
-        <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
-          <div className="flex justify-between text-[11px] uppercase text-gray-400 mb-1">
-            <span>Status</span>
-            <span>{new Date().toLocaleTimeString()}</span>
-          </div>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[12px]">
-            <div>
-              Motors:{" "}
-              <span className={motorsOn ? "text-status-good" : "text-gray-300"}>
-                {motorsOn ? "ON" : "OFF"}
-              </span>
+    <>
+      <Notification
+        isOpen={Boolean(manualNotification)}
+        onClose={manualControl.acknowledgeNotification}
+        title={
+          manualNotification?.type === "kill"
+            ? "Kill Switch Executed"
+            : "Manual Override"
+        }
+        message={
+          manualNotification?.message ??
+          (manualNotification?.type === "kill"
+            ? "Manual control terminated and virtual stick disabled."
+            : "Authority transferred to hardware controller.")
+        }
+        type={manualNotification?.type === "kill" ? "error" : "info"}
+      />
+      <Panel
+        title="Flight Commands"
+        storageKey="flight.commands.panel"
+        visibilityEventType="flightCommandsPanelVisibilityChange"
+        defaultPosition={{ x: 1040, y: 340 }}
+        defaultSize={{ w: 320, h: 420 }}
+      >
+        <div className="flex flex-col gap-4 text-xs text-gray-200 h-full overflow-y-auto">
+          <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
+            <div className="flex justify-between text-[11px] uppercase text-gray-400 mb-1">
+              <span>Status</span>
+              <span>{new Date().toLocaleTimeString()}</span>
             </div>
-            <div>
-              Mode: <span className="text-white">{flightMode}</span>
-            </div>
-            <div>Alt AGL: {formatAltitude(telemetry?.altitude)}</div>
-            <div>
-              Alt TO: {formatAltitude(telemetry?.altitude_above_takeoff)}
-            </div>
-            <div>Ground Speed: {formatSpeed(telemetry?.speed)}</div>
-            <div>GPS: {gpsLevel}</div>
-            <div>RC Signal: {rcText}</div>
-            <div>
-              Distance Home: {formatAltitude(telemetry?.distance_to_home)}
-            </div>
-          </div>
-          {lastAck && (
-            <div className="mt-2 text-[11px]">
-              <span className="text-gray-400 uppercase">Last Command:</span>
-              <span className="ml-2 text-white">{lastAck.action}</span>
-              <span
-                className={`ml-2 ${lastAck.status === "ok" ? "text-status-good" : "text-status-error"}`}
-              >
-                {lastAck.status.toUpperCase()}
-              </span>
-              {(lastAck.error_message || lastAck.message) && (
-                <span className="ml-2 text-status-error">
-                  {lastAck.error_message || lastAck.message}
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[12px]">
+              <div>
+                Motors:{" "}
+                <span
+                  className={motorsOn ? "text-status-good" : "text-gray-300"}
+                >
+                  {motorsOn ? "ON" : "OFF"}
                 </span>
-              )}
+              </div>
+              <div>
+                Mode: <span className="text-white">{flightMode}</span>
+              </div>
+              <div>Alt AGL: {formatAltitude(telemetry?.altitude)}</div>
+              <div>
+                Alt TO: {formatAltitude(telemetry?.altitude_above_takeoff)}
+              </div>
+              <div>Ground Speed: {formatSpeed(telemetry?.speed)}</div>
+              <div>GPS: {gpsLevel}</div>
+              <div>RC Signal: {rcText}</div>
+              <div>
+                Distance Home: {formatAltitude(telemetry?.distance_to_home)}
+              </div>
             </div>
-          )}
-        </section>
+            {lastAck && (
+              <div className="mt-2 text-[11px]">
+                <span className="text-gray-400 uppercase">Last Command:</span>
+                <span className="ml-2 text-white">{lastAck.action}</span>
+                <span
+                  className={`ml-2 ${lastAck.status === "ok" ? "text-status-good" : "text-status-error"}`}
+                >
+                  {lastAck.status.toUpperCase()}
+                </span>
+                {(lastAck.error_message || lastAck.message) && (
+                  <span className="ml-2 text-status-error">
+                    {lastAck.error_message || lastAck.message}
+                  </span>
+                )}
+                {lastDiagnostic && (
+                  <div
+                    className={`mt-1 ${diagnosticLevelClass(lastDiagnostic.level)} leading-tight`}
+                  >
+                    {summarizeDiagnostic(lastDiagnostic)}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
 
-        <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
-          <div className="flex items-center justify-between mb-1">
-            <div className="text-gray-400 uppercase text-[11px]">
-              Manual Control
+          <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
+            <div className="flex items-center justify-between mb-1">
+              <div className="text-gray-400 uppercase text-[11px]">
+                Manual Control
+              </div>
+              <div className={`text-[11px] font-semibold ${manualStatusClass}`}>
+                {manualState.status.toUpperCase()}
+              </div>
             </div>
-            <div className={`text-[11px] font-semibold ${manualStatusClass}`}>
-              {manualState.status.toUpperCase()}
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[12px] text-gray-200">
+              <div>
+                Virtual Stick:{" "}
+                <span className={vsStatusClass}>
+                  {virtualStick.enabled ? "ENABLED" : "DISABLED"}
+                </span>
+              </div>
+              <div>
+                Authority:{" "}
+                <span className={manualAuthorityBadge}>{vsOwner}</span>
+              </div>
+              <div>
+                Last Command:{" "}
+                <span className="text-gray-300">{manualLastCommand} ago</span>
+              </div>
+              <div>
+                Reason:{" "}
+                <span className="text-gray-300">
+                  {virtualStick.changeReason}
+                </span>
+              </div>
+              <div>
+                Pitch:{" "}
+                <span className="text-gray-200">
+                  {formatAxisPercent(manualAxes.pitch)}
+                </span>
+              </div>
+              <div>
+                Roll:{" "}
+                <span className="text-gray-200">
+                  {formatAxisPercent(manualAxes.roll)}
+                </span>
+              </div>
+              <div>
+                Throttle:{" "}
+                <span className="text-gray-200">
+                  {formatAxisPercent(manualAxes.throttle)}
+                </span>
+              </div>
+              <div>
+                Yaw:{" "}
+                <span className="text-gray-200">
+                  {formatAxisPercent(manualAxes.yaw)}
+                </span>
+              </div>
             </div>
-          </div>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[12px] text-gray-200">
-            <div>
-              Virtual Stick:{" "}
-              <span className={vsStatusClass}>
-                {virtualStick.enabled ? "ENABLED" : "DISABLED"}
-              </span>
-            </div>
-            <div>
-              Authority: <span className={manualAuthorityBadge}>{vsOwner}</span>
-            </div>
-            <div>
-              Last Command:{" "}
-              <span className="text-gray-300">{manualLastCommand} ago</span>
-            </div>
-            <div>
-              Reason:{" "}
-              <span className="text-gray-300">{virtualStick.changeReason}</span>
-            </div>
-            <div>
-              Pitch:{" "}
-              <span className="text-gray-200">
-                {formatAxisPercent(manualAxes.pitch)}
-              </span>
-            </div>
-            <div>
-              Roll:{" "}
-              <span className="text-gray-200">
-                {formatAxisPercent(manualAxes.roll)}
-              </span>
-            </div>
-            <div>
-              Throttle:{" "}
-              <span className="text-gray-200">
-                {formatAxisPercent(manualAxes.throttle)}
-              </span>
-            </div>
-            <div>
-              Yaw:{" "}
-              <span className="text-gray-200">
-                {formatAxisPercent(manualAxes.yaw)}
-              </span>
-            </div>
-          </div>
-          <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
-            <button
-              className={toneClass.primary}
-              onClick={manualControl.start}
-              disabled={manualState.active || manualState.status === "arming"}
-            >
-              {manualState.status === "arming" ? "Enabling…" : "Start Keyboard"}
-            </button>
-            <button
-              className={toneClass.primary}
-              onClick={manualControl.stop}
-              disabled={!manualState.active && manualState.status !== "arming"}
-            >
-              Release Control
-            </button>
-            <button className={toneClass.danger} onClick={manualControl.kill}>
-              Kill Switch (ESC)
-            </button>
-            {manualControl.pointerLockSupported && (
+            <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
               <button
                 className={toneClass.primary}
-                onClick={manualControl.togglePointerLock}
-                disabled={!manualState.active}
+                onClick={manualControl.start}
+                disabled={manualState.active || manualState.status === "arming"}
               >
-                {manualState.pointerLocked
-                  ? "Release Mouse Yaw"
-                  : "Capture Mouse Yaw"}
+                {manualState.status === "arming"
+                  ? "Enabling…"
+                  : "Start Keyboard"}
               </button>
+              <button
+                className={toneClass.primary}
+                onClick={manualControl.stop}
+                disabled={
+                  !manualState.active && manualState.status !== "arming"
+                }
+              >
+                Release Control
+              </button>
+              <button className={toneClass.danger} onClick={manualControl.kill}>
+                Kill Switch (ESC)
+              </button>
+              {manualControl.pointerLockSupported && (
+                <button
+                  className={toneClass.primary}
+                  onClick={manualControl.togglePointerLock}
+                  disabled={!manualState.active}
+                >
+                  {manualState.pointerLocked
+                    ? "Release Mouse Yaw"
+                    : "Capture Mouse Yaw"}
+                </button>
+              )}
+            </div>
+            {virtualStick.manualOverride && (
+              <div className="mt-2 text-[11px] text-status-error">
+                Manual override detected – hardware controller has authority.
+              </div>
             )}
-          </div>
-          {virtualStick.manualOverride && (
-            <div className="mt-2 text-[11px] text-status-error">
-              Manual override detected – hardware controller has authority.
-            </div>
-          )}
-          {manualState.error && (
-            <div className="mt-2 text-[11px] text-status-error">
-              {manualState.error}
-            </div>
-          )}
-          <div className="mt-2 text-[11px] text-gray-400 leading-tight">
-            Bindings: <span className="text-gray-300">WASD</span> pitch/roll,{" "}
-            <span className="text-gray-300">
-              Space / Shift or Arrow Up/Down
-            </span>{" "}
-            vertical,{" "}
-            <span className="text-gray-300">Q/E or Arrow Left/Right</span> yaw,
-            mouse yaw when captured, <span className="text-gray-300">Esc</span>{" "}
-            triggers the kill switch (zeros sticks and disables virtual stick in
-            &lt;200&nbsp;ms).
-          </div>
-        </section>
-
-        {COMMAND_GROUPS.map((group) => (
-          <section key={group.title}>
-            <div className="text-gray-400 uppercase text-[11px] mb-1">
-              {group.title}
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              {group.commands.map((command) => (
-                <CommandButton
-                  key={command.action}
-                  spec={command}
-                  telemetry={telemetry}
-                  acknowledgements={acknowledgements}
-                  isPending={pendingActions.has(command.action)}
-                  pendingMeta={pendingMeta.get(command.action)}
-                  onSend={handleSend}
-                />
-              ))}
+            {manualState.error && (
+              <div className="mt-2 text-[11px] text-status-error">
+                {manualState.error}
+              </div>
+            )}
+            <div className="mt-2 text-[11px] text-gray-400 leading-tight">
+              Bindings: <span className="text-gray-300">WASD</span> pitch/roll,{" "}
+              <span className="text-gray-300">
+                Space / Shift or Arrow Up/Down
+              </span>{" "}
+              vertical,{" "}
+              <span className="text-gray-300">Q/E or Arrow Left/Right</span>{" "}
+              yaw, mouse yaw when captured,{" "}
+              <span className="text-gray-300">Esc</span> triggers the kill
+              switch (zeros sticks and disables virtual stick in
+              &lt;200&nbsp;ms).
             </div>
           </section>
-        ))}
 
-        <section>
-          <div className="text-gray-400 uppercase text-[11px] mb-1">
-            Recent Responses
-          </div>
-          <div className="bg-black/50 border border-gray-700 rounded-md px-2 py-2 flex flex-col gap-1">
-            {recentEvents.length === 0 && (
-              <div className="text-gray-500 text-[11px]">
-                No command responses yet.
+          {COMMAND_GROUPS.map((group) => (
+            <section key={group.title}>
+              <div className="text-gray-400 uppercase text-[11px] mb-1">
+                {group.title}
               </div>
-            )}
-            {recentEvents.map((event) => (
-              <div
-                key={`${event.timestamp}-${event.action}`}
-                className="flex justify-between items-start text-[11px]"
-              >
-                <div>
-                  <div className="text-white capitalize">
-                    {event.action.replace(/_/g, " ")}
-                  </div>
-                  <div
-                    className={
-                      event.error_message || event.status === "error"
-                        ? "text-status-error"
-                        : "text-gray-400"
-                    }
-                  >
-                    {event.error_message ||
-                      event.message ||
-                      (event.status === "error"
-                        ? "Bridge reported failure (no message)"
-                        : "—")}
-                  </div>
-                </div>
-                <div
-                  className={
-                    event.status === "ok"
-                      ? "text-status-good"
-                      : event.status === "error"
-                        ? "text-status-error"
-                        : "text-gray-400"
-                  }
-                >
-                  {event.status.toUpperCase()}
-                  <br />
-                  <span className="text-gray-500">
-                    {new Date(event.timestamp).toLocaleTimeString()}
-                  </span>
-                </div>
+              <div className="grid grid-cols-2 gap-3">
+                {group.commands.map((command) => (
+                  <CommandButton
+                    key={command.action}
+                    spec={command}
+                    telemetry={telemetry}
+                    acknowledgements={acknowledgements}
+                    isPending={pendingActions.has(command.action)}
+                    pendingMeta={pendingMeta.get(command.action)}
+                    onSend={handleSend}
+                  />
+                ))}
               </div>
-            ))}
-            {[...pendingMeta.entries()]
-              .filter(([, meta]) => meta.state !== undefined)
-              .map(([action, meta]) => (
+            </section>
+          ))}
+
+          <section>
+            <div className="text-gray-400 uppercase text-[11px] mb-1">
+              Recent Responses
+            </div>
+            <div className="bg-black/50 border border-gray-700 rounded-md px-2 py-2 flex flex-col gap-1">
+              {recentEvents.length === 0 && (
+                <div className="text-gray-500 text-[11px]">
+                  No command responses yet.
+                </div>
+              )}
+              {recentEvents.map((event) => (
                 <div
-                  key={`pending-${action}`}
+                  key={`${event.timestamp}-${event.action}`}
                   className="flex justify-between items-start text-[11px]"
                 >
                   <div>
                     <div className="text-white capitalize">
-                      {action.replace(/_/g, " ")}
+                      {event.action.replace(/_/g, " ")}
+                    </div>
+                    <div
+                      className={
+                        event.error_message || event.status === "error"
+                          ? "text-status-error"
+                          : "text-gray-400"
+                      }
+                    >
+                      {event.error_message ||
+                        event.message ||
+                        (event.status === "error"
+                          ? "Bridge reported failure (no message)"
+                          : "—")}
+                    </div>
+                    {event.diagnostics && event.diagnostics.length > 0 && (
+                      <div className="mt-1 flex flex-col gap-0.5">
+                        {event.diagnostics.slice(0, 2).map((diag, idx) => (
+                          <div
+                            key={`${event.timestamp}-diag-${idx}`}
+                            className={`text-[10px] leading-tight ${diagnosticLevelClass(diag.level)}`}
+                          >
+                            {summarizeDiagnostic(diag)}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {event.device_status && (
+                      <div className="text-[10px] text-gray-400 mt-1 leading-tight">
+                        Status:{" "}
+                        <span
+                          className={diagnosticLevelClass(
+                            event.device_status.level,
+                          )}
+                        >
+                          {event.device_status.label ||
+                            event.device_status.code ||
+                            "Device"}
+                        </span>
+                        {event.device_status.description && (
+                          <span className="text-gray-400">
+                            {" "}
+                            — {event.device_status.description}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {event.landing_monitor && (
+                      <div className="text-[10px] text-status-error mt-1 leading-tight">
+                        Monitor: motors{" "}
+                        {event.landing_monitor.motors_on ? "ON" : "OFF"};
+                        {typeof event.landing_monitor.altitude === "number" &&
+                          ` alt ${event.landing_monitor.altitude.toFixed(1)}m;`}
+                        {typeof event.landing_monitor.elapsed_ms === "number" &&
+                          ` ${(event.landing_monitor.elapsed_ms / 1000).toFixed(1)}s elapsed`}
+                      </div>
+                    )}
+                  </div>
+                  <div
+                    className={
+                      event.status === "ok"
+                        ? "text-status-good"
+                        : event.status === "error"
+                          ? "text-status-error"
+                          : "text-gray-400"
+                    }
+                  >
+                    {event.status.toUpperCase()}
+                    <br />
+                    <span className="text-gray-500">
+                      {new Date(event.timestamp).toLocaleTimeString()}
+                    </span>
+                  </div>
+                </div>
+              ))}
+              {[...pendingMeta.entries()]
+                .filter(([, meta]) => meta.state !== undefined)
+                .map(([action, meta]) => (
+                  <div
+                    key={`pending-${action}`}
+                    className="flex justify-between items-start text-[11px]"
+                  >
+                    <div>
+                      <div className="text-white capitalize">
+                        {action.replace(/_/g, " ")}
+                      </div>
+                      <div
+                        className={
+                          meta.state === "pending"
+                            ? "text-gray-400"
+                            : "text-status-error"
+                        }
+                      >
+                        {meta.message ??
+                          (meta.state === "pending"
+                            ? "Awaiting bridge response…"
+                            : "No response from bridge")}
+                      </div>
                     </div>
                     <div
                       className={
@@ -690,26 +883,14 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                           : "text-status-error"
                       }
                     >
-                      {meta.message ??
-                        (meta.state === "pending"
-                          ? "Awaiting bridge response…"
-                          : "No response from bridge")}
+                      {meta.state === "pending" ? "PENDING" : "FAILED"}
                     </div>
                   </div>
-                  <div
-                    className={
-                      meta.state === "pending"
-                        ? "text-gray-400"
-                        : "text-status-error"
-                    }
-                  >
-                    {meta.state === "pending" ? "PENDING" : "FAILED"}
-                  </div>
-                </div>
-              ))}
-          </div>
-        </section>
-      </div>
-    </Panel>
+                ))}
+            </div>
+          </section>
+        </div>
+      </Panel>
+    </>
   );
 };
