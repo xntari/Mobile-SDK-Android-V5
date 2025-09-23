@@ -3,12 +3,48 @@ import { TopBarProps } from '../types';
 import { SettingsModal } from './SettingsModal';
 import { ComponentsMenu } from './ComponentsMenu';
 
+const statusLevelClass = (level?: string | null) => {
+  switch ((level || 'normal').toLowerCase()) {
+    case 'serious':
+    case 'serious_warning':
+    case 'critical':
+      return 'text-status-error';
+    case 'warning':
+    case 'caution':
+      return 'text-status-warning';
+    case 'notice':
+      return 'text-status-good';
+    default:
+      return 'text-status-good';
+  }
+};
+
+const signalBarClass = (index: number, activeBars: number) => (
+  index <= activeBars ? 'bg-status-good' : 'bg-gray-600'
+);
+
+const formatStatusLabel = (label?: string | null) => {
+  if (!label) return 'UNKNOWN';
+  return label.replace(/_/g, ' ');
+};
+
 export const TopBar: React.FC<TopBarProps> = ({ 
   batteryData, 
   telemetryData, 
-  controllerData, 
   connectionStatus 
 }) => {
+  const systemStatus = telemetryData?.system_status || null;
+  const diagnostics = telemetryData?.diagnostics || [];
+  const diagnosticsSeverity = telemetryData?.diagnostics_severity || systemStatus?.level || 'normal';
+  const systemDescription = systemStatus?.description || diagnostics[0]?.description || diagnostics[0]?.title || 'All systems nominal';
+
+  const flightMode = telemetryData?.flight_mode || 'UNKNOWN';
+
+  const satelliteCount = telemetryData?.satellite_count ?? 0;
+  const gpsSignalLevel = telemetryData?.gps_signal_level || 'UNKNOWN';
+  const rcSignalQuality = telemetryData?.rc_signal_quality ?? null;
+  const rcBars = rcSignalQuality != null ? Math.round(Math.min(Math.max(rcSignalQuality, 0), 100) / 20) : 0;
+
   const formatTime = (timestamp: number) => {
     return new Date(timestamp).toLocaleTimeString('en-US', { 
       hour12: false, 
@@ -28,22 +64,19 @@ export const TopBar: React.FC<TopBarProps> = ({
   };
 
   const getGPSStatus = () => {
-    if (!telemetryData) return { satellites: 0, quality: 'No Signal', color: 'text-gray-400' };
-    
-    const satellites = telemetryData.satellite_count || 0;
-    const quality = telemetryData.gps_signal_quality || 0;
-    
-    if (satellites >= 10 && quality > 3) {
-      return { satellites, quality: 'Strong', color: 'text-status-good' };
-    } else if (satellites >= 6 && quality > 2) {
-      return { satellites, quality: 'Good', color: 'text-status-warning' };
-    } else {
-      return { satellites, quality: 'Weak', color: 'text-status-error' };
-    }
-  };
+    if (!telemetryData) return { label: 'NO FIX', color: 'text-gray-400' };
 
-  const getFlightMode = () => {
-    return telemetryData?.flight_mode || 'UNKNOWN';
+    const level = (gpsSignalLevel || '').toUpperCase();
+    switch (level) {
+      case 'LEVEL_3':
+        return { label: `Strong (${satelliteCount})`, color: 'text-status-good' };
+      case 'LEVEL_2':
+        return { label: `Fair (${satelliteCount})`, color: 'text-status-warning' };
+      case 'LEVEL_1':
+        return { label: `Weak (${satelliteCount})`, color: 'text-status-error' };
+      default:
+        return { label: satelliteCount > 0 ? `${satelliteCount} sats` : 'No signal', color: 'text-gray-400' };
+    }
   };
 
   const battery = getBatteryStatus();
@@ -54,8 +87,21 @@ export const TopBar: React.FC<TopBarProps> = ({
 
   return (
     <div className="h-16 bg-black bg-opacity-90 border-b border-gray-700 flex items-center justify-between px-6 text-sm">
-      {/* Left Side - System Status */}
+      {/* Left cluster: system status + flight mode */}
       <div className="flex items-center gap-6">
+        <div>
+          <div className={`text-xs uppercase ${statusLevelClass(diagnosticsSeverity)} font-semibold`}>System</div>
+          <div className="text-sm text-gray-200 font-medium">{formatStatusLabel(systemStatus?.label)}</div>
+          <div className="text-[11px] text-gray-400 max-w-xs truncate">{systemDescription}</div>
+        </div>
+        <div>
+          <div className="text-xs uppercase text-gray-400">Flight Mode</div>
+          <div className="text-sm text-dji-blue font-semibold">{flightMode}</div>
+        </div>
+      </div>
+
+      {/* Center cluster: quick status widgets */}
+      <div className="flex items-center gap-8">
         {/* Battery Status */}
         <div className="flex items-center gap-2">
           <div className={`w-6 h-3 border border-gray-400 rounded-sm relative ${battery.color}`}>
@@ -71,24 +117,30 @@ export const TopBar: React.FC<TopBarProps> = ({
           <span className={battery.color}>
             {battery.level}%
           </span>
-          {batteryData?.battery && (
-            <span className="text-gray-400 text-xs">
-              {batteryData.battery.voltage.toFixed(1)}V
-            </span>
-          )}
         </div>
 
         {/* GPS Status */}
-        <div className="flex items-center gap-2">
-          <div className="text-lg">📡</div>
-          <div>
-            <span className={gps.color}>{gps.quality}</span>
-            <span className="text-gray-400 ml-1 text-xs">
-              ({gps.satellites} sats)
-            </span>
-          </div>
+        <div className="flex flex-col leading-tight">
+          <div className="text-xs uppercase text-gray-400">GPS</div>
+          <div className={gps.color}>{gps.label}</div>
         </div>
 
+        {/* RC Signal */}
+        <div className="flex flex-col leading-tight">
+          <div className="text-xs uppercase text-gray-400">RC</div>
+          <div className="flex items-center gap-1">
+            <div className="flex gap-1">
+              {[1,2,3,4,5].map((bar) => (
+                <div key={bar} className={`w-1 h-3 rounded-sm ${signalBarClass(bar, rcBars)}`}></div>
+              ))}
+            </div>
+            <span className="text-gray-300 text-[11px]">{rcSignalQuality != null ? `${rcSignalQuality}%` : '—'}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Right cluster: connection + settings */}
+      <div className="flex items-center gap-6">
         {/* Connection Status */}
         <div className="flex items-center gap-2">
           <div className={`status-indicator ${
@@ -100,52 +152,32 @@ export const TopBar: React.FC<TopBarProps> = ({
             {connectionStatus.toUpperCase()}
           </span>
         </div>
-      </div>
 
-      {/* Center - Flight Mode */}
-      <div className="text-center">
-        <div className="text-lg font-bold text-dji-blue">
-          {getFlightMode()}
-        </div>
+        {/* Timestamp */}
         {telemetryData && (
-          <div className="text-xs text-gray-400">
+          <div className="text-xs text-gray-500">
             {formatTime(telemetryData.timestamp)}
           </div>
         )}
-      </div>
 
-      {/* Right Side - Telemetry + Menu */}
-      <div className="flex items-center gap-6">
-        {/* RC Signal */}
-        <div className="flex items-center gap-2">
-          <div className="text-lg">📶</div>
-          <div>
-            <span className="text-status-good">Strong</span>
-            <div className="text-xs text-gray-400">
-              {controllerData?.virtual_stick_enabled ? 'VIRTUAL' : 'MANUAL'}
-            </div>
-          </div>
+        {/* Window Controls */}
+        <div className="flex items-center gap-1 ml-2">
+          <button
+            className="w-3 h-3 bg-yellow-500 rounded-full hover:bg-yellow-400"
+            onClick={() => window.electronAPI.minimizeWindow()}
+            title="Minimize"
+          />
+          <button
+            className="w-3 h-3 bg-green-500 rounded-full hover:bg-green-400"
+            onClick={() => window.electronAPI.maximizeWindow()}
+            title="Maximize"
+          />
+          <button
+            className="w-3 h-3 bg-red-500 rounded-full hover:bg-red-400"
+            onClick={() => window.electronAPI.closeWindow()}
+            title="Close"
+          />
         </div>
-
-        {/* Altitude */}
-        {telemetryData && (
-          <div className="text-center">
-            <div className="text-xs text-gray-400">ALT</div>
-            <div className="font-mono text-white">
-              {telemetryData.altitude.toFixed(1)}m
-            </div>
-          </div>
-        )}
-
-        {/* Distance to Home */}
-        {telemetryData && (
-          <div className="text-center">
-            <div className="text-xs text-gray-400">DIST</div>
-            <div className="font-mono text-white">
-              {telemetryData.distance_to_home.toFixed(0)}m
-            </div>
-          </div>
-        )}
 
         {/* Components menu */}
         <ComponentsMenu />
@@ -160,27 +192,9 @@ export const TopBar: React.FC<TopBarProps> = ({
             </div>
           )}
         </div>
-
-        {/* Window Controls */}
-        <div className="flex items-center gap-1 ml-4">
-          <button 
-            className="w-3 h-3 bg-yellow-500 rounded-full hover:bg-yellow-400"
-            onClick={() => window.electronAPI.minimizeWindow()}
-            title="Minimize"
-          />
-          <button 
-            className="w-3 h-3 bg-green-500 rounded-full hover:bg-green-400"
-            onClick={() => window.electronAPI.maximizeWindow()}
-            title="Maximize"
-          />
-          <button 
-            className="w-3 h-3 bg-red-500 rounded-full hover:bg-red-400"
-            onClick={() => window.electronAPI.closeWindow()}
-            title="Close"
-          />
-        </div>
       </div>
-      <SettingsModal open={openSettings} onClose={()=>setOpenSettings(false)} initialTab={settingsTab} />
+
+      <SettingsModal open={openSettings} onClose={() => setOpenSettings(false)} initialTab={settingsTab} />
     </div>
   );
 };

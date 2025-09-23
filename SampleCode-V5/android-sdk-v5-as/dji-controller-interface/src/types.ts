@@ -1,4 +1,14 @@
 // Bridge message types
+export interface TelemetryDiagnosticEntry {
+  title?: string;
+  description?: string;
+  code?: string;
+  component_id?: number;
+  sensor_index?: number;
+  level?: string;
+  level_value?: number | null;
+}
+
 export interface BridgeMessage {
   type: string;
   version: string;
@@ -29,6 +39,8 @@ export interface TelemetryData extends BridgeMessage {
   altitude_above_home: number;
   altitude_above_takeoff?: number;
   altitude_barometric?: number;
+  altitude_amsl?: number;
+  altitude_gps_relative?: number;
   altitude_ultrasonic?: number;
   takeoff_altitude?: number;
   motors_on?: boolean;
@@ -51,15 +63,25 @@ export interface TelemetryData extends BridgeMessage {
   flight_mode: string;
   distance_to_home: number;
   heading: number;
-  compass_heading?: number;  // Real magnetometer heading
+  compass_heading?: number;
   home_bearing?: number;
   satellite_count?: number;
-  gps_signal_quality?: number;
+  gps_signal_level?: string;
+  rc_signal_quality?: number;
+  system_status?: {
+    code?: string;
+    label?: string;
+    description?: string;
+    level?: string;
+  } | null;
+  system_status_level?: string;
+  diagnostics?: TelemetryDiagnosticEntry[];
+  diagnostics_severity?: string;
   obstacle_avoidance?: {
     enabled: boolean;
     sectors: Array<{
-      angle: number;      // Angle in degrees (0 = front, clockwise)
-      distance: number;   // Distance in meters
+      angle: number;
+      distance: number;
       warning_level: 'none' | 'caution' | 'warning' | 'critical';
     }>;
   };
@@ -148,7 +170,6 @@ export interface BridgeDataState {
 export interface TopBarProps {
   batteryData: BatteryData | null;
   telemetryData: TelemetryData | null;
-  controllerData: ControllerData | null;
   connectionStatus: ConnectionStatus;
 }
 

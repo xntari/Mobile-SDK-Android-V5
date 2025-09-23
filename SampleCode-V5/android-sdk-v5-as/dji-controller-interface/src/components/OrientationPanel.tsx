@@ -118,7 +118,7 @@ export const OrientationPanel: React.FC<OrientationPanelProps> = ({ telemetry, s
             <div>AGL: {formatNumber(telemetry?.altitude, 1)} m</div>
             <div>Above TO: {formatNumber(telemetry?.altitude_above_takeoff, 1)} m</div>
             <div>TO Alt: {formatNumber(telemetry?.takeoff_altitude, 1)} m</div>
-            <div>AMSL: {formatNumber((telemetry?.takeoff_altitude || 0) + (telemetry?.altitude || 0), 1)} m</div>
+            <div>AMSL: {formatNumber(telemetry?.altitude_amsl ?? ((telemetry?.takeoff_altitude || 0) + (telemetry?.altitude || 0)), 1)} m</div>
             <div>Baro: {formatNumber(telemetry?.altitude_barometric, 1)} m</div>
             {telemetry?.altitude_ultrasonic !== undefined && telemetry?.altitude_ultrasonic !== null && (
               <div>Ultrasonic: {formatNumber(telemetry.altitude_ultrasonic, 1)} m</div>

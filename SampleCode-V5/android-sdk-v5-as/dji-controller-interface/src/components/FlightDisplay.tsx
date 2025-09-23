@@ -141,7 +141,7 @@ export const FlightDisplay: React.FC<FlightDisplayProps> = ({
     // Safely extract telemetry, fallback to zeros
     const attitude = telemetryData?.attitude || { roll: 0, pitch: 0 } as any;
     // Calculate AMSL altitude (takeoff altitude + current altitude)
-    const amslAltitude = (telemetryData?.takeoff_altitude || 0) + (telemetryData?.altitude || 0);
+    const amslAltitude = telemetryData?.altitude_amsl ?? ((telemetryData?.takeoff_altitude || 0) + (telemetryData?.altitude || 0));
     const speed = telemetryData?.speed ?? 0;
     const heading = telemetryData?.compass_heading ?? telemetryData?.heading ?? 0;
 

@@ -26,7 +26,7 @@ export function computeTargetMetrics(
   const aircraftLoc = telemetry.location;
   const targetPos = anchor.object_position;
 
-  const originAltitude = anchor.drone_position.altitude_m ?? aircraftLoc.altitude ?? telemetry.altitude ?? 0;
+  const originAltitude = anchor.drone_position.altitude_m ?? aircraftLoc.altitude ?? telemetry.altitude_amsl ?? ((telemetry.takeoff_altitude || 0) + (telemetry.altitude || 0));
   const targetAltitude = targetPos.altitude_m
     ?? anchor.object_map?.laser_location?.altitude_m
     ?? anchor.object_map?.target_point?.altitude_m
@@ -42,7 +42,7 @@ export function computeTargetMetrics(
   });
 
   const horizontalDistance = Math.sqrt(enu.east ** 2 + enu.north ** 2);
-  const droneAlt = anchor.drone_position.altitude_m ?? aircraftLoc.altitude ?? telemetry.altitude ?? null;
+  const droneAlt = anchor.drone_position.altitude_m ?? aircraftLoc.altitude ?? telemetry.altitude_amsl ?? null;
   const targetAlt = targetAltitude ?? null;
 
   const altitudeDelta = droneAlt != null && targetAlt != null ? targetAlt - droneAlt : null;

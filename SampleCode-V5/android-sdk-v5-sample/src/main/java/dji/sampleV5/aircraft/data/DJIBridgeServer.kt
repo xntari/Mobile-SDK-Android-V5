@@ -13,10 +13,17 @@ import dji.sampleV5.aircraft.models.LookAtVM
 import dji.sampleV5.aircraft.models.CameraStreamDetailVM
 import dji.v5.utils.common.LogUtils
 import dji.v5.common.utils.GpsUtils
-import dji.sdk.keyvalue.key.FlightControllerKey
-import dji.sdk.keyvalue.key.BatteryKey
+import dji.v5.manager.diagnostic.DeviceHealthManager
+import dji.v5.manager.diagnostic.DeviceStatusManager
+import dji.v5.manager.diagnostic.DJIDeviceHealthInfo
+import dji.v5.manager.diagnostic.DJIDeviceStatus
+import dji.v5.manager.diagnostic.WarningLevel
+import dji.sdk.keyvalue.key.AirLinkKey
 import dji.sdk.keyvalue.key.RtkMobileStationKey
 import dji.sdk.keyvalue.value.rtkmobilestation.RTKTakeoffAltitudeInfo
+import dji.sdk.keyvalue.value.flightcontroller.GPSSignalLevel
+import dji.sdk.keyvalue.key.FlightControllerKey
+import dji.sdk.keyvalue.key.BatteryKey
 import dji.sdk.keyvalue.key.KeyTools
 import dji.v5.manager.KeyManager
 import dji.v5.manager.datacenter.MediaDataCenter
@@ -2800,7 +2807,63 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 is Number -> ultrasonicHeightDm.toDouble() / 10.0  // Convert dm to meters
                 else -> null
             }
-            
+
+            // GPS/GNSS telemetry details
+            val gpsSatelliteCount = try {
+                (keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyGPSSatelliteCount)) as? Number)?.toInt()
+            } catch (_: Exception) {
+                null
+            }
+            val gpsSignalLevel = try {
+                FlightControllerKey.KeyGPSSignalLevel.create().let { keyManager.getValue(it) as? GPSSignalLevel }
+            } catch (_: Exception) {
+                null
+            }
+
+            // RC/Airlink telemetry
+            val rcSignalQuality = try {
+                (keyManager.getValue(KeyTools.createKey(AirLinkKey.KeyUpLinkQualityRaw)) as? Number)?.toInt()
+            } catch (_: Exception) {
+                null
+            }
+
+            // Device status & health summaries
+            val deviceStatus = try {
+                DeviceStatusManager.getInstance().currentDJIDeviceStatus
+            } catch (_: Exception) {
+                null
+            }
+            val healthInfos = try {
+                DeviceHealthManager.getInstance().currentDJIDeviceHealthInfos?.filterIsInstance<DJIDeviceHealthInfo>() ?: emptyList()
+            } catch (_: Exception) {
+                emptyList()
+            }
+            var healthSeverityRank = 0
+            val diagnosticEntries = if (healthInfos.isNotEmpty()) {
+                healthInfos.map { info ->
+                    val warningLevel = info.warningLevel()
+                    val entryRank = warningSeverity(warningLevel)
+                    if (entryRank > healthSeverityRank) {
+                        healthSeverityRank = entryRank
+                    }
+                    mapOf(
+                        "title" to info.title(),
+                        "description" to info.description(),
+                        "code" to info.informationCode(),
+                        "component_id" to info.componentId(),
+                        "sensor_index" to info.sensorIndex(),
+                        "level" to warningLevel?.name
+                    )
+                }
+            } else {
+                emptyList()
+            }
+            val diagnosticsSeverityRank = listOfNotNull(
+                deviceStatus?.warningLevel()?.let { warningSeverity(it) },
+                healthSeverityRank.takeIf { it > 0 }
+            ).maxOrNull() ?: 0
+            val diagnosticsSeverity = severityName(diagnosticsSeverityRank)
+
             // Get aircraft velocity
             val velocityKey = KeyTools.createKey(FlightControllerKey.KeyAircraftVelocity)
             val velocity = keyManager.getValue(velocityKey) as? Velocity3D
@@ -2815,6 +2878,20 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 "timestamp" to System.currentTimeMillis(),
                 "bridge_status" to "active",
                 "data_collection_status" to "sdk_integrated",
+                "system_status" to deviceStatus?.let {
+                    mapOf(
+                        "code" to it.statusCode(),
+                        "label" to it.name,
+                        "description" to it.description(),
+                        "level" to it.warningLevel()?.name
+                    )
+                },
+                "system_status_level" to deviceStatus?.warningLevel()?.name,
+                "diagnostics" to diagnosticEntries,
+                "diagnostics_severity" to diagnosticsSeverity,
+                "satellite_count" to gpsSatelliteCount,
+                "gps_signal_level" to gpsSignalLevel?.name,
+                "rc_signal_quality" to rcSignalQuality,
                 
                 // Real flight data with consistent altitude naming
                 "altitude" to baroRelativeAltitude,  // AGL - relative altitude from home
@@ -3639,4 +3716,25 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             Log.w(TAG, "Failed to remove obstacle data listeners: ${e.message}")
         }
     }
+
+
+    private fun warningSeverity(level: WarningLevel?): Int {
+        return when (level) {
+            WarningLevel.SERIOUS_WARNING -> 4
+            WarningLevel.WARNING -> 3
+            WarningLevel.CAUTION -> 2
+            WarningLevel.NOTICE -> 1
+            WarningLevel.NORMAL -> 0
+            else -> 0
+        }
+    }
+
+    private fun severityName(rank: Int): String = when {
+        rank >= 4 -> "serious"
+        rank >= 3 -> "warning"
+        rank >= 2 -> "caution"
+        rank >= 1 -> "notice"
+        else -> "normal"
+    }
+
 }

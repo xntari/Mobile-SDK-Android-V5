@@ -172,7 +172,7 @@ export function projectRayToGround(
   const worldRay = vectorRotate(cameraRay, worldMatrix);
 
   // Aircraft position
-  const aircraftAltitude = telemetry.location?.altitude ?? ((telemetry.takeoff_altitude || 0) + (telemetry.altitude || 0));
+  const aircraftAltitude = telemetry.location?.altitude ?? telemetry.altitude_amsl ?? ((telemetry.takeoff_altitude || 0) + (telemetry.altitude || 0));
   const aircraftPos: GeographicPoint = {
     latitude: telemetry.location.latitude,
     longitude: telemetry.location.longitude,

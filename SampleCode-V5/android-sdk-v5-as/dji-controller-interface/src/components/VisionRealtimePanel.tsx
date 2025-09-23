@@ -1571,7 +1571,7 @@ const ObjectMapSection: React.FC<ObjectMapSectionProps> = ({
     const locationAlt = parseMaybeNumber(originLocationRaw?.altitude);
 
     // Fallback: Use barometric altitude which is also AMSL now
-    const baroAltitude = telemetry?.altitude_barometric || 0;
+    const baroAltitude = telemetry?.altitude_amsl ?? telemetry?.altitude_barometric ?? 0;
 
     // Use location altitude if available, otherwise use barometric
     const originAltitude = locationAlt ?? baroAltitude;

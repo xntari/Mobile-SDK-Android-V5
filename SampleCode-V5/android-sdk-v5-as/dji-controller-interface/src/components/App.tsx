@@ -106,7 +106,6 @@ export const App: React.FC = () => {
         <TopBar
           batteryData={bridgeData.battery}
           telemetryData={bridgeData.telemetry}
-          controllerData={bridgeData.controller}
           connectionStatus={connectionStatus}
         />
 

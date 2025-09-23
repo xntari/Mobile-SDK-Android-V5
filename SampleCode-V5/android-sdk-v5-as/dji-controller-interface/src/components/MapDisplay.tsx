@@ -447,7 +447,7 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
             <div>{telemetryData.location.latitude.toFixed(6)}</div>
             <div>{telemetryData.location.longitude.toFixed(6)}</div>
             <div className="text-yellow-400">
-              {((telemetryData.takeoff_altitude || 0) + (telemetryData.altitude || 0)).toFixed(1)} m AMSL
+              {(telemetryData.altitude_amsl ?? ((telemetryData.takeoff_altitude || 0) + (telemetryData.altitude || 0))).toFixed(1)} m AMSL
             </div>
           </div>
         )}
@@ -459,7 +459,7 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
             <div>{telemetryData.home_location.latitude.toFixed(6)}</div>
             <div>{telemetryData.home_location.longitude.toFixed(6)}</div>
             <div className="text-yellow-400">
-              {(telemetryData.takeoff_altitude || telemetryData.home_location.altitude || 0).toFixed(1)} m AMSL
+              {(telemetryData.home_location.altitude ?? telemetryData.takeoff_altitude ?? 0).toFixed(1)} m AMSL
             </div>
           </div>
         )}
