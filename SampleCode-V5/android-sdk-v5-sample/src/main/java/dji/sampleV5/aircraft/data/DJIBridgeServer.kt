@@ -12,8 +12,11 @@ import dji.sampleV5.aircraft.models.VirtualStickVM
 import dji.sampleV5.aircraft.models.LookAtVM
 import dji.sampleV5.aircraft.models.CameraStreamDetailVM
 import dji.v5.utils.common.LogUtils
+import dji.v5.common.utils.GpsUtils
 import dji.sdk.keyvalue.key.FlightControllerKey
 import dji.sdk.keyvalue.key.BatteryKey
+import dji.sdk.keyvalue.key.RtkMobileStationKey
+import dji.sdk.keyvalue.value.rtkmobilestation.RTKTakeoffAltitudeInfo
 import dji.sdk.keyvalue.key.KeyTools
 import dji.v5.manager.KeyManager
 import dji.v5.manager.datacenter.MediaDataCenter
@@ -62,6 +65,11 @@ import dji.sdk.keyvalue.value.gimbal.CtrlInfo
 import dji.sdk.keyvalue.value.flightcontroller.LookAtInfo
 import dji.sdk.keyvalue.value.flightcontroller.LookAtMode
 import dji.sdk.keyvalue.value.common.EmptyMsg
+import dji.v5.common.callback.CommonCallbacks
+import dji.v5.common.error.IDJIError
+import dji.v5.manager.aircraft.virtualstick.VirtualStickManager
+import dji.v5.manager.intelligent.IntelligentFlightManager
+import dji.v5.manager.intelligent.flyto.FlyToTarget
 import dji.v5.et.createCamera
 import dji.v5.et.create
 import dji.v5.et.action
@@ -1605,9 +1613,258 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
 
     private fun handleFlightCommand(clientId: String, command: JSONObject) {
         Log.i(TAG, "Flight command from $clientId: $command")
-        // TODO: Implement flight mode changes, RTH, etc.
+
+        val data = command.optJSONObject("data")
+        if (data == null) {
+            sendFlightCommandResponse(clientId, "unknown", success = false, message = "flight_command missing data payload")
+            return
+        }
+
+        val actionRaw = data.optString("action", "")
+        val action = actionRaw.lowercase(Locale.ROOT)
+        if (action.isBlank()) {
+            sendFlightCommandResponse(clientId, actionRaw.ifBlank { "unknown" }, success = false, message = "flight_command requires an action")
+            return
+        }
+
+        val params = data.optJSONObject("params")
+
+        when (action) {
+            "takeoff" -> performFlightControllerAction(clientId, action) { success, failure ->
+                FlightControllerKey.KeyStartTakeoff.create().action({ success(it) }, failure)
+            }
+
+            "land" -> performFlightControllerAction(clientId, action) { success, failure ->
+                FlightControllerKey.KeyStartAutoLanding.create().action({ success(it) }, failure)
+            }
+
+            "cancel_landing" -> performFlightControllerAction(clientId, action) { success, failure ->
+                FlightControllerKey.KeyStopAutoLanding.create().action({ success(it) }, failure)
+            }
+
+            "confirm_landing" -> performFlightControllerAction(clientId, action) { success, failure ->
+                FlightControllerKey.KeyConfirmLanding.create().action({ success(it) }, failure)
+            }
+
+            "return_home_start" -> performFlightControllerAction(clientId, action) { success, failure ->
+                FlightControllerKey.KeyStartGoHome.create().action({ success(it) }, failure)
+            }
+
+            "return_home_stop" -> performFlightControllerAction(clientId, action) { success, failure ->
+                FlightControllerKey.KeyStopGoHome.create().action({ success(it) }, failure)
+            }
+
+            "virtual_stick_enable" -> toggleVirtualStick(clientId, action, enable = true)
+            "virtual_stick_disable" -> toggleVirtualStick(clientId, action, enable = false)
+            "virtual_stick_override" -> handleVirtualStickOverride(clientId, action, params)
+            "fly_to_prepare" -> handleFlyToPrepare(clientId, action, params)
+            else -> {
+                Log.w(TAG, "Unsupported flight command action '$actionRaw' from $clientId")
+                sendFlightCommandResponse(clientId, actionRaw, success = false, message = "unsupported action")
+            }
+        }
     }
-    
+
+
+    private fun performFlightControllerAction(
+        clientId: String,
+        action: String,
+        executor: (success: (EmptyMsg?) -> Unit, failure: (IDJIError) -> Unit) -> Unit
+    ) {
+        runOnUiThread {
+            try {
+                executor(
+                    { sendFlightCommandResponse(clientId, action, success = true) },
+                    { error -> sendFlightCommandResponse(clientId, action, success = false, error = error) }
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Flight action '$action' failed: ${e.message}", e)
+                sendFlightCommandResponse(clientId, action, success = false, message = e.message ?: "exception")
+            }
+        }
+    }
+
+    private fun toggleVirtualStick(clientId: String, action: String, enable: Boolean) {
+        runOnUiThread {
+            try {
+                val manager = VirtualStickManager.getInstance()
+                val callback = object : CommonCallbacks.CompletionCallback {
+                    override fun onSuccess() {
+                        sendFlightCommandResponse(clientId, action, success = true, extra = mapOf("enabled" to enable))
+                    }
+
+                    override fun onFailure(error: IDJIError) {
+                        sendFlightCommandResponse(clientId, action, success = false, error = error)
+                    }
+                }
+                if (enable) {
+                    manager.enableVirtualStick(callback)
+                } else {
+                    manager.disableVirtualStick(callback)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "toggleVirtualStick($enable) failed: ${e.message}", e)
+                sendFlightCommandResponse(clientId, action, success = false, message = e.message ?: "exception")
+            }
+        }
+    }
+
+    private fun handleVirtualStickOverride(clientId: String, action: String, params: JSONObject?) {
+        if (params == null) {
+            sendFlightCommandResponse(clientId, action, success = false, message = "virtual_stick_override requires params")
+            return
+        }
+
+        val yaw = params.optDouble("yaw", Double.NaN)
+        val throttle = params.optDouble("throttle", Double.NaN)
+        val roll = params.optDouble("roll", Double.NaN)
+        val pitch = params.optDouble("pitch", Double.NaN)
+
+        runOnUiThread {
+            try {
+                val manager = VirtualStickManager.getInstance()
+                val leftHorizontal = mapNormalizedStickValue(yaw)
+                val leftVertical = mapNormalizedStickValue(throttle)
+                val rightHorizontal = mapNormalizedStickValue(roll)
+                val rightVertical = mapNormalizedStickValue(pitch)
+
+                manager.leftStick.horizontalPosition = leftHorizontal
+                manager.leftStick.verticalPosition = leftVertical
+                manager.rightStick.horizontalPosition = rightHorizontal
+                manager.rightStick.verticalPosition = rightVertical
+
+                val extra = mapOf(
+                    "joystick" to mapOf(
+                        "left_horizontal" to leftHorizontal,
+                        "left_vertical" to leftVertical,
+                        "right_horizontal" to rightHorizontal,
+                        "right_vertical" to rightVertical
+                    )
+                )
+                sendFlightCommandResponse(clientId, action, success = true, extra = extra)
+            } catch (e: Exception) {
+                Log.e(TAG, "virtual_stick_override failed: ${e.message}", e)
+                sendFlightCommandResponse(clientId, action, success = false, message = e.message ?: "exception")
+            }
+        }
+    }
+
+    private fun mapNormalizedStickValue(value: Double): Int {
+        if (value.isNaN()) return 0
+        val normalized = value.coerceIn(-1.0, 1.0)
+        return (normalized * 660).toInt().coerceIn(-660, 660)
+    }
+
+    private fun handleFlyToPrepare(clientId: String, action: String, params: JSONObject?) {
+        if (params == null) {
+            sendFlightCommandResponse(clientId, action, success = false, message = "fly_to_prepare requires params")
+            return
+        }
+
+        val targetJson = params.optJSONObject("target_location")
+        if (targetJson == null) {
+            sendFlightCommandResponse(clientId, action, success = false, message = "fly_to_prepare requires target_location")
+            return
+        }
+
+        val latitude = targetJson.optDouble("latitude", Double.NaN)
+        val longitude = targetJson.optDouble("longitude", Double.NaN)
+        if (latitude.isNaN() || longitude.isNaN()) {
+            sendFlightCommandResponse(clientId, action, success = false, message = "target_location must include latitude and longitude")
+            return
+        }
+
+        val altitude = if (targetJson.has("altitude")) targetJson.optDouble("altitude", Double.NaN) else Double.NaN
+        val maxSpeed = if (params.has("max_speed")) params.optDouble("max_speed", Double.NaN) else Double.NaN
+        val securityTakeoffHeight = if (params.has("security_takeoff_height")) params.optDouble("security_takeoff_height", Double.NaN) else Double.NaN
+        val mode = params.optString("mode", "")
+
+        val targetLocation = LocationCoordinate3D(latitude, longitude, if (altitude.isNaN()) 0.0 else altitude)
+        val flyToTarget = FlyToTarget()
+        flyToTarget.targetLocation = targetLocation
+        if (!altitude.isNaN()) {
+            flyToTarget.targetLocation.altitude = altitude
+        }
+        if (!maxSpeed.isNaN()) {
+            flyToTarget.maxSpeed = maxSpeed.toInt()
+        }
+        if (!securityTakeoffHeight.isNaN()) {
+            flyToTarget.securityTakeoffHeight = securityTakeoffHeight.toInt()
+        }
+
+        runOnUiThread {
+            try {
+                IntelligentFlightManager.getInstance().flyToMissionManager.startMission(
+                    flyToTarget,
+                    null,
+                    object : CommonCallbacks.CompletionCallback {
+                        override fun onSuccess() {
+                            val extra = mutableMapOf<String, Any?>(
+                                "target_location" to mapOf(
+                                    "latitude" to latitude,
+                                    "longitude" to longitude,
+                                    "altitude" to if (altitude.isNaN()) null else altitude
+                                )
+                            )
+                            if (!maxSpeed.isNaN()) extra["max_speed"] = maxSpeed
+                            if (!securityTakeoffHeight.isNaN()) extra["security_takeoff_height"] = securityTakeoffHeight
+                            if (mode.isNotBlank()) extra["mode"] = mode
+                            sendFlightCommandResponse(clientId, action, success = true, extra = extra)
+                        }
+
+                        override fun onFailure(error: IDJIError) {
+                            sendFlightCommandResponse(clientId, action, success = false, error = error)
+                        }
+                    }
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "fly_to_prepare failed: ${e.message}", e)
+                sendFlightCommandResponse(clientId, action, success = false, message = e.message ?: "exception")
+            }
+        }
+    }
+
+    private fun sendFlightCommandResponse(
+        clientId: String,
+        action: String,
+        success: Boolean,
+        error: IDJIError? = null,
+        message: String? = null,
+        extra: Map<String, Any?> = emptyMap()
+    ) {
+        val data = mutableMapOf<String, Any?>(
+            "action" to action,
+            "status" to if (success) "ok" else "error",
+            "timestamp" to System.currentTimeMillis()
+        )
+        error?.let {
+            val errorMessage = try {
+                it.description()
+            } catch (_: Exception) {
+                it.toString()
+            }
+            data["error_message"] = errorMessage
+            data["error_code"] = it.javaClass.simpleName
+        }
+        message?.let { data["message"] = it }
+        if (extra.isNotEmpty()) {
+            data.putAll(extra)
+        }
+
+        val socket = clients[clientId]
+        if (socket == null || socket.isClosed) {
+            Log.w(TAG, "Unable to deliver flight command response for $action - socket unavailable for client $clientId")
+            return
+        }
+
+        try {
+            val response = createMessage(MessageType.FLIGHT_COMMAND, data)
+            sendWebSocketTextFrame(socket, response)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send flight command response for $action: ${e.message}", e)
+        }
+    }
+
     private fun handleSystemCommand(clientId: String, command: JSONObject) {
         Log.i(TAG, "System command from $clientId: $command")
 
@@ -2475,8 +2732,12 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             val aircraft3DLocationKey = KeyTools.createKey(FlightControllerKey.KeyAircraftLocation3D)
             val aircraft3DLocation = keyManager.getValue(aircraft3DLocationKey) as? LocationCoordinate3D
 
-            // IMPORTANT: LocationCoordinate3D.altitude is RELATIVE altitude from takeoff point!
-            val relativeAltitude = aircraft3DLocation?.altitude ?: 0.0
+            // Get barometric relative altitude (what SDK altitude widget uses)
+            val baroAltitudeKey = KeyTools.createKey(FlightControllerKey.KeyAltitude)
+            val baroRelativeAltitude = (keyManager.getValue(baroAltitudeKey) as? Number)?.toDouble() ?: 0.0
+
+            // Keep GPS relative altitude for reference (LocationCoordinate3D.altitude is RELATIVE from takeoff)
+            val gpsRelativeAltitude = aircraft3DLocation?.altitude ?: 0.0
 
             // Capture ground elevation when motors first turn on
             if (areMotorsOn && !lastMotorsOnState && aircraft3DLocation != null) {
@@ -2488,17 +2749,49 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             }
             lastMotorsOnState = areMotorsOn
 
-            // Get takeoff altitude from SDK
+            // Get takeoff location altitude (only valid after takeoff)
             val takeoffAltitudeKey = KeyTools.createKey(FlightControllerKey.KeyTakeoffLocationAltitude)
-            val sdkTakeoffAltitude = (keyManager.getValue(takeoffAltitudeKey) as? Number)?.toDouble()
+            val takeoffLocationAltitude = (keyManager.getValue(takeoffAltitudeKey) as? Number)?.toDouble() ?: 0.0
 
-            // Ground elevation at takeoff location (MSL)
-            val groundElevation = capturedTakeoffAltitude ?: sdkTakeoffAltitude ?: 0.0
+            // Get RTK takeoff altitude info (this is what attitude widget uses for mHomePointAltitude)
+            val rtkTakeoffKey = KeyTools.createKey(RtkMobileStationKey.KeyRTKTakeoffAltitudeInfo)
+            val rtkTakeoffInfo = keyManager.getValue(rtkTakeoffKey) as? RTKTakeoffAltitudeInfo
+            val homePointAltitude = rtkTakeoffInfo?.altitude?.toDouble() ?: takeoffLocationAltitude
 
-            // Calculate ABSOLUTE altitude (AMSL) = ground elevation + relative altitude
-            val absoluteAltitude = groundElevation + relativeAltitude
+            // Get home location
+            val homeLocationKey = KeyTools.createKey(FlightControllerKey.KeyHomeLocation)
+            val homeLocation = keyManager.getValue(homeLocationKey) as? LocationCoordinate2D
 
-            Log.v(TAG, "Altitude: relative=${relativeAltitude}m, ground=${groundElevation}m, AMSL=${absoluteAltitude}m")
+            // Get 2D aircraft location for lat/lon
+            val aircraftLocationKey = KeyTools.createKey(FlightControllerKey.KeyAircraftLocation)
+            val aircraftLocation = keyManager.getValue(aircraftLocationKey) as? LocationCoordinate2D
+
+            // Prepare latitude/longitude for geoid conversion (prefer home location for stability)
+            val conversionLat = when {
+                homeLocation != null && !homeLocation.latitude.isNaN() -> homeLocation.latitude
+                aircraftLocation != null && !aircraftLocation.latitude.isNaN() -> aircraftLocation.latitude
+                aircraft3DLocation != null && !aircraft3DLocation.latitude.isNaN() -> aircraft3DLocation.latitude
+                else -> Double.NaN
+            }
+            val conversionLon = when {
+                homeLocation != null && !homeLocation.longitude.isNaN() -> homeLocation.longitude
+                aircraftLocation != null && !aircraftLocation.longitude.isNaN() -> aircraftLocation.longitude
+                aircraft3DLocation != null && !aircraft3DLocation.longitude.isNaN() -> aircraft3DLocation.longitude
+                else -> Double.NaN
+            }
+
+            // Convert altitude to AMSL exactly like the Attitude Display widget
+            val totalAltitudeEllipsoid = homePointAltitude + baroRelativeAltitude
+            val altitudeAsl = if (!conversionLat.isNaN() && !conversionLon.isNaN()) {
+                GpsUtils.egm96Altitude(totalAltitudeEllipsoid, conversionLat, conversionLon)
+            } else {
+                totalAltitudeEllipsoid
+            }
+
+            // Derive takeoff altitude (ground level) in ASL by removing the relative altitude component
+            val takeoffASL = altitudeAsl - baroRelativeAltitude
+
+            Log.i(TAG, "Altitude Debug -> AGL=${baroRelativeAltitude}m, homePointEllipsoid=${homePointAltitude}m, takeoffASL=${takeoffASL}m, ASL=${altitudeAsl}m")
 
             // Get ultrasonic height (more accurate for low altitudes, returned in decimeters)
             val ultrasonicHeightKey = KeyTools.createKey(FlightControllerKey.KeyUltrasonicHeight)
@@ -2507,14 +2800,6 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 is Number -> ultrasonicHeightDm.toDouble() / 10.0  // Convert dm to meters
                 else -> null
             }
-
-            // Get 2D aircraft location for lat/lon
-            val aircraftLocationKey = KeyTools.createKey(FlightControllerKey.KeyAircraftLocation)
-            val aircraftLocation = keyManager.getValue(aircraftLocationKey) as? LocationCoordinate2D
-
-            // Get home location
-            val homeLocationKey = KeyTools.createKey(FlightControllerKey.KeyHomeLocation)
-            val homeLocation = keyManager.getValue(homeLocationKey) as? LocationCoordinate2D
             
             // Get aircraft velocity
             val velocityKey = KeyTools.createKey(FlightControllerKey.KeyAircraftVelocity)
@@ -2531,38 +2816,40 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 "bridge_status" to "active",
                 "data_collection_status" to "sdk_integrated",
                 
-                // Real flight data with CORRECT altitude values
-                "altitude" to relativeAltitude,  // RELATIVE altitude from takeoff (for compatibility)
-                "altitude_above_takeoff" to relativeAltitude,  // Relative altitude from takeoff
-                "altitude_above_home" to relativeAltitude,  // Relative altitude from home/takeoff
-                "altitude_barometric" to absoluteAltitude,  // ABSOLUTE altitude (AMSL) for Vision Realtime!
+                // Real flight data with consistent altitude naming
+                "altitude" to baroRelativeAltitude,  // AGL - relative altitude from home
+                "altitude_above_takeoff" to baroRelativeAltitude,  // Same as AGL
+                "altitude_above_home" to baroRelativeAltitude,  // AGL - relative from home
+                "altitude_barometric" to altitudeAsl,  // AMSL - barometric altitude
+                "altitude_amsl" to altitudeAsl,  // ASL - for main display (PFD corrected)
+                "altitude_gps_relative" to gpsRelativeAltitude,  // GPS relative for reference
                 "altitude_ultrasonic" to ultrasonicHeight,  // Ultrasonic height (if available)
-                "takeoff_altitude" to groundElevation,  // Ground elevation at takeoff location (AMSL)
+                "takeoff_altitude" to takeoffASL,  // Takeoff location altitude in ASL
                 "motors_on" to areMotorsOn,  // Include motor status for debugging
                 "ground_speed" to groundSpeed,
                 "vertical_speed" to (velocity?.z?.toDouble() ?: 0.0),
                 "flight_mode" to "CONNECTED", // TODO: Get actual flight mode
 
-                // Location data
+                // Location data - use ASL for aircraft position
                 "location" to run {
                     // Use 3D location if available, otherwise fall back to 2D
                     val lat = aircraft3DLocation?.latitude ?: aircraftLocation?.latitude ?: 0.0
                     val lon = aircraft3DLocation?.longitude ?: aircraftLocation?.longitude ?: 0.0
-                    // Use ABSOLUTE altitude (AMSL) for location!
                     mapOf(
                         "latitude" to lat,
                         "longitude" to lon,
-                        "altitude" to absoluteAltitude  // ABSOLUTE altitude (AMSL)
+                        "altitude" to altitudeAsl  // ASL altitude (what PFD shows)
                     )
                 },
 
-                // Home location
+                // Home location - use ASL for home position
                 "home_location" to run {
                     homeLocation?.let {
+                        // Calculate ASL for home location (ground level)
                         mapOf(
                             "latitude" to it.latitude,
                             "longitude" to it.longitude,
-                            "altitude" to groundElevation  // Home altitude is ground elevation (AMSL)
+                            "altitude" to takeoffASL  // Home altitude in ASL
                         )
                     } ?: mapOf("latitude" to 0.0, "longitude" to 0.0, "altitude" to 0.0)
                 },
@@ -2580,7 +2867,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 },
                 
                 // Status flags (TODO: integrate with proper SDK keys)
-                "are_motors_on" to false,
+                "are_motors_on" to areMotorsOn,
                 "is_flying" to false,
                 
                 

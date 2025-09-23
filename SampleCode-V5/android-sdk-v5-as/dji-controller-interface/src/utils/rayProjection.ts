@@ -172,10 +172,11 @@ export function projectRayToGround(
   const worldRay = vectorRotate(cameraRay, worldMatrix);
 
   // Aircraft position
+  const aircraftAltitude = telemetry.location?.altitude ?? ((telemetry.takeoff_altitude || 0) + (telemetry.altitude || 0));
   const aircraftPos: GeographicPoint = {
     latitude: telemetry.location.latitude,
     longitude: telemetry.location.longitude,
-    altitude: telemetry.altitude_above_takeoff + (telemetry.altitude_barometric || 0),
+    altitude: aircraftAltitude,
   };
 
   // Check for laser range data (if available)

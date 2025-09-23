@@ -24,4 +24,36 @@ class BasicAircraftControlVM : DJIViewModel() {
             callback.onFailure(e)
         })
     }
+
+    fun cancelLanding(callback: CommonCallbacks.CompletionCallbackWithParam<EmptyMsg>) {
+        FlightControllerKey.KeyStopAutoLanding.create().action({
+            callback.onSuccess(it)
+        }, { e: IDJIError ->
+            callback.onFailure(e)
+        })
+    }
+
+    fun confirmLanding(callback: CommonCallbacks.CompletionCallbackWithParam<EmptyMsg>) {
+        FlightControllerKey.KeyConfirmLanding.create().action({
+            callback.onSuccess(it)
+        }, { e: IDJIError ->
+            callback.onFailure(e)
+        })
+    }
+
+    fun startReturnToHome(callback: CommonCallbacks.CompletionCallbackWithParam<EmptyMsg>) {
+        FlightControllerKey.KeyStartGoHome.create().action({
+            callback.onSuccess(it)
+        }, { e: IDJIError ->
+            callback.onFailure(e)
+        })
+    }
+
+    fun stopReturnToHome(callback: CommonCallbacks.CompletionCallbackWithParam<EmptyMsg>) {
+        FlightControllerKey.KeyStopGoHome.create().action({
+            callback.onSuccess(it)
+        }, { e: IDJIError ->
+            callback.onFailure(e)
+        })
+    }
 }
