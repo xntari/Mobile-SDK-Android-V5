@@ -68,9 +68,6 @@ import dji.sdk.keyvalue.value.common.CameraLensType
 import dji.sdk.keyvalue.value.gimbal.GimbalSpeedRotation
 import dji.sdk.keyvalue.value.gimbal.CtrlInfo
 // GeographicLib import removed - using SDK-based conversion
-import dji.sdk.keyvalue.value.flightcontroller.ArmPresentStateMsg
-import dji.sdk.keyvalue.value.flightcontroller.FCMotorStartFailureError
-import dji.sdk.keyvalue.value.flightcontroller.FcMotorLockMsg
 import dji.sdk.keyvalue.value.flightcontroller.LookAtInfo
 import dji.sdk.keyvalue.value.flightcontroller.LookAtMode
 import dji.sdk.keyvalue.value.common.EmptyMsg
@@ -103,8 +100,6 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         private const val TAG = "DJIBridgeServer"
         private const val WEBSOCKET_MAGIC_STRING = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
         private const val PROTOCOL_VERSION = "1.0"
-        private const val VIRTUAL_STICK_ARM_VALUE = 660
-        private const val VIRTUAL_STICK_ARM_HOLD_MS = 2200L
 
         // Real SurfaceViews for SDK projection
         private var fpvSurfaceView: SurfaceView? = null
@@ -1669,11 +1664,20 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         val params = data.optJSONObject("params")
 
         when (action) {
-            "arm_motors" -> handleArmMotors(clientId, action)
+            "arm_motors" -> {
+                Log.w(TAG, "Deprecated arm_motors command from $clientId")
+                sendFlightCommandResponse(clientId, action, success = false, message = "Manual motor control deprecated; use takeoff/land")
+            }
 
-            "arm_motors_virtual" -> performVirtualStickArming(clientId, action)
+            "arm_motors_virtual" -> {
+                Log.w(TAG, "Deprecated arm_motors_virtual command from $clientId")
+                sendFlightCommandResponse(clientId, action, success = false, message = "Manual motor control deprecated; use takeoff/land")
+            }
 
-            "disarm_motors" -> handleDisarmMotors(clientId, action)
+            "disarm_motors" -> {
+                Log.w(TAG, "Deprecated disarm_motors command from $clientId")
+                sendFlightCommandResponse(clientId, action, success = false, message = "Manual motor control deprecated; use land")
+            }
 
             "compass_calibrate_start" -> performFlightControllerAction(clientId, action) { success, failure ->
                 FlightControllerKey.KeyStartCompassCalibration.create().action({ success(it) }, failure)
@@ -1717,302 +1721,6 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             }
         }
     }
-
-    private fun handleArmMotors(clientId: String, action: String) {
-        runOnUiThread {
-            val unlockMsg = FcMotorLockMsg().apply {
-                setMotorDisableCmd(false)
-                setDisableCmdType(true)
-            }
-
-            try {
-                FlightControllerKey.KeyLockMotorSetting.create().action(unlockMsg, onSuccess = {
-                    FlightControllerKey.KeyTurnOnTheMotor.create().action(onSuccess = {
-                        confirmArmState(normal = true)
-                        scheduleMotorFinalization(clientId, action, expectedOn = true)
-                    }, onFailure = { error ->
-                        sendFlightCommandResponse(clientId, action, success = false, error = error)
-                    })
-                }, onFailure = { error ->
-                    sendFlightCommandResponse(clientId, action, success = false, error = error)
-                })
-            } catch (e: Exception) {
-                Log.e(TAG, "handleArmMotors exception: ${e.message}", e)
-                sendFlightCommandResponse(clientId, action, success = false, message = e.message ?: "exception")
-            }
-        }
-    }
-
-    private fun handleDisarmMotors(clientId: String, action: String) {
-        runOnUiThread {
-            val lockMsg = FcMotorLockMsg().apply {
-                setMotorDisableCmd(true)
-                setDisableCmdType(true)
-            }
-
-            try {
-                FlightControllerKey.KeyLockMotorSetting.create().action(lockMsg, onSuccess = {
-                    confirmArmState(normal = false)
-                    scheduleMotorFinalization(clientId, action, expectedOn = false)
-                }, onFailure = { error ->
-                    sendFlightCommandResponse(clientId, action, success = false, error = error)
-                })
-            } catch (e: Exception) {
-                Log.e(TAG, "handleDisarmMotors exception: ${e.message}", e)
-                sendFlightCommandResponse(clientId, action, success = false, message = e.message ?: "exception")
-            }
-        }
-    }
-
-    private fun performVirtualStickArming(clientId: String, action: String) {
-        runOnUiThread {
-            try {
-                val manager = VirtualStickManager.getInstance() as VirtualStickManager
-                confirmArmState(normal = true)
-                manager.enableVirtualStick(object : CommonCallbacks.CompletionCallback {
-                    override fun onSuccess() {
-                        Log.i(TAG, "Virtual stick enabled for arming gesture")
-                        applyVirtualStickArmingSequence(manager, clientId, action)
-                    }
-
-                    override fun onFailure(error: IDJIError) {
-                        Log.e(TAG, "Virtual stick enable failed for arming: ${error.description()}")
-                        sendFlightCommandResponse(clientId, action, success = false, error = error)
-                    }
-                })
-            } catch (e: Exception) {
-                Log.e(TAG, "performVirtualStickArming exception: ${e.message}", e)
-                sendFlightCommandResponse(clientId, action, success = false, message = e.message ?: "exception")
-            }
-        }
-    }
-
-    private fun applyVirtualStickArmingSequence(
-        manager: VirtualStickManager,
-        clientId: String,
-        action: String
-    ) {
-        try {
-            manager.leftStick.horizontalPosition = -VIRTUAL_STICK_ARM_VALUE
-            manager.leftStick.verticalPosition = -VIRTUAL_STICK_ARM_VALUE
-            manager.rightStick.horizontalPosition = VIRTUAL_STICK_ARM_VALUE
-            manager.rightStick.verticalPosition = -VIRTUAL_STICK_ARM_VALUE
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to send virtual stick arming gesture: ${e.message}", e)
-            sendFlightCommandResponse(clientId, action, success = false, message = e.message ?: "virtual stick error")
-            return
-        }
-
-        executor.schedule({
-            runOnUiThread {
-                try {
-                    manager.leftStick.horizontalPosition = 0
-                    manager.leftStick.verticalPosition = 0
-                    manager.rightStick.horizontalPosition = 0
-                    manager.rightStick.verticalPosition = 0
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to reset virtual stick after arming: ${e.message}")
-                }
-
-                manager.disableVirtualStick(object : CommonCallbacks.CompletionCallback {
-                    override fun onSuccess() {
-                        Log.i(TAG, "Virtual stick disabled after arming gesture")
-                    }
-
-                    override fun onFailure(error: IDJIError) {
-                        Log.w(TAG, "Virtual stick disable failed after arming: ${error.description()}")
-                    }
-                })
-            }
-
-            executor.schedule({
-                val diagnostics = collectMotorDiagnostics()
-                val extras = diagnostics.toExtraMap(true)
-                if (diagnostics.motorsOn == true) {
-                    sendFlightCommandResponse(clientId, action, success = true, extra = extras)
-                } else {
-                    val message = buildMotorStatusMessage(expectedOn = true, diagnostics = diagnostics)
-                    sendFlightCommandResponse(clientId, action, success = false, message = message, extra = extras)
-                }
-            }, 400, TimeUnit.MILLISECONDS)
-        }, VIRTUAL_STICK_ARM_HOLD_MS, TimeUnit.MILLISECONDS)
-    }
-
-    private fun scheduleMotorFinalization(clientId: String, action: String, expectedOn: Boolean) {
-        val delays = if (expectedOn) listOf(250L, 1000L, 2000L) else listOf(200L, 600L)
-        val samples = mutableListOf<MotorDiagnostics>()
-        val responded = java.util.concurrent.atomic.AtomicBoolean(false)
-
-        delays.forEachIndexed { index, delay ->
-            executor.schedule({
-                if (responded.get()) {
-                    return@schedule
-                }
-
-                val diagnostics = collectMotorDiagnostics()
-                val snapshot = synchronized(samples) {
-                    samples.add(diagnostics)
-                    samples.toList()
-                }
-
-                val motorsOn = diagnostics.motorsOn
-                if (motorsOn == expectedOn) {
-                    val extras = diagnostics.toExtraMap(expectedOn)
-                    if (responded.compareAndSet(false, true)) {
-                        sendFlightCommandResponse(clientId, action, success = true, extra = extras)
-                    }
-                    return@schedule
-                }
-
-                if (index == delays.lastIndex) {
-                    val consolidated = MotorDiagnostics.merge(snapshot)
-                    val extras = consolidated.toExtraMap(expectedOn)
-                    val message = buildMotorStatusMessage(expectedOn, consolidated)
-                    if (responded.compareAndSet(false, true)) {
-                        sendFlightCommandResponse(clientId, action, success = false, message = message, extra = extras)
-                    }
-                }
-            }, delay, TimeUnit.MILLISECONDS)
-        }
-    }
-
-    private fun confirmArmState(normal: Boolean) {
-        try {
-            val keyInfo = if (normal) {
-                FlightControllerKey.KeyMGUserConfirmArmStateNormal
-            } else {
-                FlightControllerKey.KeyMGUserConfirmArmStateAbnormal
-            }
-
-            keyInfo.create().action(onSuccess = {
-                // Fire-and-forget confirmation
-            }, onFailure = { error: IDJIError ->
-                Log.w(TAG, "Arm state confirmation error: ${error.description()}")
-            })
-        } catch (ignored: Exception) {
-            // Not all aircraft expose these keys
-        }
-    }
-
-    private data class MotorDiagnostics(
-        val motorsOn: Boolean? = null,
-        val motorStartFailure: FCMotorStartFailureError? = null,
-        val motorStopReason: FCMotorStartFailureError? = null,
-        val lockMotors: Boolean? = null,
-        val notAllowMotorStart: Boolean? = null,
-        val motorPowerAbnormalLock: Boolean? = null,
-        val emergencyStopEnabled: Boolean? = null,
-        val armPresentState: ArmPresentStateMsg? = null,
-        val armRequireTakeoff: Boolean? = null
-    ) {
-        fun toExtraMap(expectedOn: Boolean?): Map<String, Any?> {
-            val map = mutableMapOf<String, Any?>(
-                "motors_on" to motorsOn,
-                "motor_start_failure" to motorStartFailure?.name,
-                "motor_stop_reason" to motorStopReason?.name,
-                "lock_motors" to lockMotors,
-                "not_allow_motor_start" to notAllowMotorStart,
-                "motor_power_abnormal_lock" to motorPowerAbnormalLock,
-                "emergency_stop_enabled" to emergencyStopEnabled,
-                "arm_present_state" to armPresentState?.toReadableMap(),
-                "arm_requires_takeoff" to armRequireTakeoff
-            )
-            expectedOn?.let { map["target_state"] = if (it) "on" else "off" }
-            return map
-        }
-
-        companion object {
-            fun merge(samples: List<MotorDiagnostics>): MotorDiagnostics {
-                val latest = samples.lastOrNull() ?: return MotorDiagnostics()
-                return MotorDiagnostics(
-                    motorsOn = latest.motorsOn,
-                    motorStartFailure = samples.mapNotNull { it.motorStartFailure }.firstOrNull { it != FCMotorStartFailureError.NONE } ?: latest.motorStartFailure,
-                    motorStopReason = samples.mapNotNull { it.motorStopReason }.firstOrNull { it != FCMotorStartFailureError.NONE } ?: latest.motorStopReason,
-                    lockMotors = samples.mapNotNull { it.lockMotors }.firstOrNull() ?: latest.lockMotors,
-                    notAllowMotorStart = samples.mapNotNull { it.notAllowMotorStart }.firstOrNull { it } ?: latest.notAllowMotorStart,
-                    motorPowerAbnormalLock = samples.mapNotNull { it.motorPowerAbnormalLock }.firstOrNull { it } ?: latest.motorPowerAbnormalLock,
-                    emergencyStopEnabled = samples.mapNotNull { it.emergencyStopEnabled }.firstOrNull { it } ?: latest.emergencyStopEnabled,
-                    armPresentState = samples.mapNotNull { it.armPresentState }.lastOrNull { it.hasAnyArm() } ?: latest.armPresentState,
-                    armRequireTakeoff = samples.mapNotNull { it.armRequireTakeoff }.firstOrNull { it } ?: latest.armRequireTakeoff
-                )
-            }
-        }
-    }
-
-    private fun collectMotorDiagnostics(): MotorDiagnostics {
-        val keyManager = KeyManager.getInstance()
-
-        fun readBoolean(info: dji.sdk.keyvalue.key.DJIKeyInfo<Boolean>): Boolean? = try {
-            keyManager.getValue(KeyTools.createKey(info)) as? Boolean
-        } catch (e: Exception) {
-            Log.d(TAG, "Motor diagnostic read failed for ${info}", e)
-            null
-        }
-
-        fun readFailure(info: dji.sdk.keyvalue.key.DJIKeyInfo<FCMotorStartFailureError>): FCMotorStartFailureError? = try {
-            keyManager.getValue(KeyTools.createKey(info)) as? FCMotorStartFailureError
-        } catch (e: Exception) {
-            Log.d(TAG, "Motor failure read failed for ${info}", e)
-            null
-        }
-
-        fun readArmState(): ArmPresentStateMsg? = try {
-            keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyMGArmPresentState)) as? ArmPresentStateMsg
-        } catch (e: Exception) {
-            Log.d(TAG, "Motor arm state read failed", e)
-            null
-        }
-
-        val motorsOn = readBoolean(FlightControllerKey.KeyAreMotorsOn)
-        val motorStartFailure = readFailure(FlightControllerKey.KeyMotorStartFailureError)
-        val motorStopReason = readFailure(FlightControllerKey.KeyMotorStopReason)
-        val lockMotors = readBoolean(FlightControllerKey.KeyLockMotors)
-        val notAllowMotorStart = readBoolean(FlightControllerKey.KeyNotAllowMotorStart)
-        val motorPowerAbnormalLock = readBoolean(FlightControllerKey.KeyMotorPowerAbnormalLock)
-        val emergencyStopEnabled = readBoolean(FlightControllerKey.KeyEmergencyStopMotorEnable)
-        val armPresentState = readArmState()
-        val armRequireTakeoff = readBoolean(FlightControllerKey.KeyArmPresentReqTakeOff)
-
-        return MotorDiagnostics(
-            motorsOn = motorsOn,
-            motorStartFailure = motorStartFailure,
-            motorStopReason = motorStopReason,
-            lockMotors = lockMotors,
-            notAllowMotorStart = notAllowMotorStart,
-            motorPowerAbnormalLock = motorPowerAbnormalLock,
-            emergencyStopEnabled = emergencyStopEnabled,
-            armPresentState = armPresentState,
-            armRequireTakeoff = armRequireTakeoff
-        )
-    }
-
-    private fun buildMotorStatusMessage(expectedOn: Boolean, diagnostics: MotorDiagnostics): String {
-        val target = if (expectedOn) "on" else "off"
-        val currentState = diagnostics.motorsOn?.let { if (it) "on" else "off" } ?: "unknown"
-        val reasons = mutableListOf<String>()
-
-        diagnostics.motorStartFailure?.takeIf { it != FCMotorStartFailureError.NONE }?.let {
-            reasons.add("start_failure=${it.name}")
-        }
-        diagnostics.motorStopReason?.takeIf { it != FCMotorStartFailureError.NONE }?.let {
-            reasons.add("stop_reason=${it.name}")
-        }
-        diagnostics.notAllowMotorStart?.takeIf { it }?.let { reasons.add("motor_start_blocked=true") }
-        diagnostics.lockMotors?.let { reasons.add("lock_motors=$it") }
-        diagnostics.motorPowerAbnormalLock?.takeIf { it }?.let { reasons.add("power_abnormal_lock=true") }
-        diagnostics.emergencyStopEnabled?.takeIf { it }?.let { reasons.add("emergency_stop_enabled=true") }
-        diagnostics.armRequireTakeoff?.takeIf { it }?.let { reasons.add("arm_requires_takeoff_confirmation=true") }
-        diagnostics.armPresentState?.takeIf { it.hasAnyArm() }?.let { state ->
-            val engaged = state.toReadableMap().filterValues { value -> value == true }.keys
-            if (engaged.isNotEmpty()) {
-                reasons.add("arm_presence=${engaged.joinToString(",")}")
-            }
-        }
-
-        val detail = if (reasons.isEmpty()) "no diagnostic codes reported" else reasons.joinToString(", ")
-        return "Motors reported '$currentState' (expected $target); $detail"
-    }
-
 
     private fun performFlightControllerAction(
         clientId: String,
@@ -4102,26 +3810,4 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         else -> "normal"
     }
 
-}
-
-private fun ArmPresentStateMsg.hasAnyArm(): Boolean {
-    return listOf(
-        getArm1PresentState(),
-        getArm2PresentState(),
-        getArm3PresentState(),
-        getArm4PresentState(),
-        getArm5PresentState(),
-        getArm6PresentState()
-    ).any { it == true }
-}
-
-private fun ArmPresentStateMsg.toReadableMap(): Map<String, Boolean?> {
-    return mapOf(
-        "arm1" to getArm1PresentState(),
-        "arm2" to getArm2PresentState(),
-        "arm3" to getArm3PresentState(),
-        "arm4" to getArm4PresentState(),
-        "arm5" to getArm5PresentState(),
-        "arm6" to getArm6PresentState()
-    )
 }

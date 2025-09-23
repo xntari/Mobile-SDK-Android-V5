@@ -1,14 +1,16 @@
-import React from 'react';
-import { Panel } from './Panel';
-import { TelemetryData, FlightCommandAck } from '../types';
-import { useBridgeCommands } from '../hooks/useBridgeCommands';
+import React from "react";
+import { Panel } from "./Panel";
+import { TelemetryData, FlightCommandAck, ControllerData } from "../types";
+import { useBridgeCommands } from "../hooks/useBridgeCommands";
+import { useManualFlightControl } from "../hooks/useManualFlightControl";
 
 interface FlightCommandsPanelProps {
   telemetry: TelemetryData | null;
   history: FlightCommandAck[];
+  controller: ControllerData | null;
 }
 
-type CommandTone = 'primary' | 'success' | 'danger';
+type CommandTone = "primary" | "success" | "danger";
 
 type CommandSpec = {
   action: string;
@@ -17,121 +19,95 @@ type CommandSpec = {
   requireConfirm?: boolean;
   confirmationText?: string;
   isDisabled?: (telemetry: TelemetryData | null) => boolean;
-  params?: Record<string, any> | ((telemetry: TelemetryData | null) => Record<string, any> | undefined);
+  params?:
+    | Record<string, any>
+    | ((telemetry: TelemetryData | null) => Record<string, any> | undefined);
 };
 
 const COMMAND_GROUPS: Array<{ title: string; commands: CommandSpec[] }> = [
   {
-    title: 'Motors',
+    title: "Calibration",
     commands: [
       {
-        action: 'arm_motors',
-        label: 'Arm Motors',
-        tone: 'success',
+        action: "compass_calibrate_start",
+        label: "Start Compass Cal",
+        tone: "primary",
         requireConfirm: true,
-        confirmationText: 'ARM?',
-        isDisabled: (telemetry) => Boolean(telemetry?.motors_on),
+        confirmationText: "START?",
       },
       {
-        action: 'arm_motors_virtual',
-        label: 'Arm (Stick Hold)',
-        tone: 'primary',
-        requireConfirm: true,
-        confirmationText: 'HOLD?',
-        isDisabled: (telemetry) => Boolean(telemetry?.motors_on),
-      },
-      {
-        action: 'disarm_motors',
-        label: 'Stop Motors',
-        tone: 'danger',
-        requireConfirm: true,
-        confirmationText: 'STOP?',
-        isDisabled: (telemetry) => !telemetry?.motors_on,
+        action: "compass_calibrate_stop",
+        label: "Stop Compass Cal",
+        tone: "danger",
       },
     ],
   },
   {
-    title: 'Calibration',
+    title: "Flight",
     commands: [
       {
-        action: 'compass_calibrate_start',
-        label: 'Start Compass Cal',
-        tone: 'primary',
+        action: "takeoff",
+        label: "Take Off",
+        tone: "success",
         requireConfirm: true,
-        confirmationText: 'START?',
-      },
-      {
-        action: 'compass_calibrate_stop',
-        label: 'Stop Compass Cal',
-        tone: 'danger',
-      },
-    ],
-  },
-  {
-    title: 'Flight',
-    commands: [
-      {
-        action: 'takeoff',
-        label: 'Take Off',
-        tone: 'success',
-        requireConfirm: true,
-        confirmationText: 'GO?',
+        confirmationText: "GO?",
         isDisabled: (telemetry) => (telemetry?.altitude ?? 0) > 1.5,
       },
       {
-        action: 'land',
-        label: 'Land',
-        tone: 'primary',
+        action: "land",
+        label: "Land",
+        tone: "primary",
         requireConfirm: true,
-        confirmationText: 'LAND?',
+        confirmationText: "LAND?",
       },
       {
-        action: 'cancel_landing',
-        label: 'Cancel Landing',
-        tone: 'primary',
+        action: "cancel_landing",
+        label: "Cancel Landing",
+        tone: "primary",
       },
       {
-        action: 'confirm_landing',
-        label: 'Confirm Landing',
-        tone: 'success',
+        action: "confirm_landing",
+        label: "Confirm Landing",
+        tone: "success",
       },
     ],
   },
   {
-    title: 'Return to Home',
+    title: "Return to Home",
     commands: [
       {
-        action: 'return_home_start',
-        label: 'Start RTH',
-        tone: 'primary',
+        action: "return_home_start",
+        label: "Start RTH",
+        tone: "primary",
         requireConfirm: true,
-        confirmationText: 'RTH?',
+        confirmationText: "RTH?",
       },
       {
-        action: 'return_home_stop',
-        label: 'Stop RTH',
-        tone: 'danger',
+        action: "return_home_stop",
+        label: "Stop RTH",
+        tone: "danger",
       },
     ],
   },
   {
-    title: 'Virtual Stick',
+    title: "Virtual Stick",
     commands: [
       {
-        action: 'virtual_stick_enable',
-        label: 'Enable VS',
-        tone: 'primary',
+        action: "virtual_stick_enable",
+        label: "Enable VS",
+        tone: "primary",
       },
       {
-        action: 'virtual_stick_disable',
-        label: 'Disable VS',
-        tone: 'danger',
+        action: "virtual_stick_disable",
+        label: "Disable VS",
+        tone: "danger",
       },
     ],
   },
 ];
 
-const baseButtonClasses = 'w-full rounded border text-[11px] font-semibold uppercase tracking-wide py-1 px-2 transition-colors duration-150 focus:outline-none focus:ring-1 focus:ring-offset-[1px] focus:ring-offset-black/40 flex items-center justify-center text-center';
+const baseButtonClasses =
+  "w-full rounded border text-[11px] font-semibold uppercase tracking-wide py-1 px-2 transition-colors duration-150 focus:outline-none focus:ring-1 focus:ring-offset-[1px] focus:ring-offset-black/40 flex items-center justify-center text-center";
 const toneClass: Record<CommandTone, string> = {
   primary: `${baseButtonClasses} bg-gray-800/70 border-gray-600 text-gray-100 hover:bg-gray-700/70`,
   success: `${baseButtonClasses} bg-status-good/20 border-status-good/50 text-status-good hover:bg-status-good/30`,
@@ -145,15 +121,24 @@ type CommandButtonProps = {
   telemetry: TelemetryData | null;
   acknowledgements: ActionAckMap;
   isPending: boolean;
-  pendingMeta?: { state: 'pending' | 'timeout' | 'error'; message?: string };
+  pendingMeta?: { state: "pending" | "timeout" | "error"; message?: string };
   onSend: (action: string, params?: Record<string, any>) => Promise<void>;
 };
 
 const CONFIRM_TIMEOUT_MS = 4000;
 const BRIDGE_RESPONSE_TIMEOUT_MS = 6000;
-const CommandButton: React.FC<CommandButtonProps> = ({ spec, telemetry, acknowledgements, isPending, pendingMeta, onSend }) => {
+const CommandButton: React.FC<CommandButtonProps> = ({
+  spec,
+  telemetry,
+  acknowledgements,
+  isPending,
+  pendingMeta,
+  onSend,
+}) => {
   const [confirming, setConfirming] = React.useState(false);
-  const confirmTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const confirmTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const [localError, setLocalError] = React.useState<string | null>(null);
   const ack = acknowledgements.get(spec.action);
 
@@ -169,7 +154,7 @@ const CommandButton: React.FC<CommandButtonProps> = ({ spec, telemetry, acknowle
 
   React.useEffect(() => {
     if (!ack) return;
-    if (ack.status === 'error' && ack.error_message) {
+    if (ack.status === "error" && ack.error_message) {
       setLocalError(ack.error_message);
     } else {
       setLocalError(null);
@@ -181,12 +166,15 @@ const CommandButton: React.FC<CommandButtonProps> = ({ spec, telemetry, acknowle
     if (confirmTimerRef.current) {
       clearTimeout(confirmTimerRef.current);
     }
-    confirmTimerRef.current = setTimeout(() => setConfirming(false), CONFIRM_TIMEOUT_MS);
+    confirmTimerRef.current = setTimeout(
+      () => setConfirming(false),
+      CONFIRM_TIMEOUT_MS,
+    );
   };
 
   const resolveParams = () => {
     if (!spec.params) return undefined;
-    if (typeof spec.params === 'function') {
+    if (typeof spec.params === "function") {
       return spec.params(telemetry);
     }
     return spec.params;
@@ -204,44 +192,50 @@ const CommandButton: React.FC<CommandButtonProps> = ({ spec, telemetry, acknowle
     try {
       await onSend(spec.action, resolveParams());
     } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Command failed');
+      setLocalError(error instanceof Error ? error.message : "Command failed");
     }
   };
 
-  const statusClass = ack?.status === 'ok'
-    ? 'text-status-good'
-    : ack?.status === 'error'
-      ? 'text-status-error'
-      : 'text-gray-400';
+  const statusClass =
+    ack?.status === "ok"
+      ? "text-status-good"
+      : ack?.status === "error"
+        ? "text-status-error"
+        : "text-gray-400";
   const pendingState = pendingMeta?.state;
   const pendingMessage = pendingMeta?.message;
-  const isBridgePending = pendingState === 'pending';
-  const bridgeFault = pendingState === 'timeout' || pendingState === 'error';
-  const failureMessage = ack && ack.status !== 'ok'
-    ? ack.error_message || ack.message || 'Bridge reported failure (no message)'
-    : null;
+  const isBridgePending = pendingState === "pending";
+  const bridgeFault = pendingState === "timeout" || pendingState === "error";
+  const failureMessage =
+    ack && ack.status !== "ok"
+      ? ack.error_message ||
+        ack.message ||
+        "Bridge reported failure (no message)"
+      : null;
 
   return (
     <div className="flex flex-col gap-1">
       <button
-        className={toneClass[spec.tone ?? 'primary']}
+        className={toneClass[spec.tone ?? "primary"]}
         onClick={handleClick}
         disabled={disabled}
       >
         {isPending || isBridgePending
-          ? 'Sending…'
+          ? "Sending…"
           : confirming && spec.requireConfirm
-            ? (spec.confirmationText ?? 'Confirm?')
+            ? (spec.confirmationText ?? "Confirm?")
             : spec.label.toUpperCase()}
       </button>
-      <div className={`text-[11px] min-h-[14px] leading-tight ${bridgeFault ? 'text-status-error' : statusClass}`}>
+      <div
+        className={`text-[11px] min-h-[14px] leading-tight ${bridgeFault ? "text-status-error" : statusClass}`}
+      >
         {ack
           ? `${ack.status.toUpperCase()} • ${new Date(ack.timestamp).toLocaleTimeString()}`
           : isBridgePending
-            ? pendingMessage ?? 'Awaiting bridge response…'
+            ? (pendingMessage ?? "Awaiting bridge response…")
             : bridgeFault
-              ? pendingMessage ?? 'No bridge response'
-              : 'Awaiting command'}
+              ? (pendingMessage ?? "No bridge response")
+              : "Awaiting command"}
       </div>
       {(failureMessage || localError) && (
         <div className="text-[11px] text-status-error leading-tight">
@@ -253,21 +247,49 @@ const CommandButton: React.FC<CommandButtonProps> = ({ spec, telemetry, acknowle
 };
 
 const formatAltitude = (alt?: number | null) => {
-  if (typeof alt !== 'number' || Number.isNaN(alt)) return '–';
+  if (typeof alt !== "number" || Number.isNaN(alt)) return "–";
   return `${alt.toFixed(1)} m`;
 };
 
 const formatSpeed = (speed?: number | null) => {
-  if (typeof speed !== 'number' || Number.isNaN(speed)) return '–';
+  if (typeof speed !== "number" || Number.isNaN(speed)) return "–";
   return `${speed.toFixed(1)} m/s`;
 };
 
-export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({ telemetry, history }) => {
+const formatAxisPercent = (value: number) => {
+  const percent = Math.round(value * 100);
+  const prefix = percent > 0 ? "+" : "";
+  return `${prefix}${percent}%`;
+};
+
+const formatRelativeTime = (timestamp: number | null) => {
+  if (!timestamp) return "–";
+  const delta = Date.now() - timestamp;
+  if (delta < 0) return "now";
+  if (delta < 1000) return "<1s";
+  if (delta < 60000) return `${Math.floor(delta / 1000)}s`;
+  const minutes = delta / 60000;
+  if (minutes < 10) return `${minutes.toFixed(1)}m`;
+  return `${Math.floor(minutes)}m`;
+};
+
+export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
+  telemetry,
+  history,
+  controller,
+}) => {
   const { sendFlightCommand } = useBridgeCommands();
-  const [pendingActions, setPendingActions] = React.useState<Set<string>>(new Set());
-  const [pendingMeta, setPendingMeta] = React.useState<Map<string, { state: 'pending' | 'timeout' | 'error'; message?: string }>>(new Map());
-  const pendingTimersRef = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const [pendingActions, setPendingActions] = React.useState<Set<string>>(
+    new Set(),
+  );
+  const [pendingMeta, setPendingMeta] = React.useState<
+    Map<string, { state: "pending" | "timeout" | "error"; message?: string }>
+  >(new Map());
+  const pendingTimersRef = React.useRef<
+    Map<string, ReturnType<typeof setTimeout>>
+  >(new Map());
   const pendingMetaRef = React.useRef(pendingMeta);
+  const manualControl = useManualFlightControl(controller);
 
   React.useEffect(() => {
     pendingMetaRef.current = pendingMeta;
@@ -318,7 +340,7 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({ teleme
     });
     setPendingMeta((prev) => {
       const next = new Map(prev);
-      next.set(action, { state: 'pending' });
+      next.set(action, { state: "pending" });
       return next;
     });
     try {
@@ -326,7 +348,10 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({ teleme
       if (result && result.success === false) {
         setPendingMeta((prev) => {
           const next = new Map(prev);
-          next.set(action, { state: 'error', message: result.error || 'Bridge rejected command' });
+          next.set(action, {
+            state: "error",
+            message: result.error || "Bridge rejected command",
+          });
           return next;
         });
         setPendingActions((prev) => {
@@ -339,7 +364,10 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({ teleme
     } catch (error) {
       setPendingMeta((prev) => {
         const next = new Map(prev);
-        next.set(action, { state: 'error', message: error instanceof Error ? error.message : 'Command failed' });
+        next.set(action, {
+          state: "error",
+          message: error instanceof Error ? error.message : "Command failed",
+        });
         return next;
       });
       setPendingActions((prev) => {
@@ -354,7 +382,7 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({ teleme
         clearTimeout(previousTimer);
       }
       const entry = pendingMetaRef.current.get(action);
-      if (!entry || entry.state !== 'pending') {
+      if (!entry || entry.state !== "pending") {
         pendingTimersRef.current.delete(action);
         return;
       }
@@ -367,9 +395,12 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({ teleme
         });
         setPendingMeta((prev) => {
           const current = prev.get(action);
-          if (!current || current.state !== 'pending') return prev;
+          if (!current || current.state !== "pending") return prev;
           const next = new Map(prev);
-          next.set(action, { state: 'timeout', message: 'No response from bridge' });
+          next.set(action, {
+            state: "timeout",
+            message: "No response from bridge",
+          });
           return next;
         });
         pendingTimersRef.current.delete(action);
@@ -379,16 +410,38 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({ teleme
   };
 
   const motorsOn = Boolean(telemetry?.motors_on);
-  const flightMode = telemetry?.flight_mode ?? 'Unknown';
-  const gpsLevel = telemetry?.gps_signal_level ?? '–';
+  const flightMode = telemetry?.flight_mode ?? "Unknown";
+  const gpsLevel = telemetry?.gps_signal_level ?? "–";
   const rcSignal = telemetry?.rc_signal_quality ?? null;
   const lastAck = history.length ? history[history.length - 1] : null;
 
-  const rcText = rcSignal === null || rcSignal === undefined ? '–' : `${rcSignal}%`;
+  const rcText =
+    rcSignal === null || rcSignal === undefined ? "–" : `${rcSignal}%`;
 
   const recentEvents = React.useMemo(() => {
     return [...history].reverse().slice(0, 6);
   }, [history]);
+
+  const manualState = manualControl.state;
+  const manualAxes = manualState.axes;
+  const manualStatusClass =
+    manualState.status === "active"
+      ? "text-status-good"
+      : manualState.status === "error" || manualState.status === "lost"
+        ? "text-status-error"
+        : manualState.status === "arming"
+          ? "text-orange-300"
+          : "text-gray-300";
+  const virtualStick = manualControl.virtualStick;
+  const vsStatusClass = virtualStick.enabled
+    ? "text-status-good"
+    : "text-status-error";
+  const vsOwner = virtualStick.owner || "UNKNOWN";
+  const manualLastCommand = formatRelativeTime(manualState.lastCommandMs);
+  const manualAuthorityBadge =
+    virtualStick.manualOverride || (vsOwner !== "APP" && vsOwner !== "UNKNOWN")
+      ? "text-status-error"
+      : "text-gray-300";
 
   return (
     <Panel
@@ -405,34 +458,154 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({ teleme
             <span>{new Date().toLocaleTimeString()}</span>
           </div>
           <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[12px]">
-            <div>Motors: <span className={motorsOn ? 'text-status-good' : 'text-gray-300'}>{motorsOn ? 'ON' : 'OFF'}</span></div>
-            <div>Mode: <span className="text-white">{flightMode}</span></div>
+            <div>
+              Motors:{" "}
+              <span className={motorsOn ? "text-status-good" : "text-gray-300"}>
+                {motorsOn ? "ON" : "OFF"}
+              </span>
+            </div>
+            <div>
+              Mode: <span className="text-white">{flightMode}</span>
+            </div>
             <div>Alt AGL: {formatAltitude(telemetry?.altitude)}</div>
-            <div>Alt TO: {formatAltitude(telemetry?.altitude_above_takeoff)}</div>
+            <div>
+              Alt TO: {formatAltitude(telemetry?.altitude_above_takeoff)}
+            </div>
             <div>Ground Speed: {formatSpeed(telemetry?.speed)}</div>
             <div>GPS: {gpsLevel}</div>
             <div>RC Signal: {rcText}</div>
-            <div>Distance Home: {formatAltitude(telemetry?.distance_to_home)}</div>
+            <div>
+              Distance Home: {formatAltitude(telemetry?.distance_to_home)}
+            </div>
           </div>
           {lastAck && (
             <div className="mt-2 text-[11px]">
               <span className="text-gray-400 uppercase">Last Command:</span>
               <span className="ml-2 text-white">{lastAck.action}</span>
               <span
-                className={`ml-2 ${lastAck.status === 'ok' ? 'text-status-good' : 'text-status-error'}`}
+                className={`ml-2 ${lastAck.status === "ok" ? "text-status-good" : "text-status-error"}`}
               >
                 {lastAck.status.toUpperCase()}
               </span>
               {(lastAck.error_message || lastAck.message) && (
-                <span className="ml-2 text-status-error">{lastAck.error_message || lastAck.message}</span>
+                <span className="ml-2 text-status-error">
+                  {lastAck.error_message || lastAck.message}
+                </span>
               )}
             </div>
           )}
         </section>
 
+        <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
+          <div className="flex items-center justify-between mb-1">
+            <div className="text-gray-400 uppercase text-[11px]">
+              Manual Control
+            </div>
+            <div className={`text-[11px] font-semibold ${manualStatusClass}`}>
+              {manualState.status.toUpperCase()}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[12px] text-gray-200">
+            <div>
+              Virtual Stick:{" "}
+              <span className={vsStatusClass}>
+                {virtualStick.enabled ? "ENABLED" : "DISABLED"}
+              </span>
+            </div>
+            <div>
+              Authority: <span className={manualAuthorityBadge}>{vsOwner}</span>
+            </div>
+            <div>
+              Last Command:{" "}
+              <span className="text-gray-300">{manualLastCommand} ago</span>
+            </div>
+            <div>
+              Reason:{" "}
+              <span className="text-gray-300">{virtualStick.changeReason}</span>
+            </div>
+            <div>
+              Pitch:{" "}
+              <span className="text-gray-200">
+                {formatAxisPercent(manualAxes.pitch)}
+              </span>
+            </div>
+            <div>
+              Roll:{" "}
+              <span className="text-gray-200">
+                {formatAxisPercent(manualAxes.roll)}
+              </span>
+            </div>
+            <div>
+              Throttle:{" "}
+              <span className="text-gray-200">
+                {formatAxisPercent(manualAxes.throttle)}
+              </span>
+            </div>
+            <div>
+              Yaw:{" "}
+              <span className="text-gray-200">
+                {formatAxisPercent(manualAxes.yaw)}
+              </span>
+            </div>
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
+            <button
+              className={toneClass.primary}
+              onClick={manualControl.start}
+              disabled={manualState.active || manualState.status === "arming"}
+            >
+              {manualState.status === "arming" ? "Enabling…" : "Start Keyboard"}
+            </button>
+            <button
+              className={toneClass.primary}
+              onClick={manualControl.stop}
+              disabled={!manualState.active && manualState.status !== "arming"}
+            >
+              Release Control
+            </button>
+            <button className={toneClass.danger} onClick={manualControl.kill}>
+              Kill Switch (ESC)
+            </button>
+            {manualControl.pointerLockSupported && (
+              <button
+                className={toneClass.primary}
+                onClick={manualControl.togglePointerLock}
+                disabled={!manualState.active}
+              >
+                {manualState.pointerLocked
+                  ? "Release Mouse Yaw"
+                  : "Capture Mouse Yaw"}
+              </button>
+            )}
+          </div>
+          {virtualStick.manualOverride && (
+            <div className="mt-2 text-[11px] text-status-error">
+              Manual override detected – hardware controller has authority.
+            </div>
+          )}
+          {manualState.error && (
+            <div className="mt-2 text-[11px] text-status-error">
+              {manualState.error}
+            </div>
+          )}
+          <div className="mt-2 text-[11px] text-gray-400 leading-tight">
+            Bindings: <span className="text-gray-300">WASD</span> pitch/roll,{" "}
+            <span className="text-gray-300">
+              Space / Shift or Arrow Up/Down
+            </span>{" "}
+            vertical,{" "}
+            <span className="text-gray-300">Q/E or Arrow Left/Right</span> yaw,
+            mouse yaw when captured, <span className="text-gray-300">Esc</span>{" "}
+            triggers the kill switch (zeros sticks and disables virtual stick in
+            &lt;200&nbsp;ms).
+          </div>
+        </section>
+
         {COMMAND_GROUPS.map((group) => (
           <section key={group.title}>
-            <div className="text-gray-400 uppercase text-[11px] mb-1">{group.title}</div>
+            <div className="text-gray-400 uppercase text-[11px] mb-1">
+              {group.title}
+            </div>
             <div className="grid grid-cols-2 gap-3">
               {group.commands.map((command) => (
                 <CommandButton
@@ -450,38 +623,90 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({ teleme
         ))}
 
         <section>
-          <div className="text-gray-400 uppercase text-[11px] mb-1">Recent Responses</div>
+          <div className="text-gray-400 uppercase text-[11px] mb-1">
+            Recent Responses
+          </div>
           <div className="bg-black/50 border border-gray-700 rounded-md px-2 py-2 flex flex-col gap-1">
             {recentEvents.length === 0 && (
-              <div className="text-gray-500 text-[11px]">No command responses yet.</div>
+              <div className="text-gray-500 text-[11px]">
+                No command responses yet.
+              </div>
             )}
             {recentEvents.map((event) => (
-              <div key={`${event.timestamp}-${event.action}`} className="flex justify-between items-start text-[11px]">
+              <div
+                key={`${event.timestamp}-${event.action}`}
+                className="flex justify-between items-start text-[11px]"
+              >
                 <div>
-                  <div className="text-white capitalize">{event.action.replace(/_/g, ' ')}</div>
-                  <div className={event.error_message || event.status === 'error' ? 'text-status-error' : 'text-gray-400'}>
-                    {event.error_message || event.message || (event.status === 'error' ? 'Bridge reported failure (no message)' : '—')}
+                  <div className="text-white capitalize">
+                    {event.action.replace(/_/g, " ")}
+                  </div>
+                  <div
+                    className={
+                      event.error_message || event.status === "error"
+                        ? "text-status-error"
+                        : "text-gray-400"
+                    }
+                  >
+                    {event.error_message ||
+                      event.message ||
+                      (event.status === "error"
+                        ? "Bridge reported failure (no message)"
+                        : "—")}
                   </div>
                 </div>
-                <div className={event.status === 'ok' ? 'text-status-good' : event.status === 'error' ? 'text-status-error' : 'text-gray-400'}>
-                  {event.status.toUpperCase()}<br />
-                  <span className="text-gray-500">{new Date(event.timestamp).toLocaleTimeString()}</span>
+                <div
+                  className={
+                    event.status === "ok"
+                      ? "text-status-good"
+                      : event.status === "error"
+                        ? "text-status-error"
+                        : "text-gray-400"
+                  }
+                >
+                  {event.status.toUpperCase()}
+                  <br />
+                  <span className="text-gray-500">
+                    {new Date(event.timestamp).toLocaleTimeString()}
+                  </span>
                 </div>
               </div>
             ))}
-            {[...pendingMeta.entries()].filter(([, meta]) => meta.state !== undefined).map(([action, meta]) => (
-              <div key={`pending-${action}`} className="flex justify-between items-start text-[11px]">
-                <div>
-                  <div className="text-white capitalize">{action.replace(/_/g, ' ')}</div>
-                  <div className={meta.state === 'pending' ? 'text-gray-400' : 'text-status-error'}>
-                    {meta.message ?? (meta.state === 'pending' ? 'Awaiting bridge response…' : 'No response from bridge')}
+            {[...pendingMeta.entries()]
+              .filter(([, meta]) => meta.state !== undefined)
+              .map(([action, meta]) => (
+                <div
+                  key={`pending-${action}`}
+                  className="flex justify-between items-start text-[11px]"
+                >
+                  <div>
+                    <div className="text-white capitalize">
+                      {action.replace(/_/g, " ")}
+                    </div>
+                    <div
+                      className={
+                        meta.state === "pending"
+                          ? "text-gray-400"
+                          : "text-status-error"
+                      }
+                    >
+                      {meta.message ??
+                        (meta.state === "pending"
+                          ? "Awaiting bridge response…"
+                          : "No response from bridge")}
+                    </div>
+                  </div>
+                  <div
+                    className={
+                      meta.state === "pending"
+                        ? "text-gray-400"
+                        : "text-status-error"
+                    }
+                  >
+                    {meta.state === "pending" ? "PENDING" : "FAILED"}
                   </div>
                 </div>
-                <div className={meta.state === 'pending' ? 'text-gray-400' : 'text-status-error'}>
-                  {meta.state === 'pending' ? 'PENDING' : 'FAILED'}
-                </div>
-              </div>
-            ))}
+              ))}
           </div>
         </section>
       </div>
