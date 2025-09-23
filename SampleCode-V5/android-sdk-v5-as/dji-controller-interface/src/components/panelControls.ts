@@ -6,3 +6,4 @@ export const hsiPanelControls = createPanelControls('hsi.panel', 'hsiPanelVisibi
 export const controllerPanelControls = createPanelControls('controller.panel', 'controllerPanelVisibilityChange');
 export const orientationPanelControls = createPanelControls('orientation.panel', 'orientationPanelVisibilityChange');
 export const projectionPanelControls = createPanelControls('projectionControls.panel', 'projectionControlsVisibilityChange');
+export const flightCommandsPanelControls = createPanelControls('flight.commands.panel', 'flightCommandsPanelVisibilityChange');

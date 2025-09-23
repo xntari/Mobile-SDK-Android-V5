@@ -16,6 +16,30 @@ export interface BridgeMessage {
   priority: string;
 }
 
+export interface FlightCommandAck extends BridgeMessage {
+  type: 'flight_command';
+  action: string;
+  status: 'ok' | 'error' | string;
+  message?: string;
+  error_message?: string;
+  error_code?: string;
+  enabled?: boolean;
+  joystick?: {
+    left_horizontal?: number;
+    left_vertical?: number;
+    right_horizontal?: number;
+    right_vertical?: number;
+  };
+  target_location?: {
+    latitude?: number;
+    longitude?: number;
+    altitude?: number | null;
+  };
+  max_speed?: number;
+  security_takeoff_height?: number;
+  mode?: string;
+}
+
 export interface ControllerData extends BridgeMessage {
   type: 'controller_data';
   joystick: {
@@ -31,6 +55,14 @@ export interface ControllerData extends BridgeMessage {
     pitch: number;
   };
   virtual_stick_enabled: boolean;
+  authority_owner?: string;
+  virtual_stick?: {
+    enabled: boolean;
+    advanced_enabled?: boolean;
+    authority_owner?: string;
+    manual_override?: boolean;
+    change_reason?: string;
+  };
 }
 
 export interface TelemetryData extends BridgeMessage {
@@ -158,11 +190,13 @@ export interface BridgeDataState {
   telemetry: TelemetryData | null;
   battery: BatteryData | null;
   camera: CameraData | null;
+  flightCommandLog: FlightCommandAck[];
   lastUpdated: {
     controller?: number;
     telemetry?: number;
     battery?: number;
     camera?: number;
+    flightCommand?: number;
   };
 }
 

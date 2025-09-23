@@ -6,6 +6,7 @@ import {
   BatteryData, 
   CameraData,
   ConnectionStatus,
+  FlightCommandAck,
   BridgeCommand 
 } from '../types';
 
@@ -15,6 +16,7 @@ export const useBridgeData = () => {
     telemetry: null,
     battery: null,
     camera: null,
+    flightCommandLog: [],
     lastUpdated: {},
   });
 
@@ -97,6 +99,24 @@ export const useBridgeData = () => {
         }));
         break;
 
+      case 'flight_command':
+        setBridgeData(prev => {
+          const ack = {
+            ...message,
+            status: message.status || message.result || 'unknown',
+            action: message.action || 'unknown'
+          } as FlightCommandAck;
+          const history = [...prev.flightCommandLog, ack];
+          const MAX_HISTORY = 20;
+          const trimmed = history.length > MAX_HISTORY ? history.slice(history.length - MAX_HISTORY) : history;
+          return {
+            ...prev,
+            flightCommandLog: trimmed,
+            lastUpdated: { ...prev.lastUpdated, flightCommand: timestamp }
+          };
+        });
+        break;
+
       default:
         console.log('Unhandled bridge message type:', message.type);
         break;
@@ -114,6 +134,7 @@ export const useBridgeData = () => {
         telemetry: null,
         battery: null,
         camera: null,
+        flightCommandLog: [],
         lastUpdated: {},
       });
     }

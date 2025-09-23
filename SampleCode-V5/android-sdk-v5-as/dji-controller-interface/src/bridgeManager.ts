@@ -1,5 +1,5 @@
 // Global bridge state manager - survives React re-mounts
-import { BridgeDataState, ConnectionStatus, ControllerData, TelemetryData, BatteryData } from './types';
+import { BridgeDataState, ConnectionStatus, ControllerData, TelemetryData, BatteryData, FlightCommandAck } from './types';
 
 class BridgeManager {
   private listeners: Set<() => void> = new Set();
@@ -8,6 +8,7 @@ class BridgeManager {
     telemetry: null,
     battery: null,
     camera: null,
+    flightCommandLog: [],
     lastUpdated: {},
   };
   private connectionStatus: ConnectionStatus = 'disconnected';
@@ -198,6 +199,24 @@ class BridgeManager {
           lastUpdated: { ...this.bridgeData.lastUpdated, battery: timestamp }
         };
         break;
+
+      case 'flight_command':
+        const ack = {
+          ...message,
+          status: message.status || message.result || 'unknown',
+          action: message.action || 'unknown'
+        } as FlightCommandAck;
+
+        const history = [...this.bridgeData.flightCommandLog, ack];
+        const MAX_HISTORY = 20;
+        const trimmed = history.length > MAX_HISTORY ? history.slice(history.length - MAX_HISTORY) : history;
+
+        this.bridgeData = {
+          ...this.bridgeData,
+          flightCommandLog: trimmed,
+          lastUpdated: { ...this.bridgeData.lastUpdated, flightCommand: timestamp }
+        };
+        break;
     }
 
     this.notifyListeners();
@@ -230,6 +249,21 @@ class BridgeManager {
     }
 
     return await window.electronAPI.sendBridgeCommand(command);
+  }
+
+  async sendFlightCommand(action: string, params?: Record<string, any>) {
+    const payload: any = {
+      type: 'flight_command',
+      data: {
+        action
+      }
+    };
+
+    if (params && Object.keys(params).length > 0) {
+      payload.data.params = params;
+    }
+
+    return this.sendBridgeCommand(payload);
   }
 }
 

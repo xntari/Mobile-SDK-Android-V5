@@ -22,6 +22,7 @@ import { mapPanelControls, hsiPanelControls, controllerPanelControls } from './p
 import { bridgeManager } from '../bridgeManager';
 import { OrientationPanel } from './OrientationPanel';
 import { ProjectionControls } from './ProjectionControls';
+import { FlightCommandsPanel } from './FlightCommandsPanel';
 
 export const App: React.FC = () => {
   const { bridgeData, connectionStatus } = useStableBridgeData();
@@ -206,19 +207,33 @@ export const App: React.FC = () => {
               storageKey="controller.panel"
               visibilityEventType="controllerPanelVisibilityChange"
             >
-              <div className="flex items-center gap-4 text-xs">
-                <div>
-                  <span className="text-gray-400">L: </span>
-                  <span className="font-mono text-dji-blue">
-                    {bridgeData.controller.joystick.left_horizontal.toFixed(0)},{bridgeData.controller.joystick.left_vertical.toFixed(0)}
-                  </span>
+              <div className="flex flex-col gap-1 text-xs">
+                <div className="flex items-center gap-4">
+                  <div>
+                    <span className="text-gray-400">L: </span>
+                    <span className="font-mono text-dji-blue">
+                      {bridgeData.controller.joystick.left_horizontal.toFixed(0)},{bridgeData.controller.joystick.left_vertical.toFixed(0)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-400">R: </span>
+                    <span className="font-mono text-dji-blue">
+                      {bridgeData.controller.joystick.right_horizontal.toFixed(0)},{bridgeData.controller.joystick.right_vertical.toFixed(0)}
+                    </span>
+                  </div>
                 </div>
-                <div>
-                  <span className="text-gray-400">R: </span>
-                  <span className="font-mono text-dji-blue">
-                    {bridgeData.controller.joystick.right_horizontal.toFixed(0)},{bridgeData.controller.joystick.right_vertical.toFixed(0)}
-                  </span>
-                </div>
+                {bridgeData.controller.virtual_stick && (
+                  <div className="text-[10px] text-gray-400 flex flex-wrap gap-x-2 gap-y-1">
+                    <span>VS: {bridgeData.controller.virtual_stick.enabled ? 'ENABLED' : 'DISABLED'}</span>
+                    <span>Authority: {bridgeData.controller.virtual_stick.authority_owner ?? 'UNKNOWN'}</span>
+                    {bridgeData.controller.virtual_stick.manual_override && (
+                      <span className="text-status-error font-semibold">MANUAL OVERRIDE</span>
+                    )}
+                    {bridgeData.controller.virtual_stick.change_reason && (
+                      <span>Reason: {bridgeData.controller.virtual_stick.change_reason.replace(/_/g, ' ')}</span>
+                    )}
+                  </div>
+                )}
               </div>
             </Panel>
           )}
@@ -275,6 +290,11 @@ export const App: React.FC = () => {
             setDetectThickness={setDetectThickness}
             setHeatmap={setVisionHeatmap}
             setHeatmapOpacity={setVisionHeatmapOpacity}
+          />
+
+          <FlightCommandsPanel
+            telemetry={bridgeData.telemetry}
+            history={bridgeData.flightCommandLog}
           />
 
           <OrientationPanel telemetry={bridgeData.telemetry} sendCommand={sendBridge} />
