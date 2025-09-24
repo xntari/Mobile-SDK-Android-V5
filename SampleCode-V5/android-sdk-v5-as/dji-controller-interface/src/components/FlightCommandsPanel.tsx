@@ -343,44 +343,48 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
   const lastManualCueRef = React.useRef<number | null>(null);
   const manualState = manualControl.state;
 
-  const playManualCue = React.useCallback((type: "kill" | "override") => {
-    try {
-      const AudioCtor = (window.AudioContext ||
-        (window as unknown as { webkitAudioContext?: typeof AudioContext })
-          .webkitAudioContext) as typeof AudioContext | undefined;
-      if (!AudioCtor) {
-        return;
+  const playManualCue = React.useCallback(
+    (type: "kill" | "override" | "release") => {
+      try {
+        const AudioCtor = (window.AudioContext ||
+          (window as unknown as { webkitAudioContext?: typeof AudioContext })
+            .webkitAudioContext) as typeof AudioContext | undefined;
+        if (!AudioCtor) {
+          return;
+        }
+        const context = audioContextRef.current ?? new AudioCtor();
+        audioContextRef.current = context;
+        if (context.state === "suspended") {
+          context.resume().catch(() => undefined);
+        }
+
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        const now = context.currentTime;
+        const frequency =
+          type === "kill" ? 440 : type === "override" ? 640 : 520;
+
+        oscillator.type = "sine";
+        oscillator.frequency.setValueAtTime(frequency, now);
+
+        gain.gain.setValueAtTime(0, now);
+        gain.gain.linearRampToValueAtTime(
+          type === "kill" ? 0.35 : 0.28,
+          now + 0.015,
+        );
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.4);
+
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+
+        oscillator.start(now);
+        oscillator.stop(now + 0.45);
+      } catch (error) {
+        console.warn("Manual control audio cue failed", error);
       }
-      const context = audioContextRef.current ?? new AudioCtor();
-      audioContextRef.current = context;
-      if (context.state === "suspended") {
-        context.resume().catch(() => undefined);
-      }
-
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      const now = context.currentTime;
-      const frequency = type === "kill" ? 440 : 640;
-
-      oscillator.type = "sine";
-      oscillator.frequency.setValueAtTime(frequency, now);
-
-      gain.gain.setValueAtTime(0, now);
-      gain.gain.linearRampToValueAtTime(
-        type === "kill" ? 0.35 : 0.25,
-        now + 0.015,
-      );
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.4);
-
-      oscillator.connect(gain);
-      gain.connect(context.destination);
-
-      oscillator.start(now);
-      oscillator.stop(now + 0.45);
-    } catch (error) {
-      console.warn("Manual control audio cue failed", error);
-    }
-  }, []);
+    },
+    [],
+  );
 
   React.useEffect(() => {
     const notification = manualState.notification;
@@ -555,15 +559,25 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
         title={
           manualNotification?.type === "kill"
             ? "Kill Switch Executed"
-            : "Manual Override"
+            : manualNotification?.type === "override"
+              ? "Manual Override"
+              : "Manual Control Released"
         }
         message={
           manualNotification?.message ??
           (manualNotification?.type === "kill"
             ? "Manual control terminated and virtual stick disabled."
-            : "Authority transferred to hardware controller.")
+            : manualNotification?.type === "override"
+              ? "Authority transferred to hardware controller."
+              : "Virtual stick disabled; remote controller may fly now.")
         }
-        type={manualNotification?.type === "kill" ? "error" : "info"}
+        type={
+          manualNotification?.type === "kill"
+            ? "error"
+            : manualNotification?.type === "override"
+              ? "error"
+              : "info"
+        }
       />
       <Panel
         title="Flight Commands"

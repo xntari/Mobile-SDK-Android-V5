@@ -29,7 +29,7 @@ const SENSITIVITY_PRESETS: Record<
 };
 
 type ManualNotification = {
-  type: "kill" | "override";
+  type: "kill" | "override" | "release";
   message: string;
   timestamp: number;
 };
@@ -168,6 +168,7 @@ export const useManualFlightControl = (
   const sendingRef = useRef(false);
   const lastCommandRef = useRef<number | null>(null);
   const lastOverrideEventRef = useRef<string | null>(null);
+  const lastAuthorityOwnerRef = useRef<string | null>(null);
 
   const pointerSupported = useMemo(pointerLockAvailable, []);
 
@@ -427,13 +428,18 @@ export const useManualFlightControl = (
     }
 
     cleanupSession({ exitPointerLock: true });
+    const releaseNotification = createNotification(
+      "release",
+      "Manual control released; virtual stick disabled.",
+    );
     setState((prev) => ({
       ...prev,
       active: false,
       status: "stopping",
       axes: createZeroAxes(),
       pointerLocked: false,
-      analytics: { ...prev.analytics, sessionStart: null },
+      analytics: { commandCount: 0, sessionStart: null },
+      notification: null,
     }));
 
     try {
@@ -459,7 +465,8 @@ export const useManualFlightControl = (
         ...prev,
         status: "idle",
         error: null,
-        analytics: { ...prev.analytics, sessionStart: null },
+        analytics: { commandCount: 0, sessionStart: null },
+        notification: releaseNotification,
       }));
       console.info("[ManualControl] Virtual stick disabled");
     } catch (error) {
@@ -471,10 +478,10 @@ export const useManualFlightControl = (
         ...prev,
         status: "error",
         error: message,
-        analytics: { ...prev.analytics, sessionStart: null },
+        analytics: { commandCount: 0, sessionStart: null },
       }));
     }
-  }, [cleanupSession, sendFlightCommand]);
+  }, [cleanupSession, createNotification, sendFlightCommand]);
 
   const kill = useCallback(async () => {
     cleanupSession({ exitPointerLock: true });
@@ -683,7 +690,24 @@ export const useManualFlightControl = (
       false;
     const manualOverride = controller?.virtual_stick?.manual_override ?? false;
 
-    if (!state.active) {
+    if (owner !== lastAuthorityOwnerRef.current) {
+      console.info(
+        "[ManualControl] Virtual stick owner update:",
+        lastAuthorityOwnerRef.current,
+        "→",
+        owner,
+        "(enabled=",
+        vsEnabled,
+        ", manualOverride=",
+        manualOverride,
+        ")",
+      );
+      lastAuthorityOwnerRef.current = owner;
+    }
+
+    const stateSnapshot = stateRef.current;
+
+    if (!stateSnapshot.active) {
       return;
     }
 
@@ -733,7 +757,7 @@ export const useManualFlightControl = (
     } else {
       lastOverrideEventRef.current = null;
     }
-  }, [cleanupSession, controller, state.active, createNotification]);
+  }, [cleanupSession, controller, createNotification]);
 
   useEffect(
     () => () => {
