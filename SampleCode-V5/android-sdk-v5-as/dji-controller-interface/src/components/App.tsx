@@ -28,6 +28,194 @@ import { OrientationPanel } from "./OrientationPanel";
 import { ProjectionControls } from "./ProjectionControls";
 import { FlightCommandsPanel } from "./FlightCommandsPanel";
 import { PreflightPanel } from "./PreflightPanel";
+import { FlyToPanel } from "./FlyToPanel";
+import {
+  ManualControlProvider,
+  useManualControl,
+} from "../context/ManualControlContext";
+import type { ControllerData, FlightCommandAck, TelemetryData } from "../types";
+
+const formatPercent = (value: number) => {
+  const percent = Math.round(value * 100);
+  return `${percent >= 0 ? "+" : ""}${percent}%`;
+};
+
+const formatStickFromInt = (value?: number | null) => {
+  if (value === undefined || value === null) return "–";
+  const normalized = value / 660;
+  return formatPercent(normalized);
+};
+
+const formatAxis = (value: number) =>
+  `${formatPercent(value)} (${value.toFixed(2)})`;
+
+const formatMeters = (value?: number | null, precision = 1) =>
+  typeof value === "number" && Number.isFinite(value)
+    ? `${value.toFixed(precision)} m`
+    : "–";
+
+const ControllerInsightPanel: React.FC<{
+  controller: ControllerData | null;
+  history: FlightCommandAck[];
+  telemetry: TelemetryData | null;
+}> = ({ controller, history, telemetry }) => {
+  const manualControl = useManualControl();
+  const manualAxes = manualControl.state.axes;
+  const virtualStick = manualControl.virtualStick;
+
+  const lastOverrideAck = React.useMemo(() => {
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      const entry = history[i];
+      if (entry.action === "virtual_stick_override") {
+        return entry;
+      }
+    }
+    return null;
+  }, [history]);
+
+  return (
+    <Panel
+      title="Controller Insight"
+      defaultPosition={{ x: 380, y: 20 }}
+      defaultSize={{ w: 320, h: 160 }}
+      storageKey="controller.panel"
+      visibilityEventType="controllerPanelVisibilityChange"
+    >
+      <div className="flex flex-col gap-2 text-[11px] text-gray-200">
+        <div className="flex flex-col gap-1 bg-black/30 rounded px-2 py-1 border border-gray-700/60">
+          <div className="text-gray-400 uppercase tracking-wide text-[10px]">
+            Physical RC
+          </div>
+          {controller ? (
+            <div className="flex flex-col gap-1 font-mono text-sm text-dji-blue">
+              <div>
+                L: {controller.joystick.left_horizontal.toFixed(0)},{" "}
+                {controller.joystick.left_vertical.toFixed(0)}
+              </div>
+              <div>
+                R: {controller.joystick.right_horizontal.toFixed(0)},{" "}
+                {controller.joystick.right_vertical.toFixed(0)}
+              </div>
+              <div className="text-[10px] text-gray-400">
+                VS: {controller.virtual_stick?.enabled ? "ENABLED" : "DISABLED"}{" "}
+                · Authority:{" "}
+                {controller.virtual_stick?.authority_owner ?? "UNKNOWN"}
+              </div>
+              {controller.virtual_stick?.manual_override && (
+                <div className="text-[10px] text-status-error">
+                  Hardware override active
+                </div>
+              )}
+              {controller.virtual_stick?.change_reason && (
+                <div className="text-[10px] text-gray-500">
+                  Reason:{" "}
+                  {controller.virtual_stick.change_reason.replace(/_/g, " ")}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="text-gray-500">
+              Controller telemetry unavailable
+            </div>
+          )}
+        </div>
+
+        <div className="grid grid-cols-3 gap-2">
+          <div className="bg-black/30 rounded border border-gray-700/60 px-2 py-1">
+            <div className="text-gray-400 uppercase tracking-wide text-[10px]">
+              SW Command
+            </div>
+            <div className="text-[10px] text-gray-400">
+              Status: {manualControl.state.status.toUpperCase()}
+            </div>
+            <div className="text-[10px] text-gray-400">
+              Pointer:{" "}
+              {manualControl.state.pointerLocked ? "Locked" : "Released"}
+            </div>
+            <div className="font-mono text-sm mt-1">
+              <div>Pitch {formatAxis(manualAxes.pitch)}</div>
+              <div>Roll {formatAxis(manualAxes.roll)}</div>
+              <div>Throttle {formatAxis(manualAxes.throttle)}</div>
+              <div>Yaw {formatAxis(manualAxes.yaw)}</div>
+            </div>
+          </div>
+          <div className="bg-black/30 rounded border border-gray-700/60 px-2 py-1">
+            <div className="text-gray-400 uppercase tracking-wide text-[10px]">
+              Ack (Bridge)
+            </div>
+            {lastOverrideAck?.joystick ? (
+              <div className="font-mono text-sm">
+                <div>
+                  LH{" "}
+                  {formatStickFromInt(lastOverrideAck.joystick.left_horizontal)}
+                </div>
+                <div>
+                  LV{" "}
+                  {formatStickFromInt(lastOverrideAck.joystick.left_vertical)}
+                </div>
+                <div>
+                  RH{" "}
+                  {formatStickFromInt(
+                    lastOverrideAck.joystick.right_horizontal,
+                  )}
+                </div>
+                <div>
+                  RV{" "}
+                  {formatStickFromInt(lastOverrideAck.joystick.right_vertical)}
+                </div>
+              </div>
+            ) : (
+              <div className="text-[10px] text-gray-500">
+                No override ack yet
+              </div>
+            )}
+            <div className="text-[10px] text-gray-400 mt-1">
+              VS Owner: {virtualStick.owner} · Mode:{" "}
+              {virtualStick.enabled ? "Enabled" : "Disabled"}
+            </div>
+          </div>
+          <div className="bg-black/30 rounded border border-gray-700/60 px-2 py-1">
+            <div className="text-gray-400 uppercase tracking-wide text-[10px]">
+              Limits
+            </div>
+            <div className="text-[10px] text-gray-300">
+              Max Height: {formatMeters(telemetry?.max_flight_height, 0)}
+            </div>
+            <div className="text-[10px] text-gray-300">
+              Go-Home Height: {formatMeters(telemetry?.go_home_height, 0)}
+            </div>
+            <div className="text-[10px] text-gray-300">
+              Distance Limit:{" "}
+              {telemetry?.max_flight_distance_enabled === false
+                ? "Disabled"
+                : formatMeters(telemetry?.max_flight_distance, 0)}
+            </div>
+            <div className="text-[10px] text-gray-500 mt-1">
+              Current AGL: {formatMeters(telemetry?.altitude)}
+            </div>
+            {telemetry?.fly_safe?.warning_notification && (
+              <div className="text-[10px] text-status-warning mt-1">
+                Warning:{" "}
+                {telemetry.fly_safe.warning_notification.event || "UNKNOWN"} ·
+                Limit:{" "}
+                {formatMeters(
+                  telemetry.fly_safe.warning_notification.height_limit,
+                  0,
+                )}
+              </div>
+            )}
+            {Array.isArray(telemetry?.fly_safe?.surrounding_zones) &&
+              telemetry.fly_safe.surrounding_zones.length > 0 && (
+                <div className="text-[10px] text-gray-400 mt-1">
+                  Zones nearby: {telemetry.fly_safe.surrounding_zones.length}
+                </div>
+              )}
+          </div>
+        </div>
+      </div>
+    </Panel>
+  );
+};
 
 export const App: React.FC = () => {
   const { bridgeData, connectionStatus } = useStableBridgeData();
@@ -161,243 +349,197 @@ export const App: React.FC = () => {
 
   try {
     return (
-      <div className="h-screen bg-dji-dark text-white flex flex-col overflow-hidden no-select">
-        {/* Top Status Bar */}
-        <TopBar
-          batteryData={bridgeData.battery}
-          telemetryData={bridgeData.telemetry}
-          connectionStatus={connectionStatus}
-        />
-
-        {/* Main Content Area - Dark background for floating panels */}
-        <div className="flex-1 relative bg-dji-dark">
-          {/* FPV Camera Panel */}
-          <CameraPanel
-            title="FPV Camera"
-            defaultPosition={{ x: 50, y: 50 }}
-            defaultSize={{ w: 640, h: 480 }}
-            storageKey="fpv.panel"
-            visibilityEventType="fpvCameraPanelVisibilityChange"
-          >
-            <FPVDisplay
-              ref={fpvDisplayRef}
-              className="w-full h-full"
-              telemetryData={bridgeData.telemetry}
-              visionDetections={
-                selectedCamera === "fpv" ? visionDetections : []
-              }
-              visionMasks={selectedCamera === "fpv" ? visionMasks : []}
-              visionKeypoints={selectedCamera === "fpv" ? visionKeypoints : []}
-              agentDetections={selectedCamera === "fpv" ? agentDetections : []}
-              maskOpacity={maskOpacity}
-              colorizeById={colorizeById}
-              detectThickness={detectThickness}
-              visionHeatmap={selectedCamera === "fpv" ? visionHeatmap : null}
-              visionHeatmapOpacity={visionHeatmapOpacity}
-            />
-          </CameraPanel>
-
-          {/* H20N Camera Panel */}
-          <CameraPanel
-            title="H20N Camera"
-            defaultPosition={{ x: 720, y: 50 }}
-            defaultSize={{ w: 640, h: 480 }}
-            storageKey="h20n.panel"
-            visibilityEventType="h20nCameraPanelVisibilityChange"
-          >
-            <H20NDisplay
-              ref={h20nDisplayRef}
-              className="w-full h-full"
-              telemetryData={bridgeData.telemetry}
-              visionDetections={
-                selectedCamera === "h20n" ? visionDetections : []
-              }
-              visionMasks={selectedCamera === "h20n" ? visionMasks : []}
-              visionKeypoints={selectedCamera === "h20n" ? visionKeypoints : []}
-              agentDetections={selectedCamera === "h20n" ? agentDetections : []}
-              maskOpacity={maskOpacity}
-              colorizeById={colorizeById}
-              detectThickness={detectThickness}
-              visionHeatmap={selectedCamera === "h20n" ? visionHeatmap : null}
-              visionHeatmapOpacity={visionHeatmapOpacity}
-            />
-          </CameraPanel>
-
-          {/* Map Display Panel */}
-          <Panel
-            title="Map"
-            defaultPosition={{ x: 20, y: 100 }}
-            defaultSize={{ w: 250, h: 200 }}
-            storageKey="map.panel"
-            visibilityEventType="mapPanelVisibilityChange"
-          >
-            <MapDisplay />
-          </Panel>
-
-          {/* HSI Compass Panel */}
-          <Panel
-            title="HSI Compass"
-            defaultPosition={{ x: 20, y: 320 }}
-            defaultSize={{ w: 250, h: 250 }}
-            storageKey="hsi.panel"
-            visibilityEventType="hsiPanelVisibilityChange"
-          >
-            <HSICompass size="small" standalone={false} />
-          </Panel>
-
-          <ObjectMemoryPanel
-            defaultPosition={{ x: 20, y: 600 }}
-            defaultSize={{ w: 420, h: 320 }}
+      <ManualControlProvider controller={bridgeData.controller}>
+        <div className="h-screen bg-dji-dark text-white flex flex-col overflow-hidden no-select">
+          {/* Top Status Bar */}
+          <TopBar
+            batteryData={bridgeData.battery}
+            telemetryData={bridgeData.telemetry}
+            connectionStatus={connectionStatus}
           />
 
-          {/* GPS Target Panel */}
-          <Panel
-            title="GPS Targets"
-            defaultPosition={{ x: 450, y: 600 }}
-            defaultSize={{ w: 380, h: 400 }}
-            storageKey="gps.targets.panel"
-            visibilityEventType="gpsTargetsPanelVisibilityChange"
-          >
-            <GPSTargetPanel telemetryData={bridgeData.telemetry} />
-          </Panel>
-
-          {/* Controller HUD Panel */}
-          {bridgeData.controller && (
-            <Panel
-              title="Controller"
-              defaultPosition={{ x: 400, y: 20 }}
-              defaultSize={{ w: 280, h: 100 }}
-              storageKey="controller.panel"
-              visibilityEventType="controllerPanelVisibilityChange"
+          {/* Main Content Area - Dark background for floating panels */}
+          <div className="flex-1 relative bg-dji-dark">
+            {/* FPV Camera Panel */}
+            <CameraPanel
+              title="FPV Camera"
+              defaultPosition={{ x: 50, y: 50 }}
+              defaultSize={{ w: 640, h: 480 }}
+              storageKey="fpv.panel"
+              visibilityEventType="fpvCameraPanelVisibilityChange"
             >
-              <div className="flex flex-col gap-1 text-xs">
-                <div className="flex items-center gap-4">
-                  <div>
-                    <span className="text-gray-400">L: </span>
-                    <span className="font-mono text-dji-blue">
-                      {bridgeData.controller.joystick.left_horizontal.toFixed(
-                        0,
-                      )}
-                      ,{bridgeData.controller.joystick.left_vertical.toFixed(0)}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-gray-400">R: </span>
-                    <span className="font-mono text-dji-blue">
-                      {bridgeData.controller.joystick.right_horizontal.toFixed(
-                        0,
-                      )}
-                      ,
-                      {bridgeData.controller.joystick.right_vertical.toFixed(0)}
-                    </span>
-                  </div>
-                </div>
-                {bridgeData.controller.virtual_stick && (
-                  <div className="text-[10px] text-gray-400 flex flex-wrap gap-x-2 gap-y-1">
-                    <span>
-                      VS:{" "}
-                      {bridgeData.controller.virtual_stick.enabled
-                        ? "ENABLED"
-                        : "DISABLED"}
-                    </span>
-                    <span>
-                      Authority:{" "}
-                      {bridgeData.controller.virtual_stick.authority_owner ??
-                        "UNKNOWN"}
-                    </span>
-                    {bridgeData.controller.virtual_stick.manual_override && (
-                      <span className="text-status-error font-semibold">
-                        MANUAL OVERRIDE
-                      </span>
-                    )}
-                    {bridgeData.controller.virtual_stick.change_reason && (
-                      <span>
-                        Reason:{" "}
-                        {bridgeData.controller.virtual_stick.change_reason.replace(
-                          /_/g,
-                          " ",
-                        )}
-                      </span>
-                    )}
-                  </div>
-                )}
-              </div>
-            </Panel>
-          )}
+              <FPVDisplay
+                ref={fpvDisplayRef}
+                className="w-full h-full"
+                telemetryData={bridgeData.telemetry}
+                visionDetections={
+                  selectedCamera === "fpv" ? visionDetections : []
+                }
+                visionMasks={selectedCamera === "fpv" ? visionMasks : []}
+                visionKeypoints={
+                  selectedCamera === "fpv" ? visionKeypoints : []
+                }
+                agentDetections={
+                  selectedCamera === "fpv" ? agentDetections : []
+                }
+                maskOpacity={maskOpacity}
+                colorizeById={colorizeById}
+                detectThickness={detectThickness}
+                visionHeatmap={selectedCamera === "fpv" ? visionHeatmap : null}
+                visionHeatmapOpacity={visionHeatmapOpacity}
+              />
+            </CameraPanel>
 
-          {/* Camera Selector for Vision/Agent */}
-          <div className="absolute top-4 right-4 z-30">
-            <div className="glass-panel p-2">
-              <div className="flex items-center gap-2 text-xs">
-                <span className="text-gray-400">Snapshot Camera:</span>
-                <button
-                  onClick={() => setSelectedCamera("fpv")}
-                  className={`px-3 py-1 rounded ${
-                    selectedCamera === "fpv"
-                      ? "bg-dji-blue text-white"
-                      : "bg-gray-700 text-gray-300 hover:bg-gray-600"
-                  }`}
-                >
-                  FPV
-                </button>
-                <button
-                  onClick={() => setSelectedCamera("h20n")}
-                  className={`px-3 py-1 rounded ${
-                    selectedCamera === "h20n"
-                      ? "bg-dji-blue text-white"
-                      : "bg-gray-700 text-gray-300 hover:bg-gray-600"
-                  }`}
-                >
-                  H20N
-                </button>
+            {/* H20N Camera Panel */}
+            <CameraPanel
+              title="H20N Camera"
+              defaultPosition={{ x: 720, y: 50 }}
+              defaultSize={{ w: 640, h: 480 }}
+              storageKey="h20n.panel"
+              visibilityEventType="h20nCameraPanelVisibilityChange"
+            >
+              <H20NDisplay
+                ref={h20nDisplayRef}
+                className="w-full h-full"
+                telemetryData={bridgeData.telemetry}
+                visionDetections={
+                  selectedCamera === "h20n" ? visionDetections : []
+                }
+                visionMasks={selectedCamera === "h20n" ? visionMasks : []}
+                visionKeypoints={
+                  selectedCamera === "h20n" ? visionKeypoints : []
+                }
+                agentDetections={
+                  selectedCamera === "h20n" ? agentDetections : []
+                }
+                maskOpacity={maskOpacity}
+                colorizeById={colorizeById}
+                detectThickness={detectThickness}
+                visionHeatmap={selectedCamera === "h20n" ? visionHeatmap : null}
+                visionHeatmapOpacity={visionHeatmapOpacity}
+              />
+            </CameraPanel>
+
+            {/* Map Display Panel */}
+            <Panel
+              title="Map"
+              defaultPosition={{ x: 20, y: 100 }}
+              defaultSize={{ w: 250, h: 200 }}
+              storageKey="map.panel"
+              visibilityEventType="mapPanelVisibilityChange"
+            >
+              <MapDisplay />
+            </Panel>
+
+            {/* HSI Compass Panel */}
+            <Panel
+              title="HSI Compass"
+              defaultPosition={{ x: 20, y: 320 }}
+              defaultSize={{ w: 250, h: 250 }}
+              storageKey="hsi.panel"
+              visibilityEventType="hsiPanelVisibilityChange"
+            >
+              <HSICompass size="small" standalone={false} />
+            </Panel>
+
+            <ObjectMemoryPanel
+              defaultPosition={{ x: 20, y: 600 }}
+              defaultSize={{ w: 420, h: 320 }}
+            />
+
+            {/* GPS Target Panel */}
+            <Panel
+              title="GPS Targets"
+              defaultPosition={{ x: 450, y: 600 }}
+              defaultSize={{ w: 380, h: 400 }}
+              storageKey="gps.targets.panel"
+              visibilityEventType="gpsTargetsPanelVisibilityChange"
+            >
+              <GPSTargetPanel telemetryData={bridgeData.telemetry} />
+            </Panel>
+
+            <ControllerInsightPanel
+              controller={bridgeData.controller}
+              history={bridgeData.flightCommandLog}
+              telemetry={bridgeData.telemetry}
+            />
+
+            {/* Camera Selector for Vision/Agent */}
+            <div className="absolute top-4 right-4 z-30">
+              <div className="glass-panel p-2">
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-gray-400">Snapshot Camera:</span>
+                  <button
+                    onClick={() => setSelectedCamera("fpv")}
+                    className={`px-3 py-1 rounded ${
+                      selectedCamera === "fpv"
+                        ? "bg-dji-blue text-white"
+                        : "bg-gray-700 text-gray-300 hover:bg-gray-600"
+                    }`}
+                  >
+                    FPV
+                  </button>
+                  <button
+                    onClick={() => setSelectedCamera("h20n")}
+                    className={`px-3 py-1 rounded ${
+                      selectedCamera === "h20n"
+                        ? "bg-dji-blue text-white"
+                        : "bg-gray-700 text-gray-300 hover:bg-gray-600"
+                    }`}
+                  >
+                    H20N
+                  </button>
+                </div>
               </div>
             </div>
+
+            {/* Global panels - persist across camera switching */}
+            <VisionPanel
+              getSnapshot={getSnapshot}
+              setBoxes={setVisionDetections}
+            />
+
+            <AgentPanel
+              getSnapshot={getSnapshot}
+              sendBridge={sendBridge}
+              setDetections={setAgentDetections}
+              laserResult={null}
+            />
+
+            <VisionRealtimePanel
+              getSnapshot={getSnapshot}
+              setBoxes={setVisionDetections}
+              setMasks={setVisionMasks}
+              setPoses={(poses) => setVisionKeypoints(poses)}
+              setMaskOpacity={setMaskOpacity}
+              setColorizeById={setColorizeById}
+              setDetectThickness={setDetectThickness}
+              setHeatmap={setVisionHeatmap}
+              setHeatmapOpacity={setVisionHeatmapOpacity}
+            />
+
+            <FlightCommandsPanel
+              telemetry={bridgeData.telemetry}
+              history={bridgeData.flightCommandLog}
+              controller={bridgeData.controller}
+            />
+
+            <FlyToPanel />
+
+            <PreflightPanel
+              preflight={bridgeData.preflight}
+              history={bridgeData.flightCommandLog}
+            />
+
+            <OrientationPanel
+              telemetry={bridgeData.telemetry}
+              sendCommand={sendBridge}
+            />
+
+            <ProjectionControls />
           </div>
-
-          {/* Global panels - persist across camera switching */}
-          <VisionPanel
-            getSnapshot={getSnapshot}
-            setBoxes={setVisionDetections}
-          />
-
-          <AgentPanel
-            getSnapshot={getSnapshot}
-            sendBridge={sendBridge}
-            setDetections={setAgentDetections}
-            laserResult={null}
-          />
-
-          <VisionRealtimePanel
-            getSnapshot={getSnapshot}
-            setBoxes={setVisionDetections}
-            setMasks={setVisionMasks}
-            setPoses={(poses) => setVisionKeypoints(poses)}
-            setMaskOpacity={setMaskOpacity}
-            setColorizeById={setColorizeById}
-            setDetectThickness={setDetectThickness}
-            setHeatmap={setVisionHeatmap}
-            setHeatmapOpacity={setVisionHeatmapOpacity}
-          />
-
-          <FlightCommandsPanel
-            telemetry={bridgeData.telemetry}
-            history={bridgeData.flightCommandLog}
-            controller={bridgeData.controller}
-          />
-
-          <PreflightPanel
-            preflight={bridgeData.preflight}
-            history={bridgeData.flightCommandLog}
-          />
-
-          <OrientationPanel
-            telemetry={bridgeData.telemetry}
-            sendCommand={sendBridge}
-          />
-
-          <ProjectionControls />
         </div>
-      </div>
+      </ManualControlProvider>
     );
   } catch (error) {
     return (

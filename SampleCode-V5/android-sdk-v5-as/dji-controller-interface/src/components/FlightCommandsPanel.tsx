@@ -7,7 +7,7 @@ import {
   TelemetryDiagnosticEntry,
 } from "../types";
 import { useBridgeCommands } from "../hooks/useBridgeCommands";
-import { useManualFlightControl } from "../hooks/useManualFlightControl";
+import { useManualControl } from "../context/ManualControlContext";
 import { Notification } from "./Modal";
 
 interface FlightCommandsPanelProps {
@@ -338,7 +338,7 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
     Map<string, ReturnType<typeof setTimeout>>
   >(new Map());
   const pendingMetaRef = React.useRef(pendingMeta);
-  const manualControl = useManualFlightControl(controller);
+  const manualControl = useManualControl();
   const audioContextRef = React.useRef<AudioContext | null>(null);
   const lastManualCueRef = React.useRef<number | null>(null);
   const manualState = manualControl.state;

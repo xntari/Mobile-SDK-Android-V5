@@ -90,7 +90,7 @@ interface VirtualStickSnapshot {
   changeReason: string;
 }
 
-interface ManualFlightControlHook {
+export interface ManualFlightControlHook {
   state: ManualFlightControlState;
   virtualStick: VirtualStickSnapshot;
   start: () => Promise<void>;

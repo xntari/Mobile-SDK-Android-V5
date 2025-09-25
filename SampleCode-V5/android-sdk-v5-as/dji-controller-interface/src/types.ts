@@ -99,6 +99,10 @@ export interface TelemetryData extends BridgeMessage {
   altitude_gps_relative?: number;
   altitude_ultrasonic?: number;
   takeoff_altitude?: number;
+  max_flight_height?: number;
+  max_flight_distance?: number;
+  max_flight_distance_enabled?: boolean;
+  go_home_height?: number;
   motors_on?: boolean;
   speed: number;
   location: {
@@ -133,6 +137,7 @@ export interface TelemetryData extends BridgeMessage {
   system_status_level?: string;
   diagnostics?: TelemetryDiagnosticEntry[];
   diagnostics_severity?: string;
+  fly_safe?: any;
   obstacle_avoidance?: {
     enabled: boolean;
     sectors: Array<{
