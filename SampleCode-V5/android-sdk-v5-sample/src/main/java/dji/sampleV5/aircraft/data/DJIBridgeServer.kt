@@ -10,6 +10,7 @@ import android.app.Activity
 import android.os.Handler
 import dji.sampleV5.aircraft.models.LookAtVM
 import dji.sampleV5.aircraft.models.CameraStreamDetailVM
+import dji.sampleV5.aircraft.models.FlySafeBridgeModel
 import dji.v5.utils.common.LogUtils
 import dji.v5.common.utils.GpsUtils
 import dji.v5.manager.diagnostic.DeviceHealthManager
@@ -31,6 +32,7 @@ import dji.sdk.keyvalue.key.CameraKey
 import dji.sdk.keyvalue.key.GimbalKey
 import dji.sdk.keyvalue.value.common.LocationCoordinate2D
 import dji.sdk.keyvalue.value.common.LocationCoordinate3D
+import dji.sdk.keyvalue.value.flightcontroller.FlightMode
 import dji.sdk.keyvalue.value.common.Velocity3D
 import dji.sdk.keyvalue.value.common.ComponentIndexType
 import dji.sdk.keyvalue.value.common.Attitude
@@ -128,6 +130,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         } catch (e: Exception) {
             Log.w(TAG, "Unable to register virtual stick state listener: ${e.message}")
         }
+        flySafeBridgeModel.start()
     }
 
     // Retry helper for camera stream registration
@@ -888,6 +891,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         
         // Remove obstacle data listeners
         cleanupObstacleDataListeners()
+        flySafeBridgeModel.stop()
         
         try {
             // Close all client connections
@@ -1657,7 +1661,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         }
     }
 
-    private val diagnosticAggregator = DiagnosticAggregator()
+    private val diagnosticAggregator = DiagnosticAggregator { flySafeBridgeModel.toSnapshotMap() }
 
     private val flightCommandHandler = FlightCommandHandler(
         runOnUiThread = ::runOnUiThread,
@@ -1781,13 +1785,34 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             "timestamp" to System.currentTimeMillis()
         )
         error?.let {
-            val errorMessage = try {
-                it.description()
-            } catch (_: Exception) {
+            val errorMessage = runCatching { it.description() }.getOrElse { _ ->
                 it.toString()
             }
             data["error_message"] = errorMessage
-            data["error_code"] = it.javaClass.simpleName
+            data["error_type"] = it.javaClass.simpleName
+
+            val errorCodeObj = runCatching { it.errorCode() }.getOrNull()
+            val errorCodeText = errorCodeObj?.toString()
+            val errorCodeNumeric = runCatching {
+                val method = errorCodeObj?.javaClass?.methods?.firstOrNull { method ->
+                    method.name.equals("code", ignoreCase = true) && method.parameterCount == 0
+                }
+                method?.invoke(errorCodeObj) as? Number
+            }.getOrNull()
+            errorCodeText?.let { code -> data["error_code"] = code }
+            errorCodeNumeric?.let { numeric -> data["error_code_value"] = numeric }
+
+            val errorDomain = runCatching {
+                val method = it.javaClass.methods.firstOrNull { method ->
+                    method.name.equals("errorDomain", ignoreCase = true) && method.parameterCount == 0
+                }
+                when (val domainValue = method?.invoke(it)) {
+                    is Enum<*> -> domainValue.name
+                    is String -> domainValue
+                    else -> domainValue?.toString()
+                }
+            }.getOrNull()
+            errorDomain?.let { domain -> data["error_domain"] = domain }
         }
         message?.let { data["message"] = it }
         if (extra.isNotEmpty()) {
@@ -2681,6 +2706,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             // Get home location
             val homeLocationKey = KeyTools.createKey(FlightControllerKey.KeyHomeLocation)
             val homeLocation = keyManager.getValue(homeLocationKey) as? LocationCoordinate2D
+            homeLocation?.let { flySafeBridgeModel.pullSurroundingZones(it) }
 
             // Get 2D aircraft location for lat/lon
             val aircraftLocationKey = KeyTools.createKey(FlightControllerKey.KeyAircraftLocation)
@@ -2721,6 +2747,28 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 else -> null
             }
 
+            // Flight limit telemetry
+            val maxFlightHeight = try {
+                (keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyHeightLimit)) as? Number)?.toDouble()
+            } catch (_: Exception) {
+                null
+            }
+            val maxFlightDistance = try {
+                (keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyDistanceLimit)) as? Number)?.toDouble()
+            } catch (_: Exception) {
+                null
+            }
+            val maxFlightDistanceEnabled = try {
+                keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyDistanceLimitEnabled)) as? Boolean
+            } catch (_: Exception) {
+                null
+            }
+            val goHomeHeight = try {
+                (keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyGoHomeHeight)) as? Number)?.toDouble()
+            } catch (_: Exception) {
+                null
+            }
+
             // GPS/GNSS telemetry details
             val gpsSatelliteCount = try {
                 (keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyGPSSatelliteCount)) as? Number)?.toInt()
@@ -2739,6 +2787,17 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             } catch (_: Exception) {
                 null
             }
+
+            // Flight mode and status details
+            val flightMode = try {
+                keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyFlightMode)) as? FlightMode
+            } catch (_: Exception) {
+                null
+            }
+            val flightModeName = flightMode?.name ?: "UNKNOWN"
+            val flightModeLabel = flightModeName.lowercase(Locale.ROOT)
+            val isAutoLanding = flightModeName.contains("LAND", ignoreCase = true)
+            val isAutoGoHome = flightModeName.contains("GO_HOME", ignoreCase = true) || flightModeName.contains("GOHOME", ignoreCase = true)
 
             // Device status & health summaries
             val deviceStatus = try {
@@ -2802,8 +2861,13 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 "system_status_level" to deviceStatus?.warningLevel()?.name,
                 "diagnostics" to diagnosticEntries,
                 "diagnostics_severity" to diagnosticsSeverity,
+                "fly_safe" to flySafeBridgeModel.toJson(),
                 "satellite_count" to gpsSatelliteCount,
                 "gps_signal_level" to gpsSignalLevel?.name,
+                "max_flight_height" to maxFlightHeight,
+                "max_flight_distance" to maxFlightDistance,
+                "max_flight_distance_enabled" to maxFlightDistanceEnabled,
+                "go_home_height" to goHomeHeight,
                 "rc_signal_quality" to rcSignalQuality,
                 
                 // Real flight data with consistent altitude naming
@@ -2818,7 +2882,10 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 "motors_on" to areMotorsOn,  // Include motor status for debugging
                 "ground_speed" to groundSpeed,
                 "vertical_speed" to (velocity?.z?.toDouble() ?: 0.0),
-                "flight_mode" to "CONNECTED", // TODO: Get actual flight mode
+                "flight_mode" to flightModeName,
+                "flight_mode_label" to flightModeLabel,
+                "is_auto_landing" to isAutoLanding,
+                "is_auto_returning_home" to isAutoGoHome,
 
                 // Location data - use ASL for aircraft position
                 "location" to run {
@@ -3651,3 +3718,4 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     }
 
 }
+    private val flySafeBridgeModel = FlySafeBridgeModel()

@@ -23,6 +23,29 @@ export interface LandingMonitorInfo {
   [key: string]: any;
 }
 
+export interface FlySafeWarningNotification {
+  event?: string;
+  description?: string;
+  height_limit?: number | null;
+}
+
+export interface FlySafeZoneInfo {
+  id?: number;
+  name?: string;
+  category?: string;
+  type?: string;
+  shape?: string;
+  lower_limit?: number | null;
+  upper_limit?: number | null;
+  center_latitude?: number | null;
+  center_longitude?: number | null;
+}
+
+export interface FlySafeSnapshot {
+  warning_notification?: FlySafeWarningNotification;
+  surrounding_zones?: FlySafeZoneInfo[];
+}
+
 export interface BridgeMessage {
   type: string;
   version: string;
@@ -37,6 +60,9 @@ export interface FlightCommandAck extends BridgeMessage {
   message?: string;
   error_message?: string;
   error_code?: string;
+  error_code_value?: number;
+  error_type?: string;
+  error_domain?: string;
   enabled?: boolean;
   joystick?: {
     left_horizontal?: number;
@@ -56,6 +82,7 @@ export interface FlightCommandAck extends BridgeMessage {
   device_status?: DeviceStatusInfo | null;
   source?: string;
   landing_monitor?: LandingMonitorInfo;
+  fly_safe?: FlySafeSnapshot;
 }
 
 export interface PreflightStatus extends BridgeMessage {
@@ -105,6 +132,10 @@ export interface TelemetryData extends BridgeMessage {
   go_home_height?: number;
   motors_on?: boolean;
   speed: number;
+  flight_mode?: string;
+  flight_mode_label?: string;
+  is_auto_landing?: boolean;
+  is_auto_returning_home?: boolean;
   location: {
     latitude: number;
     longitude: number;
@@ -120,7 +151,6 @@ export interface TelemetryData extends BridgeMessage {
     pitch: number;
     yaw: number;
   };
-  flight_mode: string;
   distance_to_home: number;
   heading: number;
   compass_heading?: number;

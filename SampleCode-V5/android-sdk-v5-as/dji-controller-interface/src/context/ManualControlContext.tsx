@@ -3,21 +3,23 @@ import {
   useManualFlightControl,
   ManualFlightControlHook,
 } from "../hooks/useManualFlightControl";
-import type { ControllerData } from "../types";
+import type { ConnectionStatus, ControllerData } from "../types";
 
 const ManualControlContext =
   React.createContext<ManualFlightControlHook | null>(null);
 
 interface ManualControlProviderProps {
   controller: ControllerData | null;
+  connectionStatus: ConnectionStatus;
   children: React.ReactNode;
 }
 
 export const ManualControlProvider: React.FC<ManualControlProviderProps> = ({
   controller,
+  connectionStatus,
   children,
 }) => {
-  const manualControl = useManualFlightControl(controller);
+  const manualControl = useManualFlightControl(controller, connectionStatus);
   return (
     <ManualControlContext.Provider value={manualControl}>
       {children}

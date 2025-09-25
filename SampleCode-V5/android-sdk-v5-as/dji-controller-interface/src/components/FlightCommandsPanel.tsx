@@ -89,11 +89,13 @@ const COMMAND_GROUPS: Array<{ title: string; commands: CommandSpec[] }> = [
         action: "cancel_landing",
         label: "Cancel Landing",
         tone: "primary",
+        isDisabled: (telemetry) => !telemetry?.is_auto_landing,
       },
       {
         action: "confirm_landing",
         label: "Confirm Landing",
         tone: "success",
+        isDisabled: (telemetry) => !telemetry?.is_auto_landing,
       },
     ],
   },
@@ -106,11 +108,19 @@ const COMMAND_GROUPS: Array<{ title: string; commands: CommandSpec[] }> = [
         tone: "danger",
         requireConfirm: true,
         confirmationText: "FORCE?",
+        isDisabled: (telemetry) => {
+          if (!telemetry) return true;
+          if (!telemetry.motors_on) return true;
+          return !(
+            telemetry.is_auto_landing || telemetry.is_auto_returning_home
+          );
+        },
       },
       {
         action: "force_land_stop",
         label: "Abort Force",
         tone: "danger",
+        isDisabled: (telemetry) => !telemetry?.is_auto_landing,
       },
     ],
   },
@@ -123,11 +133,14 @@ const COMMAND_GROUPS: Array<{ title: string; commands: CommandSpec[] }> = [
         tone: "primary",
         requireConfirm: true,
         confirmationText: "RTH?",
+        isDisabled: (telemetry) =>
+          !!telemetry?.is_auto_returning_home || telemetry?.motors_on === false,
       },
       {
         action: "return_home_stop",
         label: "Stop RTH",
         tone: "danger",
+        isDisabled: (telemetry) => !telemetry?.is_auto_returning_home,
       },
     ],
   },
@@ -155,6 +168,11 @@ const toneClass: Record<CommandTone, string> = {
   success: `${baseButtonClasses} bg-status-good/20 border-status-good/50 text-status-good hover:bg-status-good/30`,
   danger: `${baseButtonClasses} bg-status-error/20 border-status-error/60 text-status-error hover:bg-status-error/35`,
 };
+
+const MOUSE_YAW_MIN = 1 / 800;
+const MOUSE_YAW_MAX = 1 / 120;
+const DEFAULT_MOUSE_YAW = 1 / 300;
+type SensitivityChoice = "precision" | "normal" | "aggressive";
 
 type ActionAckMap = Map<string, FlightCommandAck>;
 
@@ -342,6 +360,37 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
   const audioContextRef = React.useRef<AudioContext | null>(null);
   const lastManualCueRef = React.useRef<number | null>(null);
   const manualState = manualControl.state;
+  const [exportFeedback, setExportFeedback] = React.useState<
+    { type: "success" | "error"; message: string } | null
+  >(null);
+  const [flySafeNotification, setFlySafeNotification] = React.useState<
+    { title: string; message: string } | null
+  >(null);
+  const lastFlySafeTimestampRef = React.useRef<number | null>(null);
+
+  const handleExport = React.useCallback(
+    (format: "csv" | "json") => {
+      try {
+        manualControl.exportSessionLog(format);
+        setExportFeedback({
+          type: "success",
+          message:
+            format === "csv"
+              ? "Manual session CSV downloaded."
+              : "Manual session JSON downloaded.",
+        });
+      } catch (error) {
+        setExportFeedback({
+          type: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Failed to export manual session data",
+        });
+      }
+    },
+    [manualControl],
+  );
 
   const playManualCue = React.useCallback(
     (type: "kill" | "override" | "release") => {
@@ -397,6 +446,64 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
     lastManualCueRef.current = notification.timestamp;
     playManualCue(notification.type);
   }, [manualState.notification, playManualCue]);
+
+  React.useEffect(() => {
+    if (!history.length) return;
+    const latest = history[history.length - 1];
+    if (!latest || typeof latest.timestamp !== "number") return;
+    if (lastFlySafeTimestampRef.current === latest.timestamp) return;
+    const status = (latest.status || "").toLowerCase();
+    if (status !== "error") return;
+
+    const warning = latest.fly_safe?.warning_notification;
+    const deviceStatusLabel =
+      latest.device_status?.label || latest.device_status?.code || "";
+    const deviceDescription = latest.device_status?.description;
+
+    const isNFZDeviceStatus = deviceStatusLabel
+      .toUpperCase()
+      .includes("NFZ");
+
+    if (!warning && !isNFZDeviceStatus) {
+      return;
+    }
+
+    lastFlySafeTimestampRef.current = latest.timestamp;
+
+    const parts: string[] = [];
+    if (warning) {
+      if (warning.description) {
+        parts.push(warning.description);
+      } else if (warning.event) {
+        parts.push(warning.event.replace(/_/g, " "));
+      }
+      if (typeof warning.height_limit === "number") {
+        parts.push(`Height limit ${warning.height_limit.toFixed(1)} m`);
+      }
+    } else if (deviceStatusLabel) {
+      parts.push(deviceStatusLabel.replace(/_/g, " "));
+    }
+
+    if (deviceDescription && (!warning || deviceDescription !== warning.description)) {
+      parts.push(deviceDescription);
+    }
+
+    const errorMessage = latest.error_message || latest.message;
+    if (errorMessage) {
+      parts.push(errorMessage);
+    }
+
+    const guidance =
+      "Reduce target altitude or relocate outside the restricted bubble before retrying.";
+    if (!parts.includes(guidance)) {
+      parts.push(guidance);
+    }
+
+    setFlySafeNotification({
+      title: "FlySafe Restriction",
+      message: parts.join(" · "),
+    });
+  }, [history]);
 
   React.useEffect(() => {
     pendingMetaRef.current = pendingMeta;
@@ -517,10 +624,24 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
   };
 
   const motorsOn = Boolean(telemetry?.motors_on);
-  const flightMode = telemetry?.flight_mode ?? "Unknown";
+  const flightModeRaw =
+    telemetry?.flight_mode ?? telemetry?.flight_mode_label ?? "UNKNOWN";
+  const flightMode = flightModeRaw
+    .toLowerCase()
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ") || "Unknown";
   const gpsLevel = telemetry?.gps_signal_level ?? "–";
   const rcSignal = telemetry?.rc_signal_quality ?? null;
   const lastAck = history.length ? history[history.length - 1] : null;
+  const autoLanding = Boolean(telemetry?.is_auto_landing);
+  const autoReturn = Boolean(telemetry?.is_auto_returning_home);
+  const autoModeLabel = autoLanding
+    ? "Landing"
+    : autoReturn
+      ? "Return Home"
+      : "—";
 
   const rcText =
     rcSignal === null || rcSignal === undefined ? "–" : `${rcSignal}%`;
@@ -549,7 +670,20 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
     virtualStick.manualOverride || (vsOwner !== "APP" && vsOwner !== "UNKNOWN")
       ? "text-status-error"
       : "text-gray-300";
+  const manualSensitivity = manualControl.sensitivity;
+  const mouseYawSensitivity = manualControl.mouseYawSensitivity;
+  const mouseYawRatio = mouseYawSensitivity / DEFAULT_MOUSE_YAW;
+  const sensitivityOptions: Array<{ value: SensitivityChoice; label: string; hint: string }> = [
+    { value: "precision", label: "Precision", hint: "Tight indoor tuning" },
+    { value: "normal", label: "Normal", hint: "Balanced response" },
+    { value: "aggressive", label: "Aggressive", hint: "Fast stick response" },
+  ];
+  const presetButtonClass = (value: SensitivityChoice) =>
+    manualSensitivity === value
+      ? "flex-1 rounded border border-status-good/60 bg-status-good/20 text-status-good font-semibold"
+      : "flex-1 rounded border border-gray-700 bg-gray-800/40 text-gray-300 hover:bg-gray-700/60";
   const lastDiagnostic = lastAck?.diagnostics?.[0];
+  const lastFlySafeWarning = lastAck?.fly_safe?.warning_notification;
 
   return (
     <>
@@ -579,6 +713,24 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
               : "info"
         }
       />
+      <Notification
+        isOpen={Boolean(flySafeNotification)}
+        onClose={() => setFlySafeNotification(null)}
+        title={flySafeNotification?.title ?? "FlySafe Restriction"}
+        message={flySafeNotification?.message ?? ""}
+        type="error"
+      />
+      <Notification
+        isOpen={Boolean(exportFeedback)}
+        onClose={() => setExportFeedback(null)}
+        title={
+          exportFeedback?.type === "error"
+            ? "Export Failed"
+            : "Session Exported"
+        }
+        message={exportFeedback?.message ?? ""}
+        type={exportFeedback?.type === "error" ? "error" : "success"}
+      />
       <Panel
         title="Flight Commands"
         storageKey="flight.commands.panel"
@@ -603,6 +755,9 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
               </div>
               <div>
                 Mode: <span className="text-white">{flightMode}</span>
+              </div>
+              <div>
+                Auto Mode: <span className="text-white">{autoModeLabel}</span>
               </div>
               <div>Alt AGL: {formatAltitude(telemetry?.altitude)}</div>
               <div>
@@ -634,6 +789,54 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                     className={`mt-1 ${diagnosticLevelClass(lastDiagnostic.level)} leading-tight`}
                   >
                     {summarizeDiagnostic(lastDiagnostic)}
+                  </div>
+                )}
+                {(lastAck.error_type || lastAck.error_code || lastAck.error_domain) && (
+                  <div className="mt-1 text-[10px] text-status-error leading-tight">
+                    {lastAck.error_type && <span>{lastAck.error_type}</span>}
+                    {lastAck.error_code && (
+                      <span>
+                        {lastAck.error_type ? " · " : ""}
+                        code {lastAck.error_code}
+                      </span>
+                    )}
+                    {typeof lastAck.error_code_value === "number" && (
+                      <span>
+                        {" "}(0x{lastAck.error_code_value.toString(16).toUpperCase()})
+                      </span>
+                    )}
+                    {lastAck.error_domain && (
+                      <span>
+                        {" "}
+                        — {lastAck.error_domain}
+                      </span>
+                    )}
+                  </div>
+                )}
+                {lastAck.target_location && (
+                  <div className="mt-1 text-[10px] text-gray-400 leading-tight">
+                    Target: lat {typeof lastAck.target_location.latitude === "number" ? lastAck.target_location.latitude.toFixed(6) : "—"}
+                    {" "}· lon {typeof lastAck.target_location.longitude === "number" ? lastAck.target_location.longitude.toFixed(6) : "—"}
+                    {typeof lastAck.target_location.altitude === "number" && (
+                      <span>
+                        {" "}· alt {lastAck.target_location.altitude.toFixed(1)} m
+                      </span>
+                    )}
+                  </div>
+                )}
+                {lastAck.max_speed !== undefined && (
+                  <div className="text-[10px] text-gray-400 leading-tight">
+                    Max speed {lastAck.max_speed.toFixed(1)} m/s
+                  </div>
+                )}
+                {lastFlySafeWarning && (
+                  <div className="mt-1 text-[10px] text-yellow-300 leading-tight">
+                    FlySafe: {lastFlySafeWarning.description || lastFlySafeWarning.event}
+                    {typeof lastFlySafeWarning.height_limit === "number" && (
+                      <span>
+                        {" "}· limit {lastFlySafeWarning.height_limit.toFixed(1)} m
+                      </span>
+                    )}
                   </div>
                 )}
               </div>
@@ -693,6 +896,80 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                 <span className="text-gray-200">
                   {formatAxisPercent(manualAxes.yaw)}
                 </span>
+              </div>
+            </div>
+            <div className="mt-3">
+              <div className="flex items-center justify-between text-[11px] uppercase text-gray-400">
+                <span>Sensitivity Preset</span>
+                <span className="text-gray-300">{manualSensitivity.toUpperCase()}</span>
+              </div>
+              <div className="mt-1 flex gap-1">
+                {sensitivityOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={`${presetButtonClass(option.value)} py-1 px-2 text-[11px] uppercase tracking-wide transition-colors`}
+                    onClick={() => manualControl.setSensitivity(option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-1 text-[10px] text-gray-500 leading-tight">
+                {sensitivityOptions.find((opt) => opt.value === manualSensitivity)?.hint}
+              </div>
+              <div className="mt-3">
+                <div className="flex items-center justify-between text-[10px] uppercase text-gray-400">
+                  <span>Mouse Yaw Gain</span>
+                  <span className="text-gray-300">
+                    {mouseYawSensitivity.toFixed(4)} ({mouseYawRatio.toFixed(2)}x)
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={MOUSE_YAW_MIN}
+                  max={MOUSE_YAW_MAX}
+                  step={0.0001}
+                  value={mouseYawSensitivity}
+                  onChange={(event) =>
+                    manualControl.setMouseYawSensitivity(Number(event.target.value))
+                  }
+                  className="mt-1 h-2 w-full cursor-pointer appearance-none rounded bg-gray-800 accent-status-good"
+                />
+                <div className="mt-1 flex justify-between text-[10px] text-gray-500">
+                  <span>Fine</span>
+                  <span>Fast</span>
+                </div>
+              </div>
+              <div className="mt-3">
+                <div className="flex items-center justify-between text-[11px] uppercase text-gray-400">
+                  <span>Session Export</span>
+                  <span className="text-gray-300">
+                    {manualControl.sessionLogAvailable ? "Ready" : "Run Session"}
+                  </span>
+                </div>
+                <div className="mt-1 grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    className={`${toneClass.primary} disabled:opacity-40 disabled:cursor-not-allowed`}
+                    onClick={() => handleExport("csv")}
+                    disabled={!manualControl.sessionLogAvailable}
+                  >
+                    Download CSV
+                  </button>
+                  <button
+                    type="button"
+                    className={`${toneClass.primary} disabled:opacity-40 disabled:cursor-not-allowed`}
+                    onClick={() => handleExport("json")}
+                    disabled={!manualControl.sessionLogAvailable}
+                  >
+                    Download JSON
+                  </button>
+                </div>
+                <div className="mt-1 text-[10px] text-gray-500 leading-tight">
+                  Captures stick commands (~16 Hz) and key events (start, kill, overrides).
+                  Export once manual testing concludes and motors are safe.
+                </div>
               </div>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
@@ -793,11 +1070,11 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                     <div className="text-white capitalize">
                       {event.action.replace(/_/g, " ")}
                     </div>
-                    <div
-                      className={
-                        event.error_message || event.status === "error"
-                          ? "text-status-error"
-                          : "text-gray-400"
+                  <div
+                    className={
+                      event.error_message || event.status === "error"
+                        ? "text-status-error"
+                        : "text-gray-400"
                       }
                     >
                       {event.error_message ||
@@ -816,6 +1093,53 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                             {summarizeDiagnostic(diag)}
                           </div>
                         ))}
+                      </div>
+                    )}
+                    {(event.error_type || event.error_code || event.error_domain) && (
+                      <div className="text-[10px] text-status-error leading-tight">
+                        {event.error_type && <span>{event.error_type}</span>}
+                        {event.error_code && (
+                          <span>
+                            {event.error_type ? " · " : ""}
+                            code {event.error_code}
+                          </span>
+                        )}
+                        {typeof event.error_code_value === "number" && (
+                          <span>
+                            {" "}(0x{event.error_code_value.toString(16).toUpperCase()})
+                          </span>
+                        )}
+                        {event.error_domain && (
+                          <span>
+                            {" "}— {event.error_domain}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {event.target_location && (
+                      <div className="text-[10px] text-gray-400 leading-tight">
+                        Target: lat {typeof event.target_location.latitude === "number" ? event.target_location.latitude.toFixed(6) : "—"}
+                        {" "}· lon {typeof event.target_location.longitude === "number" ? event.target_location.longitude.toFixed(6) : "—"}
+                        {typeof event.target_location.altitude === "number" && (
+                          <span>
+                            {" "}· alt {event.target_location.altitude.toFixed(1)} m
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {event.max_speed !== undefined && (
+                      <div className="text-[10px] text-gray-400 leading-tight">
+                        Max speed {event.max_speed.toFixed(1)} m/s
+                      </div>
+                    )}
+                    {event.fly_safe?.warning_notification && (
+                      <div className="text-[10px] text-yellow-300 leading-tight">
+                        FlySafe: {event.fly_safe.warning_notification.description || event.fly_safe.warning_notification.event}
+                        {typeof event.fly_safe.warning_notification.height_limit === "number" && (
+                          <span>
+                            {" "}· limit {event.fly_safe.warning_notification.height_limit.toFixed(1)} m
+                          </span>
+                        )}
                       </div>
                     )}
                     {event.device_status && (

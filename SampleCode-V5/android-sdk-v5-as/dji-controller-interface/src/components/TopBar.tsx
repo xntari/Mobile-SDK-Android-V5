@@ -28,6 +28,16 @@ const formatStatusLabel = (label?: string | null) => {
   return label.replace(/_/g, ' ');
 };
 
+const formatFlightMode = (mode?: string | null) => {
+  if (!mode) return 'UNKNOWN';
+  return mode
+    .toLowerCase()
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+};
+
 export const TopBar: React.FC<TopBarProps> = ({ 
   batteryData, 
   telemetryData, 
@@ -38,7 +48,9 @@ export const TopBar: React.FC<TopBarProps> = ({
   const diagnosticsSeverity = telemetryData?.diagnostics_severity || systemStatus?.level || 'normal';
   const systemDescription = systemStatus?.description || diagnostics[0]?.description || diagnostics[0]?.title || 'All systems nominal';
 
-  const flightMode = telemetryData?.flight_mode || 'UNKNOWN';
+  const flightMode = formatFlightMode(
+    telemetryData?.flight_mode || telemetryData?.flight_mode_label || 'UNKNOWN'
+  );
 
   const satelliteCount = telemetryData?.satellite_count ?? 0;
   const gpsSignalLevel = telemetryData?.gps_signal_level || 'UNKNOWN';

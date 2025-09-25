@@ -271,6 +271,27 @@ class FlightCommandHandler(
             }
         }
 
+        fun buildTargetExtra(): Map<String, Any?> {
+            val locationExtra = mutableMapOf(
+                "latitude" to latitude,
+                "longitude" to longitude,
+                "altitude" to if (altitude.isNaN()) null else altitude
+            )
+            val extra = mutableMapOf<String, Any?>(
+                "target_location" to locationExtra
+            )
+            if (!maxSpeed.isNaN()) {
+                extra["max_speed"] = maxSpeed
+            }
+            if (!securityTakeoffHeight.isNaN()) {
+                extra["security_takeoff_height"] = securityTakeoffHeight
+            }
+            if (mode.isNotBlank()) {
+                extra["mode"] = mode
+            }
+            return extra
+        }
+
         runOnUiThread {
             try {
                 IntelligentFlightManager.getInstance().flyToMissionManager.startMission(
@@ -278,27 +299,23 @@ class FlightCommandHandler(
                     null,
                     object : CommonCallbacks.CompletionCallback {
                         override fun onSuccess() {
-                            val extra = mutableMapOf<String, Any?>(
-                                "target_location" to mapOf(
-                                    "latitude" to latitude,
-                                    "longitude" to longitude,
-                                    "altitude" to if (altitude.isNaN()) null else altitude
-                                )
-                            )
-                            if (!maxSpeed.isNaN()) extra["max_speed"] = maxSpeed
-                            if (!securityTakeoffHeight.isNaN()) extra["security_takeoff_height"] = securityTakeoffHeight
-                            if (mode.isNotBlank()) extra["mode"] = mode
-                            respond(clientId, action, true, extra = extra)
+                            respond(clientId, action, true, extra = buildTargetExtra())
                         }
 
                         override fun onFailure(error: IDJIError) {
-                            respond(clientId, action, false, error = error)
+                            respond(clientId, action, false, error = error, extra = buildTargetExtra())
                         }
                     }
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "fly_to_prepare failed: ${e.message}", e)
-                respond(clientId, action, false, message = e.message ?: "exception")
+                respond(
+                    clientId,
+                    action,
+                    false,
+                    message = e.message ?: "exception",
+                    extra = buildTargetExtra()
+                )
             }
         }
     }

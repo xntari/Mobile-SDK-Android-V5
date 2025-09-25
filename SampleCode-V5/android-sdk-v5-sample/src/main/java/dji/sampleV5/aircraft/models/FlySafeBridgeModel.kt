@@ -84,32 +84,61 @@ class FlySafeBridgeModel {
         )
     }
 
+    fun toSnapshotMap(): Map<String, Any?>? {
+        val data = mutableMapOf<String, Any?>()
+        latestWarning?.let { warning ->
+            data["warning_notification"] = mapOf(
+                "event" to warning.event,
+                "description" to warning.description,
+                "height_limit" to warning.heightLimit,
+            )
+        }
+        if (surroundingFlyZones.isNotEmpty()) {
+            data["surrounding_zones"] = surroundingFlyZones.map { zone ->
+                mapOf(
+                    "id" to zone.flyZoneID,
+                    "name" to zone.name,
+                    "category" to zone.category?.name,
+                    "type" to zone.flyZoneType?.name,
+                    "shape" to zone.shape?.name,
+                    "lower_limit" to zone.lowerLimit,
+                    "upper_limit" to zone.upperLimit,
+                    "center_latitude" to zone.circleCenter?.latitude,
+                    "center_longitude" to zone.circleCenter?.longitude,
+                )
+            }
+        }
+        return if (data.isEmpty()) null else data
+    }
+
     fun toJson(): JSONObject {
         val json = JSONObject()
-        latestWarning?.let { warning ->
-        val warningJson = JSONObject()
-        warningJson.put("event", warning.event)
-        warningJson.put("description", warning.description)
-        warningJson.put("height_limit", warning.heightLimit)
-        json.put("warning_notification", warningJson)
-        }
-
-        if (surroundingFlyZones.isNotEmpty()) {
-            val zonesArray = JSONArray()
-            surroundingFlyZones.forEach { zone ->
-                val zoneJson = JSONObject()
-                zoneJson.put("id", zone.flyZoneID)
-                zoneJson.put("name", zone.name)
-                zoneJson.put("category", zone.category?.name)
-                zoneJson.put("type", zone.flyZoneType?.name)
-                zoneJson.put("shape", zone.shape?.name)
-                zoneJson.put("lower_limit", zone.lowerLimit)
-                zoneJson.put("upper_limit", zone.upperLimit)
-                zoneJson.put("center_latitude", zone.circleCenter?.latitude)
-                zoneJson.put("center_longitude", zone.circleCenter?.longitude)
-                zonesArray.put(zoneJson)
+        val snapshot = toSnapshotMap() ?: return json
+        snapshot.forEach { (key, value) ->
+            when (value) {
+                is List<*> -> {
+                    val array = JSONArray()
+                    value.forEach { item ->
+                        when (item) {
+                            is Map<*, *> -> {
+                                val obj = JSONObject()
+                                item.forEach { (k, v) -> obj.put(k.toString(), v) }
+                                array.put(obj)
+                            }
+                            null -> array.put(JSONObject.NULL)
+                            else -> array.put(item)
+                        }
+                    }
+                    json.put(key, array)
+                }
+                is Map<*, *> -> {
+                    val obj = JSONObject()
+                    value.forEach { (k, v) -> obj.put(k.toString(), v) }
+                    json.put(key, obj)
+                }
+                null -> json.put(key, JSONObject.NULL)
+                else -> json.put(key, value)
             }
-            json.put("surrounding_zones", zonesArray)
         }
         return json
     }

@@ -348,8 +348,11 @@ export const App: React.FC = () => {
   }
 
   try {
-    return (
-      <ManualControlProvider controller={bridgeData.controller}>
+  return (
+    <ManualControlProvider
+      controller={bridgeData.controller}
+      connectionStatus={connectionStatus}
+    >
         <div className="h-screen bg-dji-dark text-white flex flex-col overflow-hidden no-select">
           {/* Top Status Bar */}
           <TopBar

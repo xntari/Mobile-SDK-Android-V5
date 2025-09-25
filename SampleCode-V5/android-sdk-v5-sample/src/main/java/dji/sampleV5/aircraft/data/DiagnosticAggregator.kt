@@ -9,12 +9,15 @@ import dji.v5.manager.diagnostic.WarningLevel
 
 private const val DIAGNOSTIC_TAG = "DiagnosticAggregator"
 
-class DiagnosticAggregator {
+class DiagnosticAggregator(
+    private val flySafeSnapshotProvider: (() -> Map<String, Any?>?)? = null,
+) {
 
     fun collectForFlightAction(action: String): Map<String, Any?>? {
         val health = collectHealthInfos()
         val status = collectDeviceStatus()
-        if (health.isEmpty() && status == null) {
+        val flySafe = flySafeSnapshotProvider?.invoke()
+        if (health.isEmpty() && status == null && flySafe == null) {
             return null
         }
         return buildMap {
@@ -24,16 +27,19 @@ class DiagnosticAggregator {
                 put("diagnostics", health)
             }
             status?.let { put("device_status", it) }
+            flySafe?.let { put("fly_safe", it) }
         }
     }
 
     fun buildPreflightSnapshot(): Map<String, Any?> {
         val health = collectHealthInfos()
         val status = collectDeviceStatus()
+        val flySafe = flySafeSnapshotProvider?.invoke()
         return buildMap {
             put("timestamp", System.currentTimeMillis())
             status?.let { put("device_status", it) }
             put("diagnostics", health)
+            flySafe?.let { put("fly_safe", it) }
         }
     }
 

@@ -1,5 +1,5 @@
 import { useBridgeCommands } from "./useBridgeCommands";
-import { ControllerData } from "../types";
+import { ConnectionStatus, ControllerData } from "../types";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type ManualFlightControlStatus =
@@ -21,12 +21,54 @@ type SensitivityPreset = "precision" | "normal" | "aggressive";
 
 const SENSITIVITY_PRESETS: Record<
   SensitivityPreset,
-  { pitch: number; roll: number; throttle: number; yaw: number }
+  { pitch: number; roll: number; throttle: number; yaw: number; mouseYaw: number }
 > = {
-  precision: { pitch: 0.35, roll: 0.35, throttle: 0.35, yaw: 0.3 },
-  normal: { pitch: 0.6, roll: 0.6, throttle: 0.6, yaw: 0.5 },
-  aggressive: { pitch: 0.85, roll: 0.85, throttle: 0.75, yaw: 0.7 },
+  precision: {
+    pitch: 0.35,
+    roll: 0.35,
+    throttle: 0.35,
+    yaw: 0.3,
+    mouseYaw: 1 / 450,
+  },
+  normal: {
+    pitch: 0.6,
+    roll: 0.6,
+    throttle: 0.6,
+    yaw: 0.5,
+    mouseYaw: 1 / 300,
+  },
+  aggressive: {
+    pitch: 0.85,
+    roll: 0.85,
+    throttle: 0.75,
+    yaw: 0.7,
+    mouseYaw: 1 / 220,
+  },
 };
+
+type ManualSessionEntry =
+  | {
+      kind: "axes";
+      timestamp: number;
+      yaw: number;
+      throttle: number;
+      roll: number;
+      pitch: number;
+      status: "sent" | "rejected" | "error";
+      message?: string;
+    }
+  | {
+      kind: "event";
+      timestamp: number;
+      event: string;
+      detail?: string;
+    };
+
+interface ManualSessionMeta {
+  start?: number;
+  end?: number;
+  preset?: SensitivityPreset;
+}
 
 type ManualNotification = {
   type: "kill" | "override" | "release";
@@ -47,8 +89,13 @@ const createZeroAxes = (): AxisState => ({
 });
 const AXIS_EPSILON = 0.02;
 const CONTROL_TICK_MS = 60; // ~16 Hz command stream
-const MOUSE_YAW_SENSITIVITY = 1 / 300;
+const DEFAULT_MOUSE_YAW_SENSITIVITY = 1 / 300;
 const MOUSE_YAW_DECAY = 0.65;
+const DEFAULT_MOUSE_PITCH_SENSITIVITY = 1 / 300;
+const MOUSE_PITCH_DECAY = 0.65;
+const MOUSE_YAW_STORAGE_KEY = "manualControl.mouseYawSensitivity";
+const MOUSE_YAW_MIN = 1 / 800;
+const MOUSE_YAW_MAX = 1 / 120;
 
 const KEY_GROUPS = {
   forward: ["KeyW"],
@@ -101,6 +148,10 @@ export interface ManualFlightControlHook {
   pointerLockSupported: boolean;
   sensitivity: SensitivityPreset;
   setSensitivity: (preset: SensitivityPreset) => void;
+  mouseYawSensitivity: number;
+  setMouseYawSensitivity: (value: number) => void;
+  sessionLogAvailable: boolean;
+  exportSessionLog: (format: "csv" | "json") => void;
 }
 
 const clamp = (value: number, min: number, max: number) =>
@@ -127,6 +178,7 @@ const pointerLockAvailable = () =>
 
 export const useManualFlightControl = (
   controller: ControllerData | null | undefined,
+  connectionStatus: ConnectionStatus,
 ): ManualFlightControlHook => {
   const { sendFlightCommand } = useBridgeCommands();
   const [state, setState] = useState<ManualFlightControlState>({
@@ -145,6 +197,15 @@ export const useManualFlightControl = (
     stateRef.current = state;
   }, [state]);
 
+  const controllerRef = useRef(controller);
+  useEffect(() => {
+    controllerRef.current = controller;
+  }, [controller]);
+
+  const sessionLogRef = useRef<ManualSessionEntry[]>([]);
+  const sessionMetaRef = useRef<ManualSessionMeta>({});
+  const [sessionLogAvailable, setSessionLogAvailable] = useState(false);
+
   const [sensitivity, setSensitivity] = useState<SensitivityPreset>(() => {
     try {
       const raw = localStorage.getItem("manualControl.sensitivity");
@@ -160,17 +221,220 @@ export const useManualFlightControl = (
     } catch {}
   }, [sensitivity]);
 
+  const readMouseYawValue = (preset: SensitivityPreset): number | null => {
+    try {
+      const raw = localStorage.getItem(MOUSE_YAW_STORAGE_KEY);
+      if (!raw) {
+        return null;
+      }
+      const parsed = JSON.parse(raw) as Record<string, unknown> | null;
+      const value = parsed?.[preset];
+      return typeof value === "number" ? value : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const [mouseYawSensitivity, setMouseYawSensitivityState] = useState<number>(() => {
+    const stored = readMouseYawValue(sensitivity);
+    if (typeof stored === "number") {
+      return clamp(stored, MOUSE_YAW_MIN, MOUSE_YAW_MAX);
+    }
+    const presetDefault = SENSITIVITY_PRESETS[sensitivity]?.mouseYaw;
+    return clamp(presetDefault ?? DEFAULT_MOUSE_YAW_SENSITIVITY, MOUSE_YAW_MIN, MOUSE_YAW_MAX);
+  });
+
+  useEffect(() => {
+    const stored = readMouseYawValue(sensitivity);
+    const presetDefault = SENSITIVITY_PRESETS[sensitivity]?.mouseYaw;
+    const next = clamp(
+      typeof stored === "number" ? stored : presetDefault ?? DEFAULT_MOUSE_YAW_SENSITIVITY,
+      MOUSE_YAW_MIN,
+      MOUSE_YAW_MAX,
+    );
+    setMouseYawSensitivityState((prev) =>
+      Math.abs(prev - next) < 1e-6 ? prev : next,
+    );
+  }, [sensitivity]);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(MOUSE_YAW_STORAGE_KEY);
+      const parsed = (raw ? JSON.parse(raw) : {}) as Record<string, number>;
+      parsed[sensitivity] = mouseYawSensitivity;
+      localStorage.setItem(MOUSE_YAW_STORAGE_KEY, JSON.stringify(parsed));
+    } catch {}
+  }, [mouseYawSensitivity, sensitivity]);
+
+  const mouseYawSensitivityRef = useRef(mouseYawSensitivity);
+  useEffect(() => {
+    mouseYawSensitivityRef.current = mouseYawSensitivity;
+  }, [mouseYawSensitivity]);
+
+  const setMouseYawSensitivity = useCallback((value: number) => {
+    const clamped = clamp(value, MOUSE_YAW_MIN, MOUSE_YAW_MAX);
+    setMouseYawSensitivityState(clamped);
+  }, []);
+
   const preset = useMemo(() => SENSITIVITY_PRESETS[sensitivity], [sensitivity]);
 
   const keysRef = useRef<Set<string>>(new Set());
   const mouseYawRef = useRef(0);
-  const tickTimerRef = useRef<number | null>(null);
-  const sendingRef = useRef(false);
+  const mousePitchRef = useRef(0);
   const lastCommandRef = useRef<number | null>(null);
   const lastOverrideEventRef = useRef<string | null>(null);
   const lastAuthorityOwnerRef = useRef<string | null>(null);
+  const connectionStatusRef = useRef(connectionStatus);
+  const pendingResumeRef = useRef(false);
+  const bridgeLostNotifiedRef = useRef(false);
+  const resumeInProgressRef = useRef(false);
+  const tickRef = useRef<() => void>(() => {});
 
   const pointerSupported = useMemo(pointerLockAvailable, []);
+
+  const clearSessionLog = useCallback(() => {
+    sessionLogRef.current = [];
+    setSessionLogAvailable(false);
+  }, []);
+
+  const recordSessionEntry = useCallback((entry: ManualSessionEntry) => {
+    sessionLogRef.current.push(entry);
+    setSessionLogAvailable(true);
+  }, []);
+
+  const recordSessionEvent = useCallback(
+    (event: string, detail?: string) => {
+      recordSessionEntry({
+        kind: "event",
+        timestamp: Date.now(),
+        event,
+        detail,
+      });
+    },
+    [recordSessionEntry],
+  );
+
+  const exportSessionLog = useCallback(
+    (format: "csv" | "json") => {
+      const entries = sessionLogRef.current;
+      if (!entries.length) {
+        throw new Error("No manual session data available for export");
+      }
+
+      const meta = sessionMetaRef.current;
+      const start = meta.start ?? entries[0]?.timestamp ?? Date.now();
+      const end = meta.end ?? (stateRef.current.active ? Date.now() : meta.end);
+      const preset = meta.preset ?? sensitivity;
+      const commandCount = stateRef.current.analytics.commandCount;
+
+      const startIso = new Date(start).toISOString();
+      const endIso = end ? new Date(end).toISOString() : null;
+      const durationMs = end ? end - start : null;
+
+      const filenameBase = `manual-session-${startIso.replace(/[:]/g, "-")}`;
+
+      const triggerDownload = (content: string, mime: string, extension: string) => {
+        const blob = new Blob([content], { type: mime });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `${filenameBase}.${extension}`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      };
+
+      if (format === "json") {
+      const payload = {
+          meta: {
+            start_iso: startIso,
+            end_iso: endIso,
+            duration_ms: durationMs,
+            preset,
+            command_count: entries.filter((entry) => entry.kind === "axes").length,
+          },
+          entries,
+        };
+        triggerDownload(
+          JSON.stringify(payload, null, 2),
+          "application/json;charset=utf-8",
+          "json",
+        );
+        recordSessionEvent("session_export_json");
+        return;
+      }
+
+      const csvHeader = [
+        "timestamp_iso",
+        "kind",
+        "yaw",
+        "throttle",
+        "roll",
+        "pitch",
+        "status",
+        "message",
+        "event",
+        "detail",
+      ];
+
+      const escapeCsv = (value: string | number | null | undefined): string => {
+        if (value === null || value === undefined) return "";
+        const str = String(value);
+        if (str.includes("\"") || str.includes(",") || str.includes("\n")) {
+          return `"${str.replace(/\"/g, '""')}"`;
+        }
+        return str;
+      };
+
+      const csvRows: string[] = [
+        "# Manual control session export",
+        `# start_iso=${startIso}`,
+        `# end_iso=${endIso ?? ""}`,
+        `# duration_ms=${durationMs ?? ""}`,
+        `# preset=${preset}`,
+        `# command_count=${entries.filter((entry) => entry.kind === "axes").length}`,
+        csvHeader.join(","),
+      ];
+
+      entries.forEach((entry) => {
+        const timestampIso = new Date(entry.timestamp).toISOString();
+        if (entry.kind === "axes") {
+          csvRows.push(
+            [
+              escapeCsv(timestampIso),
+              "axes",
+              escapeCsv(entry.yaw.toFixed(3)),
+              escapeCsv(entry.throttle.toFixed(3)),
+              escapeCsv(entry.roll.toFixed(3)),
+              escapeCsv(entry.pitch.toFixed(3)),
+              escapeCsv(entry.status),
+              escapeCsv(entry.message ?? ""),
+              "",
+              "",
+            ].join(","),
+          );
+        } else {
+          csvRows.push(
+            [
+              escapeCsv(timestampIso),
+              "event",
+              "",
+              "",
+              "",
+              "",
+              "",
+              "",
+              escapeCsv(entry.event),
+              escapeCsv(entry.detail ?? ""),
+            ].join(","),
+          );
+        }
+      });
+
+      triggerDownload(csvRows.join("\n"), "text/csv;charset=utf-8", "csv");
+      recordSessionEvent("session_export_csv");
+    }, [recordSessionEvent, sensitivity]);
 
   const createNotification = useCallback(
     (
@@ -253,18 +517,11 @@ export const useManualFlightControl = (
     return nextAxes;
   }, [computeKeyAxes]);
 
-  const stopTickLoop = useCallback(() => {
-    if (tickTimerRef.current !== null) {
-      window.clearInterval(tickTimerRef.current);
-      tickTimerRef.current = null;
-    }
-  }, []);
-
   const cleanupSession = useCallback(
     (options?: { exitPointerLock?: boolean }) => {
-      stopTickLoop();
       keysRef.current.clear();
       mouseYawRef.current = 0;
+      mousePitchRef.current = 0;
 
       if (
         pointerSupported &&
@@ -274,13 +531,18 @@ export const useManualFlightControl = (
         document.exitPointerLock();
       }
     },
-    [pointerSupported, stopTickLoop],
+    [pointerSupported],
   );
 
   const handleSendError = useCallback(
     (error: unknown) => {
       const message =
         error instanceof Error ? error.message : "Manual command failed";
+      recordSessionEvent("command_error", message);
+      sessionMetaRef.current = {
+        ...sessionMetaRef.current,
+        end: Date.now(),
+      };
       cleanupSession({ exitPointerLock: true });
       setState((prev) => ({
         ...prev,
@@ -291,8 +553,164 @@ export const useManualFlightControl = (
         error: message,
       }));
     },
-    [cleanupSession],
+    [cleanupSession, recordSessionEvent],
   );
+
+  const ensureVirtualStickReady = useCallback(async () => {
+    const snapshot = controllerRef.current;
+    const owner = resolveOwner(snapshot);
+    const manualOverride = snapshot?.virtual_stick?.manual_override ?? false;
+    const enabled =
+      snapshot?.virtual_stick?.enabled ?? snapshot?.virtual_stick_enabled ?? false;
+
+    const ownerBlocked =
+      manualOverride ||
+      (owner && owner !== "APP" && owner !== "UNKNOWN" && owner !== "NONE");
+    if (ownerBlocked) {
+      recordSessionEvent("vs_enable_blocked", owner || "unknown_owner");
+      throw new Error(
+        `Virtual stick currently owned by ${owner || "hardware controller"}. Release RC override to continue.`,
+      );
+    }
+
+    if (enabled) {
+      recordSessionEvent("vs_enable_already_enabled");
+      return;
+    }
+
+    let lastError: string | null = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        recordSessionEvent("vs_enable_attempt", `attempt=${attempt}`);
+        const result = await sendFlightCommand("virtual_stick_enable");
+        if (!result || result.success !== false) {
+          recordSessionEvent("vs_enable_success", `attempt=${attempt}`);
+          return;
+        }
+        lastError =
+          result.error ||
+          result.error_message ||
+          result.message ||
+          "Bridge rejected enable request";
+        recordSessionEvent("vs_enable_rejected", lastError);
+      } catch (error) {
+        lastError =
+          error instanceof Error
+            ? error.message
+            : "Virtual stick enable failed";
+        recordSessionEvent("vs_enable_failure", lastError);
+      }
+
+      if (attempt < 3) {
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, 180 * attempt),
+        );
+
+        const latest = controllerRef.current;
+        const latestOwner = resolveOwner(latest);
+        const latestManualOverride =
+          latest?.virtual_stick?.manual_override ?? false;
+        const latestEnabled =
+          latest?.virtual_stick?.enabled ??
+          latest?.virtual_stick_enabled ??
+          false;
+
+        const latestBlocked =
+          latestManualOverride ||
+          (latestOwner &&
+            latestOwner !== "APP" &&
+            latestOwner !== "UNKNOWN" &&
+            latestOwner !== "NONE");
+        if (latestBlocked) {
+          recordSessionEvent("vs_enable_blocked", latestOwner || "unknown_owner");
+          throw new Error(
+            `Virtual stick taken by ${latestOwner || "hardware controller"}. Release RC override.`,
+          );
+        }
+        if (latestEnabled) {
+          recordSessionEvent("vs_enable_success", `attempt=${attempt} (external)`);
+          return;
+        }
+      }
+    }
+
+    recordSessionEvent("vs_enable_failed_final", lastError ?? "unknown_error");
+    throw new Error(lastError ?? "Unable to enable virtual stick");
+  }, [recordSessionEvent, sendFlightCommand]);
+
+  useEffect(() => {
+    const previousStatus = connectionStatusRef.current;
+    connectionStatusRef.current = connectionStatus;
+
+    if (
+      (connectionStatus === "disconnected" || connectionStatus === "error") &&
+      stateRef.current.active &&
+      !bridgeLostNotifiedRef.current
+    ) {
+      bridgeLostNotifiedRef.current = true;
+      pendingResumeRef.current = true;
+      recordSessionEvent("bridge_connection_lost", connectionStatus);
+    }
+
+    if (connectionStatus === "connected") {
+      if (bridgeLostNotifiedRef.current) {
+        bridgeLostNotifiedRef.current = false;
+        recordSessionEvent("bridge_connection_restored");
+      }
+
+      if (
+        pendingResumeRef.current &&
+        stateRef.current.active &&
+        !resumeInProgressRef.current
+      ) {
+        resumeInProgressRef.current = true;
+        recordSessionEvent("session_resume_attempt");
+        ensureVirtualStickReady()
+          .then(() => {
+            pendingResumeRef.current = false;
+            recordSessionEvent("session_resume_success");
+            return sendFlightCommand(
+              "virtual_stick_override",
+              stateRef.current.axes,
+            ).then((result: any) => {
+              if (result && result.success === false) {
+                const errMessage =
+                  result.error ||
+                  result.error_message ||
+                  result.message ||
+                  "Bridge rejected manual command";
+                recordSessionEvent("session_resume_stream_failed", errMessage);
+              } else {
+                recordSessionEvent("session_resume_stream");
+              }
+            });
+          })
+          .catch((error) => {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            recordSessionEvent("session_resume_failed", message);
+            handleSendError(error);
+          })
+          .finally(() => {
+            resumeInProgressRef.current = false;
+          });
+      }
+    }
+
+    if (
+      previousStatus === "connected" &&
+      connectionStatus !== "connected" &&
+      connectionStatus !== "reconnecting"
+    ) {
+      pendingResumeRef.current = true;
+    }
+  }, [
+    connectionStatus,
+    ensureVirtualStickReady,
+    handleSendError,
+    recordSessionEvent,
+    sendFlightCommand,
+  ]);
 
   const tick = useCallback(() => {
     if (!stateRef.current.active) {
@@ -301,6 +719,7 @@ export const useManualFlightControl = (
 
     const keyAxes = computeKeyAxes();
     const yawWithMouse = clamp(keyAxes.yaw + mouseYawRef.current, -1, 1);
+    const pitchWithMouse = clamp(keyAxes.pitch + mousePitchRef.current, -1, 1);
 
     if (Math.abs(mouseYawRef.current) > 0.0001) {
       mouseYawRef.current *= MOUSE_YAW_DECAY;
@@ -309,24 +728,41 @@ export const useManualFlightControl = (
       }
     }
 
+    if (Math.abs(mousePitchRef.current) > 0.0001) {
+      mousePitchRef.current *= MOUSE_PITCH_DECAY;
+      if (Math.abs(mousePitchRef.current) < 0.001) {
+        mousePitchRef.current = 0;
+      }
+    }
+
     const nextAxes: AxisState = {
       yaw: yawWithMouse,
       throttle: clamp(keyAxes.throttle, -1, 1),
       roll: clamp(keyAxes.roll, -1, 1),
-      pitch: clamp(keyAxes.pitch, -1, 1),
+      pitch: pitchWithMouse,
     };
 
-    if (!axesEqual(stateRef.current.axes, nextAxes)) {
-      setState((prev) => ({
-        ...prev,
-        axes: nextAxes,
-      }));
-    }
+    setState((prev) => ({
+      ...prev,
+      axes: axesEqual(prev.axes, nextAxes) ? prev.axes : nextAxes,
+      lastCommandMs: Date.now(),
+      analytics: {
+        ...prev.analytics,
+        commandCount: prev.analytics.commandCount + 1,
+        sessionStart: prev.analytics.sessionStart ?? Date.now(),
+      },
+    }));
 
-    if (sendingRef.current) {
-      return;
-    }
-    sendingRef.current = true;
+    const sendTimestamp = Date.now();
+    recordSessionEntry({
+      kind: "axes",
+      timestamp: sendTimestamp,
+      yaw: nextAxes.yaw,
+      throttle: nextAxes.throttle,
+      roll: nextAxes.roll,
+      pitch: nextAxes.pitch,
+      status: "sent",
+    });
 
     sendFlightCommand("virtual_stick_override", nextAxes)
       .then((result: any) => {
@@ -347,31 +783,62 @@ export const useManualFlightControl = (
           }));
         }
 
+        if (pendingResumeRef.current) {
+          pendingResumeRef.current = false;
+          recordSessionEvent("session_resume_stream");
+        }
+
         if (result && result.success === false) {
           const errMessage =
             result.error ||
             result.error_message ||
             result.message ||
             "Bridge rejected manual command";
-          handleSendError(new Error(errMessage));
+          if (errMessage.toLowerCase().includes("bridge not connected")) {
+            if (!bridgeLostNotifiedRef.current) {
+              recordSessionEvent("bridge_not_connected", errMessage);
+            }
+            pendingResumeRef.current = true;
+            bridgeLostNotifiedRef.current = true;
+            return;
+          }
+        recordSessionEvent("command_rejected", errMessage);
+        handleSendError(new Error(errMessage));
         }
       })
-      .catch(handleSendError)
-      .finally(() => {
-        sendingRef.current = false;
+      .catch((error) => {
+        const message =
+          error instanceof Error ? error.message : "Manual command failed";
+        if (message.toLowerCase().includes("bridge not connected")) {
+          if (!bridgeLostNotifiedRef.current) {
+            recordSessionEvent("bridge_not_connected", message);
+          }
+          pendingResumeRef.current = true;
+          bridgeLostNotifiedRef.current = true;
+          return;
+        }
+        recordSessionEvent("command_error", message);
+        handleSendError(error);
       });
-  }, [computeKeyAxes, handleSendError, sendFlightCommand]);
-
-  const startTickLoop = useCallback(() => {
-    if (tickTimerRef.current === null) {
-      tickTimerRef.current = window.setInterval(tick, CONTROL_TICK_MS);
-    }
-  }, [tick]);
+  }, [
+    computeKeyAxes,
+    handleSendError,
+    recordSessionEntry,
+    recordSessionEvent,
+    sendFlightCommand,
+  ]);
 
   const start = useCallback(async () => {
     if (stateRef.current.active || stateRef.current.status === "arming") {
       return;
     }
+
+    clearSessionLog();
+    sessionMetaRef.current = { start: Date.now(), preset: sensitivity };
+    recordSessionEvent("session_start", `preset=${sensitivity}`);
+    pendingResumeRef.current = false;
+    resumeInProgressRef.current = false;
+    bridgeLostNotifiedRef.current = false;
 
     setState((prev) => ({
       ...prev,
@@ -380,16 +847,7 @@ export const useManualFlightControl = (
     }));
 
     try {
-      const enableResult = await sendFlightCommand("virtual_stick_enable");
-      if (enableResult && enableResult.success === false) {
-        const errMessage =
-          enableResult.error ||
-          enableResult.error_message ||
-          enableResult.message ||
-          "Bridge rejected enable";
-        throw new Error(errMessage);
-      }
-
+      await ensureVirtualStickReady();
       await sendFlightCommand("virtual_stick_override", createZeroAxes());
 
       setState((prev) => ({
@@ -402,6 +860,7 @@ export const useManualFlightControl = (
         notification: null,
         analytics: { commandCount: 0, sessionStart: Date.now() },
       }));
+      recordSessionEvent("session_control_active");
       console.info(
         "[ManualControl] Virtual stick enabled (sensitivity:",
         sensitivity,
@@ -412,6 +871,7 @@ export const useManualFlightControl = (
         error instanceof Error
           ? error.message
           : "Failed to enable virtual stick";
+      recordSessionEvent("session_start_failed", message);
       setState((prev) => ({
         ...prev,
         active: false,
@@ -420,7 +880,13 @@ export const useManualFlightControl = (
         analytics: { commandCount: 0, sessionStart: null },
       }));
     }
-  }, [sendFlightCommand, sensitivity]);
+  }, [
+    clearSessionLog,
+    ensureVirtualStickReady,
+    recordSessionEvent,
+    sendFlightCommand,
+    sensitivity,
+  ]);
 
   const stop = useCallback(async () => {
     if (!stateRef.current.active && stateRef.current.status !== "arming") {
@@ -432,6 +898,15 @@ export const useManualFlightControl = (
       "release",
       "Manual control released; virtual stick disabled.",
     );
+    const stopTimestamp = Date.now();
+    sessionMetaRef.current = {
+      ...sessionMetaRef.current,
+      end: stopTimestamp,
+    };
+    recordSessionEvent("session_stop");
+    pendingResumeRef.current = false;
+    resumeInProgressRef.current = false;
+    bridgeLostNotifiedRef.current = false;
     setState((prev) => ({
       ...prev,
       active: false,
@@ -474,6 +949,7 @@ export const useManualFlightControl = (
         error instanceof Error
           ? error.message
           : "Failed to disable virtual stick";
+      recordSessionEvent("session_stop_failed", message);
       setState((prev) => ({
         ...prev,
         status: "error",
@@ -481,7 +957,7 @@ export const useManualFlightControl = (
         analytics: { commandCount: 0, sessionStart: null },
       }));
     }
-  }, [cleanupSession, createNotification, sendFlightCommand]);
+  }, [cleanupSession, createNotification, recordSessionEvent, sendFlightCommand]);
 
   const kill = useCallback(async () => {
     cleanupSession({ exitPointerLock: true });
@@ -489,6 +965,15 @@ export const useManualFlightControl = (
       "kill",
       "Kill switch executed; manual control released",
     );
+    const killTimestamp = Date.now();
+    sessionMetaRef.current = {
+      ...sessionMetaRef.current,
+      end: killTimestamp,
+    };
+    recordSessionEvent("session_kill_switch");
+    pendingResumeRef.current = false;
+    resumeInProgressRef.current = false;
+    bridgeLostNotifiedRef.current = false;
     setState((prev) => ({
       ...prev,
       active: false,
@@ -514,12 +999,13 @@ export const useManualFlightControl = (
         error instanceof Error
           ? error.message
           : "Failed to disable virtual stick";
+      recordSessionEvent("session_kill_switch_failed", message);
       setState((prev) => ({
         ...prev,
         error: message,
       }));
     }
-  }, [cleanupSession, createNotification, sendFlightCommand]);
+  }, [cleanupSession, createNotification, recordSessionEvent, sendFlightCommand]);
 
   const handleKeyDown = useCallback(
     (event: KeyboardEvent) => {
@@ -568,6 +1054,7 @@ export const useManualFlightControl = (
 
     keysRef.current.clear();
     mouseYawRef.current = 0;
+    mousePitchRef.current = 0;
     updateAxesSnapshot();
   }, [updateAxesSnapshot]);
 
@@ -579,6 +1066,7 @@ export const useManualFlightControl = (
     const locked = document.pointerLockElement === document.body;
     if (!locked) {
       mouseYawRef.current = 0;
+      mousePitchRef.current = 0;
       keysRef.current.delete("ArrowLeft");
       keysRef.current.delete("ArrowRight");
     }
@@ -614,32 +1102,45 @@ export const useManualFlightControl = (
         return;
       }
 
-      const delta = event.movementX || 0;
-      if (delta === 0) {
-        return;
+      const deltaX = event.movementX || 0;
+      const deltaY = event.movementY || 0;
+      let changed = false;
+
+      if (deltaX !== 0) {
+        mouseYawRef.current = clamp(
+          mouseYawRef.current + deltaX * mouseYawSensitivityRef.current,
+          -1,
+          1,
+        );
+        changed = true;
       }
 
-      mouseYawRef.current = clamp(
-        mouseYawRef.current + delta * MOUSE_YAW_SENSITIVITY,
-        -1,
-        1,
-      );
-      updateAxesSnapshot();
+      if (deltaY !== 0) {
+        mousePitchRef.current = clamp(
+          mousePitchRef.current + -deltaY * mouseYawSensitivityRef.current,
+          -1,
+          1,
+        );
+        changed = true;
+      }
+
+      if (changed) {
+        updateAxesSnapshot();
+      }
     },
     [pointerSupported, updateAxesSnapshot],
   );
 
   useEffect(() => {
-    if (!state.active) {
-      stopTickLoop();
-      return;
-    }
+    tickRef.current = tick;
+  }, [tick]);
 
-    startTickLoop();
-    return () => {
-      stopTickLoop();
-    };
-  }, [startTickLoop, state.active, stopTickLoop]);
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      tickRef.current();
+    }, CONTROL_TICK_MS);
+    return () => window.clearInterval(intervalId);
+  }, []);
 
   useEffect(() => {
     if (!state.active) {
@@ -713,6 +1214,11 @@ export const useManualFlightControl = (
 
     if (!vsEnabled) {
       cleanupSession({ exitPointerLock: true });
+      sessionMetaRef.current = {
+        ...sessionMetaRef.current,
+        end: Date.now(),
+      };
+      recordSessionEvent("session_virtual_stick_disabled_external");
       setState((prev) => ({
         ...prev,
         active: false,
@@ -731,6 +1237,11 @@ export const useManualFlightControl = (
     if (authorityTransferred) {
       cleanupSession({ exitPointerLock: true });
       const overrideKey = `${owner ?? "unknown"}-${manualOverride}`;
+      sessionMetaRef.current = {
+        ...sessionMetaRef.current,
+        end: Date.now(),
+      };
+      recordSessionEvent("session_authority_transferred", owner || "unknown");
       setState((prev) => {
         const overrideMessage = `Virtual stick authority transferred to ${
           owner || "controller"
@@ -757,7 +1268,7 @@ export const useManualFlightControl = (
     } else {
       lastOverrideEventRef.current = null;
     }
-  }, [cleanupSession, controller, createNotification]);
+  }, [cleanupSession, controller, createNotification, recordSessionEvent]);
 
   useEffect(
     () => () => {
@@ -800,5 +1311,9 @@ export const useManualFlightControl = (
     pointerLockSupported: pointerSupported,
     sensitivity,
     setSensitivity,
+    mouseYawSensitivity,
+    setMouseYawSensitivity,
+    sessionLogAvailable,
+    exportSessionLog,
   };
 };
