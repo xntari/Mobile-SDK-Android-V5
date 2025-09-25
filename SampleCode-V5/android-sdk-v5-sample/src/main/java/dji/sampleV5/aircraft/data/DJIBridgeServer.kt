@@ -115,6 +115,20 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     private val cameraVM = CameraStreamDetailVM()
     }
 
+    private val waypointMissionExecutor = WaypointMissionExecutor(
+        contextProvider = {
+            val act = activity ?: (bridgeActivity as? Activity)
+            act?.applicationContext
+        },
+        runOnUiThread = ::runOnUiThread
+    )
+
+    private val flySafeBridgeModel = FlySafeBridgeModel()
+    private val flyToBridgeModel = FlyToMissionBridgeModel()
+    private val waypointBridgeModel = WaypointMissionBridgeModel(waypointMissionExecutor)
+
+    private val diagnosticAggregator = DiagnosticAggregator { flySafeBridgeModel.toSnapshotMap() }
+
     init {
         try {
             VirtualStickManager.getInstance().setVirtualStickStateListener(object : VirtualStickStateListener {
@@ -132,6 +146,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         }
         flySafeBridgeModel.start()
         flyToBridgeModel.start()
+        waypointBridgeModel.start()
     }
 
     // Retry helper for camera stream registration
@@ -894,6 +909,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         cleanupObstacleDataListeners()
         flySafeBridgeModel.stop()
         flyToBridgeModel.stop()
+        waypointBridgeModel.stop()
         
         try {
             // Close all client connections
@@ -1663,8 +1679,6 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         }
     }
 
-    private val diagnosticAggregator = DiagnosticAggregator { flySafeBridgeModel.toSnapshotMap() }
-
     private val flightCommandHandler = FlightCommandHandler(
         runOnUiThread = ::runOnUiThread,
         sendFlightCommandResponse = { clientId, action, success, message, error, extra ->
@@ -1680,7 +1694,8 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         diagnosticExtrasProvider = { action -> diagnosticAggregator.collectForFlightAction(action) },
         postActionHook = { clientId, action, success -> handleFlightActionPostHook(clientId, action, success) },
         flySafeSnapshotProvider = { flySafeBridgeModel.toSnapshotMap() },
-        flyToStatusProvider = { flyToBridgeModel.toTelemetryMap() }
+        flyToStatusProvider = { flyToBridgeModel.toTelemetryMap() },
+        waypointMissionExecutor = waypointMissionExecutor
     )
 
     private val telemetryStreamer = TelemetryStreamer(
@@ -3078,6 +3093,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 "fpv_optics" to collectCameraOpticsSnapshot(ComponentIndexType.FPV, keyManager).takeIf { it.isNotEmpty() }
             ).also { map ->
                 flyToBridgeModel.toTelemetryMap()?.let { map["fly_to_status"] = it }
+                waypointBridgeModel.toTelemetryMap()?.let { map["waypoint_status"] = it }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to collect telemetry data: ${e.message}")
@@ -3724,5 +3740,3 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     }
 
 }
-    private val flySafeBridgeModel = FlySafeBridgeModel()
-    private val flyToBridgeModel = FlyToMissionBridgeModel()

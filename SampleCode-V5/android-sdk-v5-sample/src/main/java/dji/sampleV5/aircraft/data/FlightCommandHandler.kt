@@ -36,7 +36,8 @@ class FlightCommandHandler(
     private val diagnosticExtrasProvider: (String) -> Map<String, Any?>?,
     private val postActionHook: (clientId: String, action: String, success: Boolean) -> Unit,
     private val flySafeSnapshotProvider: (() -> Map<String, Any?>?)? = null,
-    private val flyToStatusProvider: (() -> Map<String, Any?>?)? = null
+    private val flyToStatusProvider: (() -> Map<String, Any?>?)? = null,
+    private val waypointMissionExecutor: WaypointMissionExecutor? = null
 ) {
 
     private fun respond(
@@ -145,6 +146,7 @@ class FlightCommandHandler(
             "virtual_stick_disable" -> toggleVirtualStick(clientId, action, false)
             "virtual_stick_override" -> handleVirtualStickOverride(clientId, action, params)
             "fly_to_prepare" -> handleFlyToPrepare(clientId, action, params)
+            "waypoint_stop" -> handleWaypointStop(clientId, action)
 
             else -> {
                 Log.w(TAG, "Unsupported flight command action '$actionRaw' from $clientId")
@@ -295,19 +297,49 @@ class FlightCommandHandler(
         val altitudeSpecified = targetAltitude != null
         val flyToHeightInt = flyToHeightMeters?.roundToInt()
 
+        val capabilitySnapshot = flyToStatusProvider?.invoke()
+        val supportedModes = (capabilitySnapshot?.get("capability") as? Map<*, *>)
+            ?.get("supported_modes") as? List<*>
+
+        val baseExtra = buildFlyToExtra(
+            targetLocation = targetLocation,
+            targetAltitude = targetAltitude,
+            altitudeSpecified = altitudeSpecified,
+            maxSpeed = maxSpeedMeters,
+            securityTakeoffHeight = securityTakeoffHeightMeters,
+            mode = flyToMode,
+            flyToHeight = flyToHeightInt
+        )
+
+        val fallbackReason = if (supportedModes != null && supportedModes.filterIsInstance<String>().isEmpty()) {
+            "intelligent_fly_to_unsupported"
+        } else null
+
+        if (fallbackReason != null) {
+            attemptWaypointFallback(
+                clientId = clientId,
+                action = action,
+                request = WaypointMissionExecutor.Request(
+                    targetLocation = targetLocation,
+                    targetAltitudeAsl = targetAltitude,
+                    mode = flyToMode,
+                    flyToHeight = flyToHeightInt,
+                    maxSpeed = maxSpeedMeters,
+                    securityTakeoffHeight = securityTakeoffHeightMeters,
+                    reason = fallbackReason
+                ),
+                baseExtra = baseExtra,
+                message = "Fallback to waypoint mission: $fallbackReason"
+            )
+            return
+        }
+
+        var fallbackAttempted = false
+
         runOnUiThread {
             try {
                 val flyToManager = IntelligentFlightManager.getInstance().flyToMissionManager
                 val paramSteps = mutableListOf<Map<String, Any?>>()
-                val baseExtra = buildFlyToExtra(
-                    targetLocation = targetLocation,
-                    targetAltitude = targetAltitude,
-                    altitudeSpecified = altitudeSpecified,
-                    maxSpeed = maxSpeedMeters,
-                    securityTakeoffHeight = securityTakeoffHeightMeters,
-                    mode = flyToMode,
-                    flyToHeight = flyToHeightInt
-                )
 
                 fun respondWithStatus(
                     success: Boolean,
@@ -389,14 +421,34 @@ class FlightCommandHandler(
                             override fun onFailure(error: IDJIError) {
                                 val message = error.description() ?: "$label update failed"
                                 logFlyToError("update_$label", error)
-                                paramSteps.add(
-                                    mapOf(
-                                        "type" to label,
-                                        "status" to "failed",
-                                        "message" to message
+                                if (!fallbackAttempted && shouldFallbackDueToFlyToError(error)) {
+                                    fallbackAttempted = true
+                                    attemptWaypointFallback(
+                                        clientId = clientId,
+                                        action = action,
+                                        request = WaypointMissionExecutor.Request(
+                                            targetLocation = targetLocation,
+                                            targetAltitudeAsl = targetAltitude,
+                                            mode = flyToMode,
+                                            flyToHeight = flyToHeightInt,
+                                            maxSpeed = maxSpeedMeters,
+                                            securityTakeoffHeight = securityTakeoffHeightMeters,
+                                            reason = "update_param_failed:${message}"
+                                        ),
+                                        baseExtra = baseExtra,
+                                        message = message
                                     )
-                                )
-                                startMission(paramStatus = "update_failed", message = message)
+                                    return
+                                } else {
+                                    paramSteps.add(
+                                        mapOf(
+                                            "type" to label,
+                                            "status" to "failed",
+                                            "message" to message
+                                        )
+                                    )
+                                    startMission(paramStatus = "update_failed", message = message)
+                                }
                             }
                         }
                     )
@@ -424,6 +476,65 @@ class FlightCommandHandler(
                 respond(clientId, action, false, message = e.message ?: "exception", extra = extra)
             }
         }
+    }
+
+    private fun attemptWaypointFallback(
+        clientId: String,
+        action: String,
+        request: WaypointMissionExecutor.Request,
+        baseExtra: Map<String, Any?>,
+        message: String
+    ) {
+        val executor = waypointMissionExecutor
+        val extra = baseExtra.toMutableMap().apply {
+            this["backend"] = "waypoint_v2"
+            this["fly_to_param_update"] = "waypoint_fallback"
+            this["fly_to_param_message"] = message
+
+            val steps = (this["fly_to_param_steps"] as? List<*>)?.mapNotNull { it as? Map<String, Any?> }?.toMutableList()
+                ?: mutableListOf()
+            steps.add(
+                mapOf(
+                    "type" to "backend",
+                    "status" to "waypoint_v2",
+                    "message" to message
+                )
+            )
+            this["fly_to_param_steps"] = steps
+        }
+
+        if (executor == null) {
+            respond(
+                clientId,
+                action,
+                false,
+                message = "Waypoint mission fallback unavailable",
+                extra = extra
+            )
+            return
+        }
+
+        executor.execute(request) { result ->
+            when (result) {
+                is WaypointMissionExecutor.Result.Success -> {
+                    val mergedExtra = extra.toMutableMap().apply {
+                        result.extra.forEach { (key, value) -> this[key] = value }
+                    }
+                    respond(clientId, action, true, extra = mergedExtra)
+                }
+                is WaypointMissionExecutor.Result.Failure -> {
+                    val mergedExtra = extra.toMutableMap().apply {
+                        result.extra.forEach { (key, value) -> this[key] = value }
+                    }
+                    respond(clientId, action, false, message = result.message, error = result.error, extra = mergedExtra)
+                }
+            }
+        }
+    }
+
+    private fun shouldFallbackDueToFlyToError(error: IDJIError): Boolean {
+        val description = error.description()?.uppercase(Locale.ROOT) ?: return false
+        return description.contains("REQUEST_HANDLER_NOT_FOUND") || description.contains("NOT_SUPPORTED")
     }
 
     private fun parseFlyToMode(raw: String?): FlyToMode? {
@@ -554,7 +665,7 @@ class FlightCommandHandler(
             takeoffAltitudeAsl = currentAsl?.minus(altitudeAgl)
         }
 
-        if (motorsOn == false && takeoffAltitudeRaw != null) {
+        if (areMotorsOn == false && takeoffAltitudeRaw != null) {
             takeoffAltitudeAsl = takeoffAltitudeRaw
         }
 
@@ -630,5 +741,42 @@ class FlightCommandHandler(
             TAG,
             "fly_to_prepare stage=$stage failed: domain=$domainStr code=$codeStr description=${error.description()} capability=${snapshot?.get("capability")}"
         )
+    }
+
+    private fun handleWaypointStop(clientId: String, action: String) {
+        val executor = waypointMissionExecutor
+        if (executor == null) {
+            respond(clientId, action, false, message = "Waypoint executor unavailable")
+            return
+        }
+
+        val snapshot = executor.currentMissionSnapshot()
+        if (snapshot == null) {
+            respond(
+                clientId,
+                action,
+                false,
+                message = "No active waypoint mission",
+                extra = mapOf("backend" to "waypoint_v2")
+            )
+            return
+        }
+
+        val stopped = executor.stopActiveMission(object : CommonCallbacks.CompletionCallback {
+            override fun onSuccess() {
+                val extra = snapshot.toMutableMap().apply { this["backend"] = "waypoint_v2" }
+                respond(clientId, action, true, extra = extra)
+            }
+
+            override fun onFailure(error: IDJIError) {
+                val extra = snapshot.toMutableMap().apply { this["backend"] = "waypoint_v2" }
+                respond(clientId, action, false, error = error, extra = extra)
+            }
+        })
+
+        if (!stopped) {
+            val extra = snapshot.toMutableMap().apply { this["backend"] = "waypoint_v2" }
+            respond(clientId, action, false, message = "Failed to issue waypoint stop", extra = extra)
+        }
     }
 }
