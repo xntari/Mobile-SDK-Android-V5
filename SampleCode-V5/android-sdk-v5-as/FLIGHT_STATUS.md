@@ -8,7 +8,7 @@ This document captures the current feature set, open work, and hands-on test pro
 
 ***** IMPORTANT - keep all section updated (after every major change update status, checklist, instructions, feature reference, backlog) *****
 =================================================================================
-## 1. Snapshot (Sep 24 2025) 22:55 – worktree (post f79e1b56fc99234215626293548273db29349930)
+## 1. Snapshot (Sep 24 2025) 21:25 – (commit 7e33f872c0932823d96fb391b231fbee8e8e3005)
 
 ### Working today (verified)
 - **Take-off / Land / Cancel / Confirm** via bridge commands with detailed acknowledgements (diagnostics, landing monitor payloads).
@@ -17,8 +17,6 @@ This document captures the current feature set, open work, and hands-on test pro
 - **Preflight diagnostics panel** streaming DJI health + landing monitor faults.
 - **Video decoder resilience** – FPV & H20N WebCodecs flush/close on errors with exponential back-off restarts.
 - **Manual control tuning UI** – presets for overall stick sensitivity plus per-preset mouse-yaw slider persisted in localStorage.
-- **Flight-command error context** – `flight_command` acks now include FC error type/code, FlySafe warning height, and target metadata in the panel.
-- **Emergency command gating** – force-land, cancel/confirm landing, and RTH stop buttons automatically enable only when the aircraft reports AUTO LAND / GO HOME in telemetry.
 - **Continuous override stream** – virtual-stick overrides run ~16 Hz, auto-resume after decoder/WebSocket resets, and every frame is captured in the session export.
 
 ###  Partial / needs validation
@@ -28,6 +26,10 @@ This document captures the current feature set, open work, and hands-on test pro
   - Pointer-lock mouse yaw with adjustable HUD overlay (panel/inline/none) and persistent HUD theme.
 - **Kill switch** (ESC button) zeros sticks, disables virtual stick, and reports success/fail in UI + toast.
 - **RC override detection** – bridge streams `authority_owner`/`change_reason`, desktop shows toast + logs when control transfers.
+- **Flight-command error context** – `flight_command` acks now include FC error type/code, FlySafe warning height, and a `fly_to_context` block with current altitude, height-limit/fly-safe margins, and likely violation flags in the panel (capture screenshots during tests).
+- **Fly-to parameter sync** – `fly_to_prepare` now mirrors the DJI sample flow by updating FlyTo mode/height via `updateMissionParam` before launching the mission; the ack reports `fly_to_param_update` (`applied/skipped/failed`).
+- **Fly-to status telemetry** – Fly-To mission info/capability listeners stream into telemetry (`fly_to_status`), so the desktop panel shows current mode/height, supported modes, and capability height ranges in real time.
+- **Emergency command gating** – force-land, cancel/confirm landing, and RTH stop buttons automatically enable only when the aircraft reports AUTO LAND / GO HOME in telemetry.
 - **Controller Insight panel (beta)** – view physical RC sticks, software virtual-stick command, last override acknowledgement, and current flight limits (max height/distance, go-home height). Master/slave telemetry still pending.
 - **FlySafe telemetry** – desktop now pulls DJI FlySafe notifications plus surrounding zone data so you can see the exact height bubble restricting the aircraft. (UI: Controller Insight → Limits card.)
 - **Relative fly-to & RTH desktop panel (beta)** – new commands for forward/back/left/right/up/down moves and RTH start/stop are available in the “Fly-To & RTH” panel, but require field validation.
@@ -39,6 +41,13 @@ This document captures the current feature set, open work, and hands-on test pro
 - Manual flight telemetry capture (per-session CSV/JSON).
 - Mission builder UI (fly-to, orbit, return) with interrupt/kill.
 - Dual-controller telemetry (master/slave sticks & switch states).
+
+**Manual flight refinements** (done) - pending verification
+   - Validate the 16 Hz virtual-stick stream + mouse pitch control on-aircraft (capture CSV/JSON excerpt + pilot feedback).
+   - Validate manual session export & FlySafe restriction toasts in field conditions (collect sample CSV/JSON + screenshots).
+   - Field-validate the auto-mode gating (AUTO LAND / GO HOME) and log any unmapped flight-mode strings for follow-up.
+   - Detailed NFZ / limit messaging surfaced in panel + toast (e.g. auto-toast on `IN_NFZ_MAX_HEIGHT`).
+
 
 Keep open items near the top and update after each sprint/test cycle.
 =================================================================================
@@ -88,6 +97,9 @@ Run this sequence at the start of every flight-test session before attempting hi
 
 6. **Relative fly-to (beta)**
    - In a safe, obstacle-free area, use the Fly-To panel to command a short move (e.g. forward 5 m, up 2 m) and watch for aircraft response + acknowledgements. Record results and any deviations (mark "PASS" only after observation). Skip if location does not permit safe movement.
+   - After each attempt, expand the `Last Command` card and capture the `fly_to_context` block (height-limit and FlySafe margins). Log any negative margin values—even if the aircraft moved—as part of the session notes.
+   - Verify the Fly-To control settings before flight: set the security takeoff height (defaults to 20 m), choose `Smart height` for maintaining current altitude or `Set height` and enter the desired AGL target. Confirm the resulting ack shows `fly_to_param_update=applied`.
+   - Cross-check the **Fly-To Telemetry** summary (mode/height/running state and capability ranges) against DJI Pilot before/after each command; note any discrepancies.
 
 7. **Post-flight**
    - Land, stop motors, disconnect virtual stick.
@@ -123,7 +135,9 @@ Until the UI and command verbs exist, note these as future tests and do **not** 
 | Symptom | Likely Cause | Actions |
 | --- | --- | --- |
 | “Capture Mouse Yaw” disabled | Virtual stick not active | Ensure `Start Keyboard` succeeded (status `ACTIVE`), check ack history for enable errors (NFZ, authority). |
-| `fly_to_prepare` → `Param illegal` | FlySafe bubble or bad target altitude | Inspect the latest command ack: `error_code`, `error_domain`, and `fly_safe.warning_notification` now surface the blocking height/zone. Adjust target/z altitude before retrying. |
+| `fly_to_prepare` → `Param illegal` | FlySafe bubble or bad target altitude | Inspect the latest ack: check `error_code`/`error_domain` plus `fly_to_context.height_limit_margin` and `fly_to_context.fly_safe_margin` (negative = violation). Note the warning description + limit and adjust the requested altitude before retrying. |
+| `fly_to_param_update=failed` | `updateMissionParam` rejected (mode/height invalid) | Re-send with supported Fly-To mode (`smart_height` or `set_height`) and ensure `fly_to_height` is provided for set-height missions. Collect the SDK error code for follow-up. |
+| `fly_to_param_update=update_failed` but mission runs | Bridge fell back to previous parameters after param update failure (e.g. aircraft not ready) | Review `fly_to_param_message`, capture hardware warnings (`fly_to_context.diagnostics`, Preflight panel), and confirm telemetry `fly_to_status.info` reflects actual mode/height before retrying. |
 | Session export button disabled | No manual session activity recorded | Ensure a manual session (keyboard active, VS enabled) ran; exports only unlock after `Start Keyboard` succeeds or a previous log exists. |
 | No motion when pressing WASD | Flight controller rejected roll/pitch (NFZ, height lock, sensors) | Review latest `flight_command` ack diagnostics and Preflight panel; look for `IN_NFZ_MAX_HEIGHT`, `motor_start_failure`, etc. |
 | Manual session stops immediately | RC has authority | Check controller panel `Authority` badge; if not `APP`, hardware override is owning sticks. |
@@ -147,6 +161,16 @@ Until the UI and command verbs exist, note these as future tests and do **not** 
 - Preflight panel auto-refreshes device status + DJI diagnostics.
 - Landing monitor payloads appended to command history for post-flight analysis.
 - Console logging: `[ManualControl]` for authority transitions, `[FPV]/[H20N]` for decoder restarts.
+- Each fly-to ack now includes `fly_to_context` (current altitude, limit margins, violation flags); capture these values in logs/screenshots whenever diagnosing a failure.
+- `fly_to_param_update` reports whether the bridge pushed FlyTo mode/height (`applied`, `skipped`, or `failed`); review alongside `fly_to_param_message` when commands are rejected.
+- Telemetry exposes `fly_to_status` (info/target/capability); export it with session logs to document the aircraft’s accepted parameters.
+- Command history now records `fly_to_param_steps` (mode/height update attempts) and the raw DJI error string so you can isolate which update failed.
+
+### Fly-To Panel
+- Configure **Security Takeoff Height** (m AGL) before sending missions; defaults to 20 m per DJI sample.
+- Choose **Fly-To Mode**: `Smart height` keeps current altitude, `Set height` climbs/descends to the requested height (requires `Target Height`).
+- Relative/absolute commands include the chosen mode and speeds in the request log and ack payload for post-flight analysis.
+- The telemetry block shows live Fly-To mode/height, supported modes, and capability height range (when provided). Treat it as the ground truth for what the aircraft accepted. On Matrice 350 RTK we currently see `supported_modes=[]`, so the backend will fall back to waypoint-based “fly-to” automatically.
 
 ### Video Recovery
 - On error, decoders flush, close, and restart with exponential back-off (250 ms → 2 s). Future work: request fresh keyframe from bridge to shorten recovery.
@@ -155,37 +179,42 @@ Until the UI and command verbs exist, note these as future tests and do **not** 
 
 ## 5. Backlog / TODOs
 
-1. **Manual flight refinements**
-   - Validate the 16 Hz virtual-stick stream + mouse pitch control on-aircraft (capture CSV/JSON excerpt + pilot feedback).
-   - Validate manual session export & FlySafe restriction toasts in field conditions (collect sample CSV/JSON + screenshots).
-   - Field-validate the auto-mode gating (AUTO LAND / GO HOME) and log any unmapped flight-mode strings for follow-up.
-   - Detailed NFZ / limit messaging surfaced in panel + toast (e.g. auto-toast on `IN_NFZ_MAX_HEIGHT`).
 
-2. **Navigation primitives**
+1. **Navigation primitives** (partial, immediate next steps - Waypoint mission refactor)
    - Initial relative fly-to UI (forward/back/left/right/up/down, optional speed) — **needs field validation**. Show waypoint projections on map/compass/orientation/frame similar to points from object memory (reuse the same logic which visualizes 3d coords).
    - RTH start/stop buttons — **validate cancel behaviour**.
-   - Detailed error reporting from the flight controller - need to determine why we see invalid param or other errors.
+   - Validate the new `fly_to_context` metrics (height-limit/fly-safe margins) against DJI Pilot readouts; extend logging if FC still returns ambiguous errors.
    - Target selection from map/LRF to feed fly-to commands.
    - Mission builder UI (queue commands, show projected path, allow abort).
+   - **Waypoint Mission refactor**
+     - Implement a waypoint-based fly-to backend via `IWaypointMissionManager` (Matrice 350 RTK supports Waypoint V2). Initial target: single waypoint missions that mimic the current Fly-To commands, with the mission planner designed to evolve toward multi-point paths (orbit, surveys, etc.).
+     - Detect intelligent Fly-To capability at runtime (`fly_to_status.capability.supported_modes`). If the list is empty or missing the requested mode, route commands through the waypoint mission pipeline instead of calling `updateMissionParam`.
+     - Modularise the bridge: keep the existing Intelligent Flight handler for products that support it, add a waypoint mission module responsible for mission construction/upload/execute/stop, and expose capability state up to the UI.
+     - Flesh out mission authoring UX inside the Fly-To panel: map-based waypoint creation (MapLibre), HSI/compass overlays, reverse projection from camera taps, laser range finder integration, and “record manual flight” to capture waypoints.
+     - Add simulation tooling so operators can preview a mission (map trajectory, ETA, simulated telemetry) before committing.
+  Next steps:
 
-3. **Controller insight & FlySafe**
+  a. Implement the waypoint mission backend (Waypoints V2 for M350) and switch the bridge to it whenever the capability snapshot lacks supported modes.
+  b. Once the waypoint path is working, extend the UI with mission authoring/simulation as described in the doc.
+
+2. **Controller insight & FlySafe**
    - Controller Insight panel (RC vs SW vs Ack + limits) — gather field validation screenshots/logs.
    - Stream master/slave sticks, switch positions, and active authority reason codes.
    - Display RC mode (P/Sport/Tripod) and switch state in UI.
    - Surface detailed FlySafe zone listings and auto-highlight violating zones when `IN_NFZ_MAX_HEIGHT` is active.
    - Flight controller settings (example RTK on/off, max alt, avoidEnable, avoidMode, max distance) - ref https://github.com/dji-sdk/Onboard-SDK/blob/118e2825a347499efb8ed253146552c5b9b10779/osdk-core/api/inc/dji_flight_controller.hpp
-4. **Video & telemetry**
+3. **Video & telemetry**
    - Force-keyframe request on decoder restart.
    - HUD speed/altitude units toggle (m/s ↔︎ mph, meters ↔︎ feet).
    - Battery widget parity with DJI Pilot (dual packs, warnings).
 
-5. **UI polish / Components**
+4. **UI polish / Components**
    - Add Object Memory panel to Components menu/top bar and fix popover z-order.
    - When a component is re-enabled via the Components menu, bring its panel to the top-most z-order while keeping saved geometry.
    - Promote the Snapshot Camera selector to a movable/resizable panel (persisted in localStorage) and integrate it with H20N gimbal mode/zoom selectors.
    - Make HSI indicator settings (Mode, scale) persistent in localstore
 
-6. **Automation & QA**
+5. **Automation & QA**
    - Scriptable smoke test (takeoff → manual session → kill → land) driven via CLI.
    - Simulator mission regression (upload, start, pause/resume, stop, break-point).
 
@@ -206,4 +235,4 @@ During test, annotate each significant event (command, toast, diagnostic) with t
 
 ---
 
-_Last updated: Sep 24 2025 – keep the snapshot/date current when edits are made._
+_Last updated: Sep 25 2025 – keep the snapshot/date current when edits are made._

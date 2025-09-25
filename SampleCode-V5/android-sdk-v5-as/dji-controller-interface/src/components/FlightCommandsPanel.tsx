@@ -323,6 +323,20 @@ const formatSpeed = (speed?: number | null) => {
   return `${speed.toFixed(1)} m/s`;
 };
 
+const formatMargin = (value?: number | null) => {
+  if (typeof value !== "number" || Number.isNaN(value)) return null;
+  if (value === 0) return "0.0 m";
+  const sign = value > 0 ? "+" : "-";
+  return `${sign}${Math.abs(value).toFixed(1)} m`;
+};
+
+const marginClassName = (value?: number | null) => {
+  if (typeof value !== "number" || Number.isNaN(value)) return "text-gray-400";
+  if (value < 0) return "text-status-error";
+  if (value < 1) return "text-yellow-300";
+  return "text-status-good";
+};
+
 const formatAxisPercent = (value: number) => {
   const percent = Math.round(value * 100);
   const prefix = percent > 0 ? "+" : "";
@@ -650,6 +664,206 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
     return [...history].reverse().slice(0, 6);
   }, [history]);
 
+  const renderFlyToContext = React.useCallback(
+    (ctx?: FlightCommandAck["fly_to_context"]) => {
+      if (!ctx) return null;
+      const lines: React.ReactNode[] = [];
+      const isNumber = (value: unknown): value is number =>
+        typeof value === "number" && !Number.isNaN(value as number);
+
+      if (typeof ctx.mode === "string") {
+        lines.push(
+          <div key="mode">
+            Mode {ctx.mode}
+          </div>,
+        );
+      }
+
+      if (isNumber(ctx.requested_height)) {
+        lines.push(
+          <div key="requested-height">
+            Requested height {ctx.requested_height.toFixed(1)} m
+          </div>,
+        );
+      }
+
+      if (isNumber(ctx.security_takeoff_height)) {
+        lines.push(
+          <div key="sth">
+            Security take-off {ctx.security_takeoff_height.toFixed(1)} m
+          </div>,
+        );
+      }
+
+      if (ctx.altitude_specified === false) {
+        lines.push(
+          <div key="altitude-specified" className="text-yellow-200">
+            Altitude not specified; aircraft should maintain current height.
+          </div>,
+        );
+      }
+
+      if (isNumber(ctx.current_altitude_agl) || isNumber(ctx.current_altitude_ultrasonic)) {
+        const parts: string[] = [];
+        if (isNumber(ctx.current_altitude_agl)) {
+          parts.push(`AGL ${ctx.current_altitude_agl.toFixed(1)} m`);
+        }
+        if (isNumber(ctx.current_altitude_ultrasonic)) {
+          parts.push(`Ultrasonic ${ctx.current_altitude_ultrasonic.toFixed(1)} m`);
+        }
+        if (parts.length) {
+          lines.push(
+            <div key="current">
+              Current {parts.join(" | ")}
+            </div>,
+          );
+        }
+      }
+
+      if (isNumber(ctx.target_altitude_relative_takeoff)) {
+        const relative = formatMargin(ctx.target_altitude_relative_takeoff) ?? "–";
+        lines.push(
+          <div key="target">
+            Target ΔTO <span className="text-gray-200">{relative}</span>
+            {isNumber(ctx.target_altitude_margin_from_current) && (
+              <span
+                className={`ml-1 ${marginClassName(ctx.target_altitude_margin_from_current)}`}
+              >
+                vs now {formatMargin(ctx.target_altitude_margin_from_current)}
+              </span>
+            )}
+          </div>,
+        );
+      }
+
+      if (
+        isNumber(ctx.target_altitude_asl) &&
+        ctx.altitude_specified !== false
+      ) {
+        lines.push(
+          <div key="target-asl">
+            Target ASL {ctx.target_altitude_asl.toFixed(1)} m
+          </div>,
+        );
+      }
+
+      if (
+        isNumber(ctx.takeoff_altitude_asl) &&
+        isNumber(ctx.target_altitude_asl) &&
+        ctx.altitude_specified !== false
+      ) {
+        lines.push(
+          <div key="takeoff-asl">
+            Takeoff ASL {ctx.takeoff_altitude_asl.toFixed(1)} m
+          </div>,
+        );
+      }
+
+      if (isNumber(ctx.height_limit_setting)) {
+        const marginText = formatMargin(ctx.height_limit_margin);
+        lines.push(
+          <div key="height-limit">
+            Height limit {ctx.height_limit_setting.toFixed(1)} m
+            {marginText && (
+              <span
+                className={`ml-1 ${marginClassName(ctx.height_limit_margin)}`}
+              >
+                ({marginText})
+              </span>
+            )}
+          </div>,
+        );
+      }
+
+      if (isNumber(ctx.fly_safe_height_limit)) {
+        const marginText = formatMargin(ctx.fly_safe_margin);
+        lines.push(
+          <div key="fly-safe">
+            FlySafe limit {ctx.fly_safe_height_limit.toFixed(1)} m
+            {marginText && (
+              <span
+                className={`ml-1 ${marginClassName(ctx.fly_safe_margin)}`}
+              >
+                ({marginText})
+              </span>
+            )}
+            {ctx.fly_safe_warning_description && (
+              <span className="ml-1 text-yellow-200">
+                {ctx.fly_safe_warning_description}
+              </span>
+            )}
+            {!ctx.fly_safe_warning_description && ctx.fly_safe_warning_event && (
+              <span className="ml-1 text-yellow-200">
+                {ctx.fly_safe_warning_event}
+              </span>
+            )}
+          </div>,
+        );
+      } else if (ctx.fly_safe_warning_description) {
+        lines.push(
+          <div key="fly-safe-desc" className="text-yellow-200">
+            {ctx.fly_safe_warning_description}
+          </div>,
+        );
+      }
+
+      if (ctx.likely_height_limit_violation) {
+        lines.push(
+          <div key="height-limit-violation" className="text-status-error">
+            Requested altitude exceeds configured height limit.
+          </div>,
+        );
+      }
+
+      if (ctx.likely_fly_safe_violation) {
+        lines.push(
+          <div key="fly-safe-violation" className="text-status-error">
+            Requested altitude exceeds FlySafe warning height.
+          </div>,
+        );
+      }
+
+      if (!lines.length) return null;
+
+      return (
+        <div className="mt-1 text-[10px] text-gray-300 leading-tight space-y-0.25">
+          {lines}
+        </div>
+      );
+    },
+    [],
+  );
+
+  const renderFlyToSteps = React.useCallback(
+    (steps?: FlightCommandAck["fly_to_param_steps"]) => {
+      if (!steps || steps.length === 0) return null;
+      return (
+        <div className="mt-1 text-[10px] text-gray-400 leading-tight">
+          Param updates:
+          {steps.map((step, index) => {
+            const status = step.status?.toLowerCase();
+            const statusClass =
+              status === "failed"
+                ? "text-status-error"
+                : status === "ok"
+                  ? "text-status-good"
+                  : "text-gray-400";
+            return (
+              <div key={`${index}-${step.type ?? 'step'}`} className={statusClass}>
+                {(step.type ?? `step ${index + 1}`) + ':'}{' '}
+                {(step.status ?? 'unknown').toUpperCase()}
+                {step.message && (
+                  <span className="text-gray-400"> — {step.message}</span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      );
+    },
+    [],
+  );
+
   const manualAxes = manualState.axes;
   const manualNotification = manualState.notification;
   const manualStatusClass =
@@ -684,6 +898,7 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
       : "flex-1 rounded border border-gray-700 bg-gray-800/40 text-gray-300 hover:bg-gray-700/60";
   const lastDiagnostic = lastAck?.diagnostics?.[0];
   const lastFlySafeWarning = lastAck?.fly_safe?.warning_notification;
+  const flyToContext = lastAck?.fly_to_context;
 
   return (
     <>
@@ -839,6 +1054,21 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                     )}
                   </div>
                 )}
+                {renderFlyToContext(flyToContext)}
+                {lastAck.fly_to_param_update && (
+                  <div className="mt-1 text-[10px] text-gray-300 leading-tight">
+                    Param update: {lastAck.fly_to_param_update}
+                    {lastAck.fly_to_param_message && (
+                      <span className="text-gray-400"> — {lastAck.fly_to_param_message}</span>
+                    )}
+                  </div>
+                )}
+                {lastAck.fly_to_param_error && (
+                  <div className="mt-1 text-[10px] text-status-error leading-tight">
+                    Param error: {lastAck.fly_to_param_error}
+                  </div>
+                )}
+                {renderFlyToSteps(lastAck.fly_to_param_steps)}
               </div>
             )}
           </section>
@@ -1142,6 +1372,21 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                         )}
                       </div>
                     )}
+                    {renderFlyToContext(event.fly_to_context)}
+                    {event.fly_to_param_update && (
+                      <div className="text-[10px] text-gray-400 leading-tight">
+                        Param update: {event.fly_to_param_update}
+                        {event.fly_to_param_message && (
+                          <span className="text-gray-500"> — {event.fly_to_param_message}</span>
+                        )}
+                      </div>
+                    )}
+                    {event.fly_to_param_error && (
+                      <div className="text-[10px] text-status-error leading-tight">
+                        Param error: {event.fly_to_param_error}
+                      </div>
+                    )}
+                    {renderFlyToSteps(event.fly_to_param_steps)}
                     {event.device_status && (
                       <div className="text-[10px] text-gray-400 mt-1 leading-tight">
                         Status:{" "}

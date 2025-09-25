@@ -131,6 +131,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             Log.w(TAG, "Unable to register virtual stick state listener: ${e.message}")
         }
         flySafeBridgeModel.start()
+        flyToBridgeModel.start()
     }
 
     // Retry helper for camera stream registration
@@ -892,6 +893,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         // Remove obstacle data listeners
         cleanupObstacleDataListeners()
         flySafeBridgeModel.stop()
+        flyToBridgeModel.stop()
         
         try {
             // Close all client connections
@@ -1676,7 +1678,9 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             )
         },
         diagnosticExtrasProvider = { action -> diagnosticAggregator.collectForFlightAction(action) },
-        postActionHook = { clientId, action, success -> handleFlightActionPostHook(clientId, action, success) }
+        postActionHook = { clientId, action, success -> handleFlightActionPostHook(clientId, action, success) },
+        flySafeSnapshotProvider = { flySafeBridgeModel.toSnapshotMap() },
+        flyToStatusProvider = { flyToBridgeModel.toTelemetryMap() }
     )
 
     private val telemetryStreamer = TelemetryStreamer(
@@ -2845,7 +2849,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 kotlin.math.sqrt(it.x * it.x + it.y * it.y).toDouble()
             } ?: 0.0
             
-            mapOf(
+            mutableMapOf(
                 // System info
                 "timestamp" to System.currentTimeMillis(),
                 "bridge_status" to "active",
@@ -3072,7 +3076,9 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 ),
                 "camera_optics" to collectCameraOpticsSnapshot(ComponentIndexType.LEFT_OR_MAIN, keyManager),
                 "fpv_optics" to collectCameraOpticsSnapshot(ComponentIndexType.FPV, keyManager).takeIf { it.isNotEmpty() }
-            )
+            ).also { map ->
+                flyToBridgeModel.toTelemetryMap()?.let { map["fly_to_status"] = it }
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to collect telemetry data: ${e.message}")
             mapOf(
@@ -3719,3 +3725,4 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
 
 }
     private val flySafeBridgeModel = FlySafeBridgeModel()
+    private val flyToBridgeModel = FlyToMissionBridgeModel()

@@ -3,7 +3,7 @@ import { Panel } from './Panel';
 import { useBridgeCommands } from '../hooks/useBridgeCommands';
 import { useStableBridgeData } from '../hooks/useStableBridgeData';
 import { addMetersToLatLon, bearingOffsetToMeters, normalizeHeadingDegrees } from '../utils/geo';
-import { TelemetryData } from '../types';
+import { TelemetryData, FlyToStatus } from '../types';
 import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
 
 interface MissionLogEntry {
@@ -25,6 +25,9 @@ export const FlyToPanel: React.FC = () => {
   const [distanceMeters, setDistanceMeters] = React.useState<number>(5);
   const [verticalMeters, setVerticalMeters] = React.useState<number>(2);
   const [maxSpeed, setMaxSpeed] = React.useState<number>(3);
+  const [securityTakeoffHeight, setSecurityTakeoffHeight] = React.useState<number>(20);
+  const [flyToMode, setFlyToMode] = React.useState<'smart_height' | 'set_height'>('smart_height');
+  const [flyToHeight, setFlyToHeight] = React.useState<number>(50);
   const [logEntries, setLogEntries] = React.useState<MissionLogEntry[]>([]);
   const [targetSelection, setTargetSelection] = React.useState<ObjectMemoryTargetSelection | null>(() =>
     objectMemoryTargetStore.getCurrent(),
@@ -32,6 +35,37 @@ export const FlyToPanel: React.FC = () => {
   const [statusMessage, setStatusMessage] = React.useState<string | null>(null);
 
   React.useEffect(() => objectMemoryTargetStore.subscribe(setTargetSelection), []);
+
+  const flyToStatus = telemetry?.fly_to_status as FlyToStatus | undefined;
+  const capabilitySupportedModes = React.useMemo(() => {
+    const raw = flyToStatus?.capability?.supported_modes;
+    if (!raw || !Array.isArray(raw) || raw.length === 0) return undefined;
+    const mapping: Record<string, 'smart_height' | 'set_height'> = {
+      smart_height: 'smart_height',
+      smartheight: 'smart_height',
+      smart: 'smart_height',
+      set_height: 'set_height',
+      setheight: 'set_height',
+      set: 'set_height',
+    };
+    const normalized = raw
+      .map((mode) => (typeof mode === 'string' ? mapping[mode.toLowerCase()] : undefined))
+      .filter((value): value is 'smart_height' | 'set_height' => Boolean(value));
+    if (!normalized.length) return undefined;
+    return Array.from(new Set(normalized));
+  }, [flyToStatus?.capability?.supported_modes]);
+
+  const availableModes = capabilitySupportedModes ?? ['smart_height', 'set_height'];
+
+  React.useEffect(() => {
+    if (!availableModes.includes(flyToMode)) {
+      setFlyToMode(availableModes[0]);
+    }
+  }, [availableModes, flyToMode]);
+
+  const heightRange = flyToStatus?.capability?.height_range;
+  const heightRangeMin = typeof heightRange?.min === 'number' ? heightRange.min : 1;
+  const heightRangeMax = typeof heightRange?.max === 'number' ? heightRange.max : 500;
 
   const appendLog = React.useCallback((label: string, payload: Record<string, any>) => {
     setLogEntries((prev) => [
@@ -58,7 +92,11 @@ export const FlyToPanel: React.FC = () => {
     if (!telemetrySnapshot) return;
 
     const baseAltitude = telemetrySnapshot.location.altitude ?? telemetrySnapshot.altitude ?? 0;
-    const resolvedAltitude = altitude ?? baseAltitude;
+    const takeoffAltitude = telemetrySnapshot.takeoff_altitude
+      ?? (typeof baseAltitude === 'number' && typeof telemetrySnapshot.altitude_above_takeoff === 'number'
+        ? baseAltitude - telemetrySnapshot.altitude_above_takeoff
+        : undefined);
+    let resolvedAltitude = altitude ?? baseAltitude;
 
     const params: Record<string, any> = {
       target_location: {
@@ -71,6 +109,25 @@ export const FlyToPanel: React.FC = () => {
     if (Number.isFinite(maxSpeed) && maxSpeed > 0) {
       params.max_speed = Math.round(maxSpeed);
     }
+    if (Number.isFinite(securityTakeoffHeight) && securityTakeoffHeight >= 0) {
+      params.security_takeoff_height = Math.round(securityTakeoffHeight);
+    }
+
+    params.mode = flyToMode;
+
+    if (flyToMode === 'set_height') {
+      if (!Number.isFinite(flyToHeight)) {
+        setStatusMessage('Fly-To height required when mode is set-height');
+        return;
+      }
+      const requestedHeight = Math.round(flyToHeight);
+      params.fly_to_height = requestedHeight;
+      if (typeof takeoffAltitude === 'number') {
+        resolvedAltitude = clampAltitude(takeoffAltitude + requestedHeight);
+      }
+    }
+
+    params.target_location.altitude = clampAltitude(resolvedAltitude);
 
     appendLog(label, params);
 
@@ -201,6 +258,51 @@ export const FlyToPanel: React.FC = () => {
                 className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-right"
               />
             </label>
+            <label className="flex flex-col gap-1 text-[11px]">
+              <span>Security Takeoff Height (m)</span>
+              <input
+                type="number"
+                value={securityTakeoffHeight}
+                min={0}
+                max={120}
+                onChange={(event) => setSecurityTakeoffHeight(Number(event.target.value) || 0)}
+                className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-right"
+              />
+            </label>
+          </div>
+          <div className="grid grid-cols-2 gap-2 mb-2 text-[11px]">
+            <label className="flex flex-col gap-1">
+              <span>Fly-To Mode</span>
+              <select
+                value={flyToMode}
+                onChange={(event) => setFlyToMode(event.target.value as 'smart_height' | 'set_height')}
+                className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200"
+              >
+                {availableModes.map((mode) => (
+                  <option key={mode} value={mode}>
+                    {mode === 'smart_height' ? 'Smart height' : 'Set height'}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {flyToMode === 'set_height' && (
+              <label className="flex flex-col gap-1">
+                <span>Target Height (m AGL)</span>
+                <input
+                  type="number"
+                  value={flyToHeight}
+                  min={Math.max(1, Math.floor(heightRangeMin))}
+                  max={Math.max(Math.ceil(heightRangeMax), Math.floor(heightRangeMin) + 1)}
+                  onChange={(event) => setFlyToHeight(Number(event.target.value) || 0)}
+                  className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-right"
+                />
+                {heightRange && (
+                  <span className="text-[10px] text-gray-500">
+                    Capability range {heightRange.min ?? '—'} – {heightRange.max ?? '—'} m
+                  </span>
+                )}
+              </label>
+            )}
           </div>
           <div className="grid grid-cols-2 gap-2">
             <button className="px-2 py-1 rounded bg-gray-800/80 border border-gray-700" onClick={() => handleRelativeMove('forward')}>
@@ -216,6 +318,39 @@ export const FlyToPanel: React.FC = () => {
               Right
             </button>
           </div>
+          {flyToStatus && (
+            <div className="mt-2 text-[11px] text-gray-400 space-y-0.5">
+              <div className="uppercase text-gray-500 text-[10px]">Fly-To Telemetry</div>
+              <div>
+                Reported mode{' '}
+                <span className="text-gray-200">{flyToStatus.info?.mode ?? '—'}</span>
+                {typeof flyToStatus.info?.height === 'number' && (
+                  <span className="ml-2 text-gray-300">height {flyToStatus.info.height} m</span>
+                )}
+                {typeof flyToStatus.info?.is_running === 'boolean' && (
+                  <span className="ml-2 text-gray-300">
+                    {flyToStatus.info.is_running ? 'running' : 'idle'}
+                  </span>
+                )}
+              </div>
+              {Array.isArray(flyToStatus.capability?.supported_modes) && (
+                <div>
+                  Supported modes{' '}
+                  <span className="text-gray-200">
+                    {flyToStatus.capability.supported_modes.join(', ')}
+                  </span>
+                </div>
+              )}
+              {heightRange && (
+                <div>
+                  Height limits{' '}
+                  <span className="text-gray-200">
+                    {heightRange.min ?? '—'} – {heightRange.max ?? '—'} m
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
         </section>
 
         <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">

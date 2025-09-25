@@ -7,12 +7,19 @@ import dji.sdk.keyvalue.value.common.LocationCoordinate3D
 import dji.v5.common.callback.CommonCallbacks
 import dji.v5.common.error.IDJIError
 import dji.v5.manager.aircraft.virtualstick.VirtualStickManager
+import dji.v5.common.utils.GpsUtils
 import dji.v5.et.create
 import dji.v5.et.action
 import dji.v5.manager.intelligent.IntelligentFlightManager
+import dji.sdk.keyvalue.value.flightcontroller.FlyToMode
+import dji.v5.manager.intelligent.flyto.FlyToParam
 import dji.v5.manager.intelligent.flyto.FlyToTarget
+import dji.sdk.keyvalue.key.KeyTools
+import dji.sdk.keyvalue.value.common.LocationCoordinate2D
+import dji.v5.manager.KeyManager
 import org.json.JSONObject
 import java.util.Locale
+import kotlin.math.roundToInt
 
 private const val TAG = "FlightCommandHandler"
 
@@ -27,7 +34,9 @@ class FlightCommandHandler(
         extra: Map<String, Any?>?
     ) -> Unit,
     private val diagnosticExtrasProvider: (String) -> Map<String, Any?>?,
-    private val postActionHook: (clientId: String, action: String, success: Boolean) -> Unit
+    private val postActionHook: (clientId: String, action: String, success: Boolean) -> Unit,
+    private val flySafeSnapshotProvider: (() -> Map<String, Any?>?)? = null,
+    private val flyToStatusProvider: (() -> Map<String, Any?>?)? = null
 ) {
 
     private fun respond(
@@ -255,68 +264,371 @@ class FlightCommandHandler(
         val altitude = if (targetJson.has("altitude")) targetJson.optDouble("altitude", Double.NaN) else Double.NaN
         val maxSpeed = if (params.has("max_speed")) params.optDouble("max_speed", Double.NaN) else Double.NaN
         val securityTakeoffHeight = if (params.has("security_takeoff_height")) params.optDouble("security_takeoff_height", Double.NaN) else Double.NaN
-        val mode = params.optString("mode", "")
+        val modeRaw = if (params.has("mode")) params.optString("mode") else null
+        val flyToMode = parseFlyToMode(modeRaw)
+        val flyToHeightMeters = if (params.has("fly_to_height")) {
+            params.optDouble("fly_to_height", Double.NaN).takeUnless { it.isNaN() || !it.isFinite() }
+        } else null
 
-        val targetLocation = LocationCoordinate3D(latitude, longitude, if (altitude.isNaN()) 0.0 else altitude)
+        if (flyToMode == FlyToMode.SET_HEIGHT && flyToHeightMeters == null) {
+            respond(clientId, action, false, message = "fly_to_height required when mode=set_height")
+            return
+        }
+
+        val targetAltitude = if (altitude.isNaN()) null else altitude
+        val targetLocation = LocationCoordinate3D(latitude, longitude, targetAltitude ?: 0.0)
         val flyToTarget = FlyToTarget().apply {
             this.targetLocation = targetLocation
-            if (!altitude.isNaN()) {
-                this.targetLocation.altitude = altitude
+            if (targetAltitude != null) {
+                this.targetLocation.altitude = targetAltitude
             }
-            if (!maxSpeed.isNaN()) {
-                this.maxSpeed = maxSpeed.toInt()
+            maxSpeed.takeUnless { it.isNaN() }?.let { speed ->
+                this.maxSpeed = speed.roundToInt()
             }
-            if (!securityTakeoffHeight.isNaN()) {
-                this.securityTakeoffHeight = securityTakeoffHeight.toInt()
+            securityTakeoffHeight.takeUnless { it.isNaN() }?.let { height ->
+                this.securityTakeoffHeight = height.roundToInt()
             }
         }
 
-        fun buildTargetExtra(): Map<String, Any?> {
-            val locationExtra = mutableMapOf(
-                "latitude" to latitude,
-                "longitude" to longitude,
-                "altitude" to if (altitude.isNaN()) null else altitude
-            )
-            val extra = mutableMapOf<String, Any?>(
-                "target_location" to locationExtra
-            )
-            if (!maxSpeed.isNaN()) {
-                extra["max_speed"] = maxSpeed
-            }
-            if (!securityTakeoffHeight.isNaN()) {
-                extra["security_takeoff_height"] = securityTakeoffHeight
-            }
-            if (mode.isNotBlank()) {
-                extra["mode"] = mode
-            }
-            return extra
-        }
+        val maxSpeedMeters = maxSpeed.takeUnless { it.isNaN() }
+        val securityTakeoffHeightMeters = securityTakeoffHeight.takeUnless { it.isNaN() }
+        val altitudeSpecified = targetAltitude != null
+        val flyToHeightInt = flyToHeightMeters?.roundToInt()
 
         runOnUiThread {
             try {
-                IntelligentFlightManager.getInstance().flyToMissionManager.startMission(
-                    flyToTarget,
-                    null,
-                    object : CommonCallbacks.CompletionCallback {
-                        override fun onSuccess() {
-                            respond(clientId, action, true, extra = buildTargetExtra())
-                        }
-
-                        override fun onFailure(error: IDJIError) {
-                            respond(clientId, action, false, error = error, extra = buildTargetExtra())
-                        }
-                    }
+                val flyToManager = IntelligentFlightManager.getInstance().flyToMissionManager
+                val paramSteps = mutableListOf<Map<String, Any?>>()
+                val baseExtra = buildFlyToExtra(
+                    targetLocation = targetLocation,
+                    targetAltitude = targetAltitude,
+                    altitudeSpecified = altitudeSpecified,
+                    maxSpeed = maxSpeedMeters,
+                    securityTakeoffHeight = securityTakeoffHeightMeters,
+                    mode = flyToMode,
+                    flyToHeight = flyToHeightInt
                 )
+
+                fun respondWithStatus(
+                    success: Boolean,
+                    paramStatus: String,
+                    error: IDJIError? = null,
+                    message: String? = null
+                ) {
+                    val extra = baseExtra.toMutableMap().apply {
+                        put("fly_to_param_update", paramStatus)
+                        message?.let { put("fly_to_param_message", it) }
+                        error?.let { err ->
+                            put("fly_to_param_error", err.description())
+                        }
+                        if (paramSteps.isNotEmpty()) {
+                            put("fly_to_param_steps", paramSteps.toList())
+                        }
+                        flyToStatusProvider?.invoke()?.let { put("fly_to_status_snapshot", it) }
+                    }
+                    if (success) {
+                        respond(clientId, action, true, extra = extra)
+                    } else {
+                        respond(clientId, action, false, message = message, error = error, extra = extra)
+                    }
+                }
+
+                fun startMission(paramStatus: String, message: String? = null) {
+                    flyToManager.startMission(
+                        flyToTarget,
+                        null,
+                        object : CommonCallbacks.CompletionCallback {
+                            override fun onSuccess() {
+                                Log.i(TAG, "fly_to_prepare succeeded with context: $baseExtra status=$paramStatus")
+                                respondWithStatus(success = true, paramStatus = paramStatus, message = message)
+                            }
+
+                            override fun onFailure(error: IDJIError) {
+                                logFlyToError("start_mission", error)
+                                respondWithStatus(success = false, paramStatus = paramStatus, error = error, message = message)
+                            }
+                        }
+                    )
+                }
+
+                val updateQueue = ArrayDeque<Pair<String, FlyToParam>>()
+                flyToMode?.let { mode ->
+                    updateQueue.add("mode" to FlyToParam().apply { this.flyToMode = mode })
+                }
+                flyToHeightInt?.let { height ->
+                    updateQueue.add("height" to FlyToParam().apply { this.height = height })
+                }
+
+                fun runUpdates() {
+                    val next = updateQueue.removeFirstOrNull()
+                    if (next == null) {
+                        val finalStatus = when {
+                            paramSteps.any { it["status"] == "failed" } -> "update_failed"
+                            paramSteps.isEmpty() -> "skipped"
+                            else -> "applied"
+                        }
+                        val failureMessage = paramSteps.firstOrNull { it["status"] == "failed" }?.get("message") as? String
+                        startMission(paramStatus = finalStatus, message = failureMessage)
+                        return
+                    }
+
+                    val (label, param) = next
+                    flyToManager.updateMissionParam(
+                        param,
+                        object : CommonCallbacks.CompletionCallback {
+                            override fun onSuccess() {
+                                paramSteps.add(
+                                    mapOf(
+                                        "type" to label,
+                                        "status" to "ok"
+                                    )
+                                )
+                                runUpdates()
+                            }
+
+                            override fun onFailure(error: IDJIError) {
+                                val message = error.description() ?: "$label update failed"
+                                logFlyToError("update_$label", error)
+                                paramSteps.add(
+                                    mapOf(
+                                        "type" to label,
+                                        "status" to "failed",
+                                        "message" to message
+                                    )
+                                )
+                                startMission(paramStatus = "update_failed", message = message)
+                            }
+                        }
+                    )
+                }
+
+                if (updateQueue.isEmpty()) {
+                    startMission(paramStatus = "skipped")
+                } else {
+                    runUpdates()
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "fly_to_prepare failed: ${e.message}", e)
-                respond(
-                    clientId,
-                    action,
-                    false,
-                    message = e.message ?: "exception",
-                    extra = buildTargetExtra()
-                )
+                val extra = buildFlyToExtra(
+                    targetLocation = targetLocation,
+                    targetAltitude = targetAltitude,
+                    altitudeSpecified = altitudeSpecified,
+                    maxSpeed = maxSpeedMeters,
+                    securityTakeoffHeight = securityTakeoffHeightMeters,
+                    mode = flyToMode,
+                    flyToHeight = flyToHeightInt
+                ).toMutableMap().apply {
+                    put("fly_to_param_update", "exception")
+                    put("fly_to_param_message", e.message ?: "exception")
+                }
+                respond(clientId, action, false, message = e.message ?: "exception", extra = extra)
             }
         }
+    }
+
+    private fun parseFlyToMode(raw: String?): FlyToMode? {
+        if (raw.isNullOrBlank()) return null
+        val normalized = raw.trim().uppercase(Locale.ROOT)
+        return when (normalized) {
+            "SET_HEIGHT", "SET", "HEIGHT" -> FlyToMode.SET_HEIGHT
+            "SMART_HEIGHT", "SMART", "AUTO" -> FlyToMode.SMART_HEIGHT
+            else -> runCatching { FlyToMode.valueOf(normalized) }.getOrNull()
+        }
+    }
+
+    private fun buildFlyToExtra(
+        targetLocation: LocationCoordinate3D,
+        targetAltitude: Double?,
+        altitudeSpecified: Boolean,
+        maxSpeed: Double?,
+        securityTakeoffHeight: Double?,
+        mode: FlyToMode?,
+        flyToHeight: Int?
+    ): Map<String, Any?> {
+        val locationExtra = mutableMapOf(
+            "latitude" to targetLocation.latitude,
+            "longitude" to targetLocation.longitude,
+            "altitude" to targetAltitude
+        )
+
+        val extra = mutableMapOf<String, Any?>(
+            "target_location" to locationExtra
+        )
+
+        maxSpeed?.let { extra["max_speed"] = it }
+        securityTakeoffHeight?.let { extra["security_takeoff_height"] = it }
+        mode?.let { extra["mode"] = it.name.lowercase(Locale.ROOT) }
+        flyToHeight?.let { extra["fly_to_height"] = it }
+
+        val context = collectFlyToContext(
+            targetAltitude = targetAltitude,
+            altitudeSpecified = altitudeSpecified,
+            mode = mode,
+            maxSpeed = maxSpeed,
+            securityTakeoffHeight = securityTakeoffHeight,
+            flyToHeight = flyToHeight
+        )
+        if (context.isNotEmpty()) {
+            extra["fly_to_context"] = context
+        }
+
+        return extra
+    }
+
+    private fun collectFlyToContext(
+        targetAltitude: Double?,
+        altitudeSpecified: Boolean,
+        mode: FlyToMode?,
+        maxSpeed: Double?,
+        securityTakeoffHeight: Double?,
+        flyToHeight: Int?
+    ): Map<String, Any?> {
+        val context = mutableMapOf<String, Any?>()
+        context["timestamp"] = System.currentTimeMillis()
+        context["altitude_specified"] = altitudeSpecified
+        mode?.let { context["mode"] = it.name.lowercase(Locale.ROOT) }
+        maxSpeed?.let { context["max_speed"] = it }
+        securityTakeoffHeight?.let { context["security_takeoff_height"] = it }
+        flyToHeight?.let { context["requested_height"] = it }
+
+        val keyManager = runCatching { KeyManager.getInstance() }.getOrNull()
+        if (keyManager == null) {
+            return context
+        }
+
+        val altitudeAgl = runCatching {
+            (keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyAltitude)) as? Number)?.toDouble()
+        }.getOrNull()
+        altitudeAgl?.let { context["current_altitude_agl"] = it }
+
+        val ultrasonicHeight = runCatching {
+            when (val raw = keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyUltrasonicHeight))) {
+                is Number -> raw.toDouble() / 10.0
+                else -> null
+            }
+        }.getOrNull()
+        ultrasonicHeight?.let { context["current_altitude_ultrasonic"] = it }
+
+        val areMotorsOn = runCatching {
+            keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyAreMotorsOn)) as? Boolean
+        }.getOrNull()
+        areMotorsOn?.let { context["motors_on"] = it }
+
+        val homeLocation = runCatching {
+            keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyHomeLocation)) as? LocationCoordinate2D
+        }.getOrNull()
+        homeLocation?.let { location ->
+            context["home_location"] = mapOf(
+                "latitude" to location.latitude,
+                "longitude" to location.longitude
+            )
+        }
+
+        val takeoffAltitudeRaw = runCatching {
+            (keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyTakeoffLocationAltitude)) as? Number)?.toDouble()
+        }.getOrNull()
+
+        val aircraftLocation2D = runCatching {
+            keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyAircraftLocation)) as? LocationCoordinate2D
+        }.getOrNull()
+
+        var takeoffAltitudeAsl = runCatching {
+            val lat = homeLocation?.latitude ?: aircraftLocation2D?.latitude
+            val lon = homeLocation?.longitude ?: aircraftLocation2D?.longitude
+            if (takeoffAltitudeRaw != null && lat != null && lon != null && !lat.isNaN() && !lon.isNaN()) {
+                GpsUtils.egm96Altitude(takeoffAltitudeRaw, lat, lon)
+            } else {
+                takeoffAltitudeRaw
+            }
+        }.getOrNull()
+
+        if (takeoffAltitudeAsl == null && altitudeAgl != null) {
+            val lat = aircraftLocation2D?.latitude
+            val lon = aircraftLocation2D?.longitude
+            val currentEllipsoid = (takeoffAltitudeRaw ?: 0.0) + altitudeAgl
+            val currentAsl = runCatching {
+                if (lat != null && lon != null && !lat.isNaN() && !lon.isNaN()) {
+                    GpsUtils.egm96Altitude(currentEllipsoid, lat, lon)
+                } else null
+            }.getOrNull()
+            takeoffAltitudeAsl = currentAsl?.minus(altitudeAgl)
+        }
+
+        if (motorsOn == false && takeoffAltitudeRaw != null) {
+            takeoffAltitudeAsl = takeoffAltitudeRaw
+        }
+
+        takeoffAltitudeAsl?.let { context["takeoff_altitude_asl"] = it }
+
+        val heightLimitSetting = runCatching {
+            (keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyHeightLimit)) as? Number)?.toDouble()
+        }.getOrNull()
+        heightLimitSetting?.let { context["height_limit_setting"] = it }
+
+        val currentLocation = runCatching {
+            keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyAircraftLocation3D)) as? LocationCoordinate3D
+        }.getOrNull()
+        currentLocation?.let { location ->
+            context["current_location"] = mapOf(
+                "latitude" to location.latitude,
+                "longitude" to location.longitude,
+                "altitude" to location.altitude
+            )
+        }
+
+        targetAltitude?.let { context["target_altitude_asl"] = it }
+
+        val targetRelativeToTakeoff = when {
+            targetAltitude != null && takeoffAltitudeAsl != null -> targetAltitude - takeoffAltitudeAsl
+            altitudeSpecified && altitudeAgl != null -> altitudeAgl
+            else -> null
+        }
+        targetRelativeToTakeoff?.let { context["target_altitude_relative_takeoff"] = it }
+
+        if (targetAltitude != null && takeoffAltitudeAsl != null && altitudeAgl != null) {
+            val currentAsl = takeoffAltitudeAsl + altitudeAgl
+            context["target_altitude_margin_from_current"] = targetAltitude - currentAsl
+        }
+
+        if (heightLimitSetting != null && targetRelativeToTakeoff != null) {
+            val margin = heightLimitSetting - targetRelativeToTakeoff
+            context["height_limit_margin"] = margin
+            context["likely_height_limit_violation"] = margin < 0
+        }
+
+        val flySafeSnapshot = flySafeSnapshotProvider?.invoke()
+        val warning = flySafeSnapshot?.get("warning_notification") as? Map<*, *>
+        val flySafeHeightLimit = (warning?.get("height_limit") as? Number)?.toDouble()
+        flySafeHeightLimit?.let { context["fly_safe_height_limit"] = it }
+
+        if (flySafeHeightLimit != null && targetRelativeToTakeoff != null) {
+            val margin = flySafeHeightLimit - targetRelativeToTakeoff
+            context["fly_safe_margin"] = margin
+            context["likely_fly_safe_violation"] = margin < 0
+        }
+
+        warning?.get("event")?.let { context["fly_safe_warning_event"] = it }
+        warning?.get("description")?.let { context["fly_safe_warning_description"] = it }
+
+        return context
+    }
+
+    private fun logFlyToError(stage: String, error: IDJIError) {
+        val domain = runCatching {
+            error.javaClass.methods.firstOrNull { it.name.equals("errorDomain", true) && it.parameterCount == 0 }?.invoke(error)
+        }.getOrNull()
+        val code = runCatching {
+            val codeObj = error.errorCode()
+            codeObj?.let { obj ->
+                obj.javaClass.methods.firstOrNull { it.name.equals("code", true) && it.parameterCount == 0 }?.invoke(obj)
+            }
+        }.getOrNull()
+        val snapshot = flyToStatusProvider?.invoke()
+        val domainStr = domain ?: "unknown"
+        val codeStr = code ?: "unknown"
+        Log.w(
+            TAG,
+            "fly_to_prepare stage=$stage failed: domain=$domainStr code=$codeStr description=${error.description()} capability=${snapshot?.get("capability")}"
+        )
     }
 }

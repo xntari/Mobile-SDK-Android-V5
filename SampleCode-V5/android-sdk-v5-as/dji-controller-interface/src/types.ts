@@ -46,6 +46,68 @@ export interface FlySafeSnapshot {
   surrounding_zones?: FlySafeZoneInfo[];
 }
 
+export interface FlyToContextLocation {
+  latitude?: number;
+  longitude?: number;
+  altitude?: number;
+}
+
+export interface FlyToContext {
+  timestamp?: number;
+  altitude_specified?: boolean;
+  current_altitude_agl?: number;
+  current_altitude_ultrasonic?: number | null;
+  takeoff_altitude_asl?: number;
+  current_location?: FlyToContextLocation;
+  home_location?: {
+    latitude?: number;
+    longitude?: number;
+  };
+  target_altitude_asl?: number | null;
+  target_altitude_relative_takeoff?: number;
+  target_altitude_margin_from_current?: number;
+  height_limit_setting?: number;
+  height_limit_margin?: number;
+  fly_safe_height_limit?: number;
+  fly_safe_margin?: number;
+  fly_safe_warning_event?: string;
+  fly_safe_warning_description?: string;
+  likely_fly_safe_violation?: boolean;
+  likely_height_limit_violation?: boolean;
+  mode?: string;
+  max_speed?: number;
+  security_takeoff_height?: number;
+  requested_height?: number;
+}
+
+export interface FlyToInfoStatus {
+  mode?: string;
+  height?: number;
+  is_running?: boolean;
+  target_location?: FlyToContextLocation;
+  raw?: string;
+}
+
+export interface FlyToTargetStatus {
+  target_location?: FlyToContextLocation;
+  max_speed?: number;
+  security_takeoff_height?: number;
+  raw?: string;
+}
+
+export interface FlyToCapabilityStatus {
+  supported_modes?: string[];
+  height_range?: { min?: number | null; max?: number | null };
+  raw?: string;
+}
+
+export interface FlyToStatus {
+  timestamp?: number;
+  info?: FlyToInfoStatus;
+  target?: FlyToTargetStatus;
+  capability?: FlyToCapabilityStatus;
+}
+
 export interface BridgeMessage {
   type: string;
   version: string;
@@ -83,6 +145,12 @@ export interface FlightCommandAck extends BridgeMessage {
   source?: string;
   landing_monitor?: LandingMonitorInfo;
   fly_safe?: FlySafeSnapshot;
+  fly_to_context?: FlyToContext;
+  fly_to_param_update?: string;
+  fly_to_param_message?: string;
+  fly_to_param_error?: string;
+  fly_to_param_steps?: Array<{ type?: string; status?: string; message?: string }>;
+  fly_to_status_snapshot?: FlyToStatus;
 }
 
 export interface PreflightStatus extends BridgeMessage {
@@ -168,6 +236,7 @@ export interface TelemetryData extends BridgeMessage {
   diagnostics?: TelemetryDiagnosticEntry[];
   diagnostics_severity?: string;
   fly_safe?: any;
+  fly_to_status?: FlyToStatus;
   obstacle_avoidance?: {
     enabled: boolean;
     sectors: Array<{
