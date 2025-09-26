@@ -108,6 +108,48 @@ export interface FlyToStatus {
   capability?: FlyToCapabilityStatus;
 }
 
+export interface WaypointExecutingStatus {
+  wayline_id?: number;
+  current_waypoint_index?: number;
+  mission_id?: string;
+}
+
+export interface WaypointInterruptStatus {
+  code?: string;
+  description?: string;
+}
+
+export type WaypointTimelineEntry =
+  | {
+      type: 'state';
+      timestamp?: number;
+      state?: string;
+    }
+  | {
+      type: 'executing';
+      timestamp?: number;
+      mission_id?: string;
+      wayline_id?: number;
+      current_waypoint_index?: number;
+      raw?: string;
+    }
+  | {
+      type: 'interrupt';
+      timestamp?: number;
+      error?: WaypointInterruptStatus;
+    };
+
+export interface WaypointStatusTelemetry {
+  timestamp?: number;
+  state?: string;
+  executing?: WaypointExecutingStatus;
+  last_interrupt?: WaypointInterruptStatus;
+  mission_id?: string;
+  mission_path?: string;
+  backend?: string;
+  timeline?: WaypointTimelineEntry[];
+}
+
 export interface BridgeMessage {
   type: string;
   version: string;
@@ -151,6 +193,12 @@ export interface FlightCommandAck extends BridgeMessage {
   fly_to_param_error?: string;
   fly_to_param_steps?: Array<{ type?: string; status?: string; message?: string }>;
   fly_to_status_snapshot?: FlyToStatus;
+  backend?: string;
+  mission_id?: string;
+  mission_path?: string;
+  wayline_ids?: number[];
+  auto_flight_speed?: number;
+  fallback_reason?: string;
 }
 
 export interface PreflightStatus extends BridgeMessage {
@@ -237,6 +285,7 @@ export interface TelemetryData extends BridgeMessage {
   diagnostics_severity?: string;
   fly_safe?: any;
   fly_to_status?: FlyToStatus;
+  waypoint_status?: WaypointStatusTelemetry;
   obstacle_avoidance?: {
     enabled: boolean;
     sectors: Array<{

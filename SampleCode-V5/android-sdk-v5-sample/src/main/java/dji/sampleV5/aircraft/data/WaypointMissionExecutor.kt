@@ -4,9 +4,11 @@ import android.content.Context
 import android.util.Log
 import dji.sdk.keyvalue.key.FlightControllerKey
 import dji.sdk.keyvalue.key.KeyTools
+import dji.sdk.keyvalue.key.RtkMobileStationKey
 import dji.sdk.keyvalue.value.common.LocationCoordinate2D
 import dji.sdk.keyvalue.value.common.LocationCoordinate3D
 import dji.sdk.keyvalue.value.flightcontroller.FlyToMode
+import dji.sdk.keyvalue.value.rtkmobilestation.RTKTakeoffAltitudeInfo
 import dji.v5.common.callback.CommonCallbacks
 import dji.v5.common.error.IDJIError
 import dji.v5.common.utils.GpsUtils
@@ -103,9 +105,18 @@ class WaypointMissionExecutor(
         val takeoffAltitudeRaw = runCatching {
             (keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyTakeoffLocationAltitude)) as? Number)?.toDouble()
         }.getOrNull()
+        val rtkTakeoffInfo = runCatching {
+            keyManager.getValue(KeyTools.createKey(RtkMobileStationKey.KeyRTKTakeoffAltitudeInfo)) as? RTKTakeoffAltitudeInfo
+        }.getOrNull()
 
-        val takeoffAsl = computeTakeoffAsl(takeoffAltitudeRaw, homeLocation, aircraftLocation2D, altitudeAgl)
-        val currentLocation = aircraftLocation3D ?: aircraftLocation2D?.let { LocationCoordinate3D(it.latitude, it.longitude, altitudeAgl ?: 0.0) }
+        val takeoffAsl = computeTakeoffAsl(
+            rtkTakeoffInfo = rtkTakeoffInfo,
+            takeoffAltitudeRaw = takeoffAltitudeRaw,
+            homeLocation = homeLocation,
+            aircraftLocation = aircraftLocation2D,
+            relativeAltitude = altitudeAgl ?: ultrasonicHeight ?: 0.0
+        )
+        val currentLocation = aircraftLocation3D ?: aircraftLocation2D?.let { LocationCoordinate3D(it.latitude, it.longitude, altitudeAgl ?: ultrasonicHeight ?: 0.0) }
         val currentHeight = altitudeAgl ?: ultrasonicHeight ?: 0.0
 
         val targetRelativeHeight = computeTargetHeight(
@@ -168,25 +179,30 @@ class WaypointMissionExecutor(
     }
 
     private fun computeTakeoffAsl(
+        rtkTakeoffInfo: RTKTakeoffAltitudeInfo?,
         takeoffAltitudeRaw: Double?,
         homeLocation: LocationCoordinate2D?,
         aircraftLocation: LocationCoordinate2D?,
-        altitudeAgl: Double?
+        relativeAltitude: Double
     ): Double? {
         val lat = homeLocation?.latitude ?: aircraftLocation?.latitude
         val lon = homeLocation?.longitude ?: aircraftLocation?.longitude
-        if (takeoffAltitudeRaw != null && lat != null && lon != null && !lat.isNaN() && !lon.isNaN()) {
-            return runCatching { GpsUtils.egm96Altitude(takeoffAltitudeRaw, lat, lon) }.getOrNull()
+
+        val homePointAltitude = rtkTakeoffInfo?.altitude?.toDouble() ?: takeoffAltitudeRaw
+        val ellipsoidTotal = homePointAltitude?.let { it + relativeAltitude }
+
+        val altitudeAsl = when {
+            ellipsoidTotal != null && lat != null && lon != null && !lat.isNaN() && !lon.isNaN() ->
+                runCatching { GpsUtils.egm96Altitude(ellipsoidTotal, lat, lon) }.getOrNull()
+            ellipsoidTotal != null -> ellipsoidTotal
+            else -> null
         }
-        if (takeoffAltitudeRaw != null) {
-            return takeoffAltitudeRaw
+
+        if (altitudeAsl != null) {
+            return altitudeAsl - relativeAltitude
         }
-        if (altitudeAgl != null && lat != null && lon != null) {
-            val currentEllipsoid = altitudeAgl
-            val currentAsl = runCatching { GpsUtils.egm96Altitude(currentEllipsoid, lat, lon) }.getOrNull()
-            return currentAsl?.minus(altitudeAgl)
-        }
-        return null
+
+        return homePointAltitude ?: takeoffAltitudeRaw
     }
 
     private fun computeTargetHeight(
@@ -430,19 +446,13 @@ class WaypointMissionExecutor(
         )
     }
 
-    companion object {
-        private const val BACKEND_ID = "waypoint_v2"
-        private const val DEFAULT_SPEED = 3.0
-        private const val MIN_SPEED = 0.5
-        private const val MIN_HEIGHT = 0.0
-    }
-
     fun currentMissionId(): String? = activeMissionId.get()
 
     fun currentMissionSnapshot(): Map<String, Any?>? = activeMissionId.get()?.let { id ->
         mapOf(
             "mission_id" to id,
-            "mission_path" to activeMissionPath.get()
+            "mission_path" to activeMissionPath.get(),
+            "backend" to BACKEND_ID
         )
     }
 
@@ -466,5 +476,14 @@ class WaypointMissionExecutor(
     fun clearActiveMission() {
         activeMissionId.set(null)
         activeMissionPath.set(null)
+    }
+
+    fun backendId(): String = BACKEND_ID
+
+    companion object {
+        private const val BACKEND_ID = "waypoint_v2"
+        private const val DEFAULT_SPEED = 3.0
+        private const val MIN_SPEED = 0.5
+        private const val MIN_HEIGHT = 0.0
     }
 }

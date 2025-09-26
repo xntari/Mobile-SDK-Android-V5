@@ -7,6 +7,7 @@ import dji.v5.manager.aircraft.waypoint3.WaypointMissionExecuteStateListener
 import dji.v5.manager.aircraft.waypoint3.WaypointMissionManager
 import dji.v5.manager.aircraft.waypoint3.model.WaylineExecutingInfo
 import dji.v5.manager.aircraft.waypoint3.model.WaypointMissionExecuteState
+import java.util.ArrayDeque
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -24,10 +25,27 @@ class WaypointMissionBridgeModel(
     private val latestState = AtomicReference<WaypointMissionExecuteState?>(null)
     private val latestExecutingInfo = AtomicReference<WaylineExecutingInfo?>(null)
     private val lastInterrupt = AtomicReference<IDJIError?>(null)
+    private val lastStateName = AtomicReference<String?>(null)
+    private val lastWaypointKey = AtomicReference<String?>(null)
+    private val timelineLock = Any()
+    private val timeline = ArrayDeque<Map<String, Any?>>()
 
     private val stateListener = WaypointMissionExecuteStateListener { state ->
+        val now = System.currentTimeMillis()
         latestState.set(state)
-        lastUpdate.set(System.currentTimeMillis())
+        lastUpdate.set(now)
+
+        val stateName = state.name.lowercase(Locale.ROOT)
+        val previousState = lastStateName.getAndSet(stateName)
+        if (previousState != stateName) {
+            recordTimelineEntry(
+                mapOf(
+                    "type" to "state",
+                    "state" to stateName,
+                    "timestamp" to now
+                )
+            )
+        }
 
         if (state == WaypointMissionExecuteState.FINISHED ||
             state == WaypointMissionExecuteState.READY ||
@@ -40,14 +58,41 @@ class WaypointMissionBridgeModel(
 
     private val executingInfoListener = object : WaylineExecutingInfoListener {
         override fun onWaylineExecutingInfoUpdate(info: WaylineExecutingInfo) {
+            val now = System.currentTimeMillis()
             latestExecutingInfo.set(info)
-            lastUpdate.set(System.currentTimeMillis())
+            lastUpdate.set(now)
+
+            val waylineId = runCatching { info.waylineID }.getOrNull()
+            val waypointIndex = runCatching { info.currentWaypointIndex }.getOrNull()
+            val missionId = runCatching { info.missionFileName }.getOrNull()
+            val key = "${missionId ?: "unknown"}:${waylineId ?: -1}:${waypointIndex ?: -1}"
+            val previousKey = lastWaypointKey.getAndSet(key)
+            if (previousKey != key) {
+                recordTimelineEntry(
+                    mapOf(
+                        "type" to "executing",
+                        "timestamp" to now,
+                        "mission_id" to missionId,
+                        "wayline_id" to waylineId,
+                        "current_waypoint_index" to waypointIndex,
+                        "raw" to info.toString()
+                    )
+                )
+            }
         }
 
         override fun onWaylineExecutingInterruptReasonUpdate(error: IDJIError?) {
             if (error != null) {
+                val now = System.currentTimeMillis()
                 lastInterrupt.set(error)
-                lastUpdate.set(System.currentTimeMillis())
+                lastUpdate.set(now)
+                recordTimelineEntry(
+                    mapOf(
+                        "type" to "interrupt",
+                        "timestamp" to now,
+                        "error" to serializeError(error)
+                    )
+                )
             }
         }
     }
@@ -82,6 +127,14 @@ class WaypointMissionBridgeModel(
         info?.let { map["executing"] = serializeExecutingInfo(it) }
         interrupt?.let { map["last_interrupt"] = serializeError(it) }
         missionExecutor.currentMissionSnapshot()?.let { map.putAll(it) }
+        if (!map.containsKey("backend")) {
+            map["backend"] = missionExecutor.backendId()
+        }
+        synchronized(timelineLock) {
+            if (timeline.isNotEmpty()) {
+                map["timeline"] = timeline.toList()
+            }
+        }
         return map
     }
 
@@ -100,7 +153,17 @@ class WaypointMissionBridgeModel(
         return map
     }
 
+    private fun recordTimelineEntry(entry: Map<String, Any?>) {
+        synchronized(timelineLock) {
+            timeline.addLast(entry)
+            while (timeline.size > MAX_TIMELINE_ENTRIES) {
+                timeline.removeFirst()
+            }
+        }
+    }
+
     companion object {
         private const val TAG = "WaypointMissionBridge"
+        private const val MAX_TIMELINE_ENTRIES = 50
     }
 }

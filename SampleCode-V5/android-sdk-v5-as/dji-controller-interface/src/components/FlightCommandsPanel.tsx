@@ -337,6 +337,26 @@ const marginClassName = (value?: number | null) => {
   return "text-status-good";
 };
 
+const formatMissionState = (state?: string) => {
+  if (!state) return "IDLE";
+  return state.replace(/_/g, " ").toUpperCase();
+};
+
+const missionStateClass = (state?: string) => {
+  if (!state) return "text-gray-400";
+  const normalized = state.toLowerCase();
+  if (normalized.includes("error") || normalized.includes("interrupt")) {
+    return "text-status-error";
+  }
+  if (normalized === "executing" || normalized === "flying") {
+    return "text-status-good";
+  }
+  if (normalized === "paused" || normalized === "prepare") {
+    return "text-yellow-300";
+  }
+  return "text-gray-300";
+};
+
 const formatAxisPercent = (value: number) => {
   const percent = Math.round(value * 100);
   const prefix = percent > 0 ? "+" : "";
@@ -899,6 +919,24 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
   const lastDiagnostic = lastAck?.diagnostics?.[0];
   const lastFlySafeWarning = lastAck?.fly_safe?.warning_notification;
   const flyToContext = lastAck?.fly_to_context;
+  const waypointStatus = telemetry?.waypoint_status;
+  const missionStateLabel = formatMissionState(waypointStatus?.state);
+  const missionStateBadge = missionStateClass(waypointStatus?.state);
+  const missionId = waypointStatus?.mission_id;
+  const missionPath = waypointStatus?.mission_path;
+  const missionTimestamp = waypointStatus?.timestamp
+    ? `${formatRelativeTime(waypointStatus.timestamp)} ago`
+    : null;
+  const missionExecuting = waypointStatus?.executing;
+  const missionInterrupt = waypointStatus?.last_interrupt;
+  const missionBackend = waypointStatus?.backend;
+  const missionActive = Boolean(
+    waypointStatus?.state &&
+      !["ready", "finished", "idle", "not_supported", "unknown"].includes(
+        waypointStatus.state.toLowerCase(),
+      ),
+  );
+  const canStopMission = missionActive;
 
   return (
     <>
@@ -1071,6 +1109,65 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                 {renderFlyToSteps(lastAck.fly_to_param_steps)}
               </div>
             )}
+          </section>
+
+          <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
+            <div className="flex items-center justify-between mb-1">
+              <div className="text-gray-400 uppercase text-[11px]">
+                Waypoint Mission
+              </div>
+              <div className={`text-[11px] font-semibold ${missionStateBadge}`}>
+                {missionStateLabel}
+              </div>
+            </div>
+            <div className="text-[11px] text-gray-300 space-y-0.5">
+              <div>
+                Backend:{" "}
+                <span className="text-gray-200">{missionBackend ?? "—"}</span>
+              </div>
+              <div>
+                Mission ID:{" "}
+                <span className="text-gray-200">{missionId ?? "—"}</span>
+              </div>
+              <div>
+                Waypoint:{" "}
+                <span className="text-gray-200">
+                  {typeof missionExecuting?.current_waypoint_index === "number"
+                    ? `#${missionExecuting.current_waypoint_index}`
+                    : "—"}
+                </span>
+                {typeof missionExecuting?.wayline_id === "number" && (
+                  <span className="ml-1 text-gray-400">(Wayline {missionExecuting.wayline_id})</span>
+                )}
+              </div>
+              <div>
+                Updated:{" "}
+                <span className="text-gray-200">{missionTimestamp ?? "–"}</span>
+              </div>
+              {missionInterrupt?.description && (
+                <div className="text-status-error">
+                  Interrupt: {missionInterrupt.description}
+                  {missionInterrupt.code && (
+                    <span className="text-gray-400"> ({missionInterrupt.code})</span>
+                  )}
+                </div>
+              )}
+              {missionPath && (
+                <div className="text-[10px] text-gray-400 leading-tight">
+                  KMZ: <span className="text-gray-300" title={missionPath}>{missionPath}</span>
+                </div>
+              )}
+            </div>
+            <div className="mt-2 grid grid-cols-1 gap-2">
+              <button
+                type="button"
+                className={`${toneClass.danger} disabled:opacity-40 disabled:cursor-not-allowed`}
+                onClick={() => handleSend("waypoint_stop")}
+                disabled={!canStopMission}
+              >
+                Stop Waypoint Mission
+              </button>
+            </div>
           </section>
 
           <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
@@ -1387,6 +1484,38 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                       </div>
                     )}
                     {renderFlyToSteps(event.fly_to_param_steps)}
+                    {(event.backend || event.mission_id || event.mission_path) && (
+                      <div className="text-[10px] text-gray-400 leading-tight">
+                        {event.backend && (
+                          <span className="text-gray-300">Backend {event.backend}</span>
+                        )}
+                        {event.mission_id && (
+                          <span className="ml-1 text-gray-300">
+                            Mission {event.mission_id}
+                          </span>
+                        )}
+                        {event.mission_path && (
+                          <span className="ml-1 text-gray-500" title={event.mission_path}>
+                            ({event.mission_path})
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {event.wayline_ids && event.wayline_ids.length > 0 && (
+                      <div className="text-[10px] text-gray-400 leading-tight">
+                        Waylines: {event.wayline_ids.join(', ')}
+                      </div>
+                    )}
+                    {typeof event.auto_flight_speed === 'number' && (
+                      <div className="text-[10px] text-gray-400 leading-tight">
+                        Auto speed {event.auto_flight_speed.toFixed(1)} m/s
+                      </div>
+                    )}
+                    {event.fallback_reason && (
+                      <div className="text-[10px] text-gray-400 leading-tight">
+                        Fallback: {event.fallback_reason}
+                      </div>
+                    )}
                     {event.device_status && (
                       <div className="text-[10px] text-gray-400 mt-1 leading-tight">
                         Status:{" "}

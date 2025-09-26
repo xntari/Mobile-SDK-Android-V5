@@ -2819,16 +2819,24 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             val isAutoGoHome = flightModeName.contains("GO_HOME", ignoreCase = true) || flightModeName.contains("GOHOME", ignoreCase = true)
 
             // Device status & health summaries
-            val deviceStatus = try {
-                DeviceStatusManager.getInstance().currentDJIDeviceStatus
-            } catch (_: Exception) {
-                null
-            }
-            val healthInfos = try {
-                DeviceHealthManager.getInstance().currentDJIDeviceHealthInfos?.filterIsInstance<DJIDeviceHealthInfo>() ?: emptyList()
-            } catch (_: Exception) {
-                emptyList()
-            }
+                val deviceStatus = try {
+                    DeviceStatusManager.getInstance().currentDJIDeviceStatus
+                } catch (_: Exception) {
+                    null
+                }
+                val deviceStatusMap = deviceStatus?.let {
+                    mapOf(
+                        "code" to it.statusCode(),
+                        "label" to it.name,
+                        "description" to it.description(),
+                        "level" to it.warningLevel()?.name
+                    )
+                }
+                val healthInfos = try {
+                    DeviceHealthManager.getInstance().currentDJIDeviceHealthInfos?.filterIsInstance<DJIDeviceHealthInfo>() ?: emptyList()
+                } catch (_: Exception) {
+                    emptyList()
+                }
             var healthSeverityRank = 0
             val diagnosticEntries = if (healthInfos.isNotEmpty()) {
                 healthInfos.map { info ->
@@ -2869,14 +2877,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 "timestamp" to System.currentTimeMillis(),
                 "bridge_status" to "active",
                 "data_collection_status" to "sdk_integrated",
-                "system_status" to deviceStatus?.let {
-                    mapOf(
-                        "code" to it.statusCode(),
-                        "label" to it.name,
-                        "description" to it.description(),
-                        "level" to it.warningLevel()?.name
-                    )
-                },
+                "system_status" to deviceStatusMap,
                 "system_status_level" to deviceStatus?.warningLevel()?.name,
                 "diagnostics" to diagnosticEntries,
                 "diagnostics_severity" to diagnosticsSeverity,

@@ -17,6 +17,7 @@ import dji.v5.manager.intelligent.flyto.FlyToTarget
 import dji.sdk.keyvalue.key.KeyTools
 import dji.sdk.keyvalue.value.common.LocationCoordinate2D
 import dji.v5.manager.KeyManager
+import dji.v5.manager.diagnostic.DeviceStatusManager
 import org.json.JSONObject
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -311,11 +312,8 @@ class FlightCommandHandler(
             flyToHeight = flyToHeightInt
         )
 
-        val fallbackReason = if (supportedModes != null && supportedModes.filterIsInstance<String>().isEmpty()) {
-            "intelligent_fly_to_unsupported"
-        } else null
-
-        if (fallbackReason != null) {
+        val shouldUseWaypointBackend = supportedModes.isNullOrEmpty()
+        if (shouldUseWaypointBackend) {
             attemptWaypointFallback(
                 clientId = clientId,
                 action = action,
@@ -326,10 +324,10 @@ class FlightCommandHandler(
                     flyToHeight = flyToHeightInt,
                     maxSpeed = maxSpeedMeters,
                     securityTakeoffHeight = securityTakeoffHeightMeters,
-                    reason = fallbackReason
+                    reason = "intelligent_fly_to_unsupported"
                 ),
                 baseExtra = baseExtra,
-                message = "Fallback to waypoint mission: $fallbackReason"
+                message = "Fallback to waypoint mission: intelligent_fly_to_unsupported"
             )
             return
         }
@@ -377,7 +375,27 @@ class FlightCommandHandler(
 
                             override fun onFailure(error: IDJIError) {
                                 logFlyToError("start_mission", error)
-                                respondWithStatus(success = false, paramStatus = paramStatus, error = error, message = message)
+                                if (!fallbackAttempted && shouldFallbackDueToFlyToError(error)) {
+                                    fallbackAttempted = true
+                                    attemptWaypointFallback(
+                                        clientId = clientId,
+                                        action = action,
+                                        request = WaypointMissionExecutor.Request(
+                                            targetLocation = targetLocation,
+                                            targetAltitudeAsl = targetAltitude,
+                                            mode = flyToMode,
+                                            flyToHeight = flyToHeightInt,
+                                            maxSpeed = maxSpeedMeters,
+                                            securityTakeoffHeight = securityTakeoffHeightMeters,
+                                            reason = "start_failed:${error.description() ?: "unknown"}"
+                                        ),
+                                        baseExtra = baseExtra,
+                                        message = error.description() ?: message ?: "start_failed"
+                                    )
+                                    return
+                                } else {
+                                    respondWithStatus(success = false, paramStatus = paramStatus, error = error, message = message)
+                                }
                             }
                         }
                     )
@@ -643,11 +661,12 @@ class FlightCommandHandler(
             keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyAircraftLocation)) as? LocationCoordinate2D
         }.getOrNull()
 
+        val referenceLat = homeLocation?.latitude ?: aircraftLocation2D?.latitude
+        val referenceLon = homeLocation?.longitude ?: aircraftLocation2D?.longitude
+
         var takeoffAltitudeAsl = runCatching {
-            val lat = homeLocation?.latitude ?: aircraftLocation2D?.latitude
-            val lon = homeLocation?.longitude ?: aircraftLocation2D?.longitude
-            if (takeoffAltitudeRaw != null && lat != null && lon != null && !lat.isNaN() && !lon.isNaN()) {
-                GpsUtils.egm96Altitude(takeoffAltitudeRaw, lat, lon)
+            if (takeoffAltitudeRaw != null && referenceLat != null && referenceLon != null && !referenceLat.isNaN() && !referenceLon.isNaN()) {
+                GpsUtils.egm96Altitude(takeoffAltitudeRaw, referenceLat, referenceLon)
             } else {
                 takeoffAltitudeRaw
             }
@@ -665,7 +684,7 @@ class FlightCommandHandler(
             takeoffAltitudeAsl = currentAsl?.minus(altitudeAgl)
         }
 
-        if (areMotorsOn == false && takeoffAltitudeRaw != null) {
+        if (takeoffAltitudeAsl == null && takeoffAltitudeRaw != null) {
             takeoffAltitudeAsl = takeoffAltitudeRaw
         }
 
@@ -720,6 +739,16 @@ class FlightCommandHandler(
 
         warning?.get("event")?.let { context["fly_safe_warning_event"] = it }
         warning?.get("description")?.let { context["fly_safe_warning_description"] = it }
+
+        val deviceStatus = runCatching { DeviceStatusManager.getInstance().currentDJIDeviceStatus }.getOrNull()
+        if (deviceStatus != null) {
+            context["device_status_raw"] = mapOf<String, Any?>(
+                "code" to deviceStatus.statusCode(),
+                "label" to deviceStatus.name,
+                "description" to deviceStatus.description(),
+                "level" to deviceStatus.warningLevel()?.name
+            )
+        }
 
         return context
     }

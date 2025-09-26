@@ -1,5 +1,5 @@
 // Global bridge state manager - survives React re-mounts
-import { BridgeDataState, ConnectionStatus, ControllerData, TelemetryData, BatteryData, FlightCommandAck, PreflightStatus, TelemetryDiagnosticEntry, DeviceStatusInfo } from './types';
+import { BridgeDataState, ConnectionStatus, ControllerData, TelemetryData, BatteryData, FlightCommandAck, PreflightStatus, TelemetryDiagnosticEntry, DeviceStatusInfo, WaypointTimelineEntry } from './types';
 
 class BridgeManager {
   private listeners: Set<() => void> = new Set();
@@ -160,6 +160,89 @@ class BridgeManager {
           };
         };
 
+        const sanitizeWaypointStatus = (): TelemetryData['waypoint_status'] => {
+          const status = message.waypoint_status;
+          if (!status || typeof status !== 'object') return undefined;
+
+          const executingRaw = status.executing;
+          const interruptRaw = status.last_interrupt;
+          const timelineRaw = Array.isArray(status.timeline) ? status.timeline : undefined;
+
+          const executing = executingRaw && typeof executingRaw === 'object'
+            ? {
+                wayline_id: typeof executingRaw.wayline_id === 'number' ? executingRaw.wayline_id : undefined,
+                current_waypoint_index: typeof executingRaw.current_waypoint_index === 'number'
+                  ? executingRaw.current_waypoint_index
+                  : undefined,
+                mission_id: typeof executingRaw.mission_id === 'string' ? executingRaw.mission_id : undefined,
+              }
+            : undefined;
+
+          const interrupt = interruptRaw && typeof interruptRaw === 'object'
+            ? {
+                code: typeof interruptRaw.code === 'string' ? interruptRaw.code : undefined,
+                description: typeof interruptRaw.description === 'string' ? interruptRaw.description : undefined,
+              }
+            : undefined;
+
+          const timelineEntries = timelineRaw
+            ?.map((entry: any): WaypointTimelineEntry | null => {
+              if (!entry || typeof entry !== 'object') return null;
+              const type = typeof entry.type === 'string' ? entry.type.toLowerCase() : undefined;
+              const entryTimestamp = typeof entry.timestamp === 'number' ? entry.timestamp : undefined;
+              if (type === 'state') {
+                return {
+                  type: 'state',
+                  timestamp: entryTimestamp,
+                  state: typeof entry.state === 'string' ? entry.state : undefined,
+                };
+              }
+              if (type === 'executing') {
+                return {
+                  type: 'executing',
+                  timestamp: entryTimestamp,
+                  mission_id: typeof entry.mission_id === 'string' ? entry.mission_id : undefined,
+                  wayline_id: typeof entry.wayline_id === 'number' ? entry.wayline_id : undefined,
+                  current_waypoint_index: typeof entry.current_waypoint_index === 'number'
+                    ? entry.current_waypoint_index
+                    : undefined,
+                  raw: typeof entry.raw === 'string' ? entry.raw : undefined,
+                };
+              }
+              if (type === 'interrupt') {
+                const errorRaw = entry.error;
+                const error = errorRaw && typeof errorRaw === 'object'
+                  ? {
+                      code: typeof errorRaw.code === 'string' ? errorRaw.code : undefined,
+                      description: typeof errorRaw.description === 'string' ? errorRaw.description : undefined,
+                    }
+                  : undefined;
+                return {
+                  type: 'interrupt',
+                  timestamp: entryTimestamp,
+                  error,
+                };
+              }
+              return null;
+            })
+            .filter((entry): entry is WaypointTimelineEntry => Boolean(entry));
+
+          const missionId = typeof status.mission_id === 'string'
+            ? status.mission_id
+            : (executing?.mission_id ?? undefined);
+
+          return {
+            timestamp: typeof status.timestamp === 'number' ? status.timestamp : undefined,
+            state: typeof status.state === 'string' ? status.state : undefined,
+            mission_id: missionId,
+            mission_path: typeof status.mission_path === 'string' ? status.mission_path : undefined,
+            backend: typeof status.backend === 'string' ? status.backend : undefined,
+            executing,
+            last_interrupt: interrupt,
+            timeline: timelineEntries && timelineEntries.length ? timelineEntries : undefined,
+          };
+        };
+
         const mappedTelemetry = {
           ...message,
           speed: message.ground_speed || message.speed || 0,
@@ -169,6 +252,7 @@ class BridgeManager {
           home_bearing: bearingToHome,
           gimbals: sanitizeGimbals(),
           camera_optics: sanitizeCameraOptics(),
+          waypoint_status: sanitizeWaypointStatus(),
         } as TelemetryData;
         
         this.bridgeData = {
