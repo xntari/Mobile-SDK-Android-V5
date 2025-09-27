@@ -1,5 +1,5 @@
 node_modules/
-tools/data/
+tools/data/*
 package-lock.json
 # Ignore vim files:
 *~

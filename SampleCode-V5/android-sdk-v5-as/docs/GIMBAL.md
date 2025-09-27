@@ -1800,6 +1800,49 @@ KeyTools.createKey(GimbalKey.KeyRestoreFactorySettings, gimbalIndex),
 KeyTools.createKey(GimbalKey.KeyGimbalCalibrate, gimbalIndex),
 ```
 
+### H20N (LEFT_OR_MAIN) Key Inventory
+
+> **Reminder**: The FPV block is fixed to the fuselage. All gimbal telemetry and control below apply to the H20N payload (`ComponentIndexType.LEFT_OR_MAIN`).
+
+| Capability | SDK Key / API | Reference in Repo |
+| --- | --- | --- |
+| Velocity control | `GimbalKey.KeyRotateBySpeed` | `../android-sdk-v5-sample/.../DJIBridgeServer.kt:996`, `docs/gimbal_free_look.md:347` |
+| Absolute angle move | `GimbalKey.KeyGimbalAngleRotation` | `docs/gimbal_free_look.md:58`, `DJIBridgeServer.kt:866` |
+| Current attitude (pitch/yaw/roll) | `GimbalKey.KeyGimbalAttitude` | `dji/v5/ux/core/widget/hsi/GimbalPitchBarModel.java:51`, `docs/gimbal_free_look.md:62` |
+| Attitude limits | `GimbalKey.KeyGimbalAttitudeRange` | `GimbalPitchBarModel.java:58` |
+| Yaw relative to aircraft | `GimbalKey.KeyYawRelativeToAircraftHeading` | `docs/GIMBAL.md:945` |
+| Yaw control capability | `GimbalKey.KeyYawAdjustSupported` | `dji/v5/ux/cameracore/widget/fpvinteraction/FPVInteractionWidgetModel.java:60` |
+| Connection state | `GimbalKey.KeyConnection` | `dji/v5/ux/core/ui/hsi/HSIWidgetModel.java:116` |
+| Fine tune posture | `GimbalKey.KeyFineTunePosture` + `KeyFineTune{Pitch|Roll|Yaw}TotalDegree` | `dji/v5/ux/gimbal/GimbalFineTuneWidgetModel.kt:30-45` |
+| Calibration status / start / factory reset | `KeyGimbalCalibrationStatus`, `KeyGimbalCalibrate`, `KeyRestoreFactorySettings` | `dji/v5/ux/gimbal/GimbalSettingWidgetModel.kt:38-57` |
+
+Camera optics (needed for accurate screen/world projection):
+
+| Capability | SDK Key / API | Reference in Repo |
+| --- | --- | --- |
+| Active lens | `CameraKey.KeyCameraVideoStreamSource` | `../android-sdk-v5-sample/.../DJIBridgeServer.kt:783` |
+| Continuous zoom ratio | `CameraKey.KeyCameraZoomRatios` & `KeyCameraZoomRatiosRange` | `dji/v5/ux/visualcamera/zoom/FocalZoomWidgetViewModel.java:58-79` |
+| Optical focal length (mm) | `CameraKey.KeyOpticalZoomFocalLength` *(planned)* | `FocalZoomWidgetViewModel` via `KeyTools.createCameraKey` |
+| Display FOV / sensor crop | `CameraKey.KeyCameraDisplayFov`, `KeyCameraSensorPhysicalSize` *(planned)* | `visualcamera` widgets (e.g. `CameraConfigShutterWidgetModel`) |
+| Laser range results | `CameraKey.KeyLaserMeasureInformation` | `../android-sdk-v5-sample/.../DJIBridgeServer.kt:870-911` |
+
+### Orientation & Geo Pose Implementation Plan
+
+1. **Bridge Telemetry Augmentation**  
+   Query `KeyGimbalAttitude`, `KeyYawRelativeToAircraftHeading`, and `KeyGimbalAttitudeRange` for `ComponentIndexType.LEFT_OR_MAIN` every telemetry tick. Capture concurrent optics state (currently `KeyCameraVideoStreamSource`, `KeyCameraZoomRatios`, `KeyLaserMeasureInformation`; extend to focal length/FOV keys when available). Emit as `telemetry_data.gimbals[]` plus enhanced `camera_status` payloads so the UI receives synchronized aircraft + payload pose.
+
+2. **Front-end Plumbing**  
+   Extend `BridgeDataState` to retain `gimbals: Array<{index, attitude, yawRelative, limits, zoom, optics}>`. Persist this snapshot whenever a detection/object-memory sample is stored to guarantee later reprojections use the exact pose and zoom metadata.
+
+3. **Orientation Debug Panel**  
+   Add a draggable `OrientationPanel` that renders a lightweight 3D scene (Three.js or custom canvas) illustrating aircraft attitude and the H20N gimbal orientation, optionally drawing the laser vector. Feed it from the augmented telemetry to validate bridge math live.
+
+4. **Absolute Object Localisation**  
+   Build a shared math helper that converts image pixels + lens intrinsics into camera-frame rays, then applies gimbal + aircraft transforms (using the new telemetry) to produce ENU coordinates. When laser range data is available, resolve the 3D intersection precisely. Reuse UXSDK models (`GimbalPitchBarModel`, `FocalZoomWidgetViewModel`) for limits/zoom behaviour to avoid diverging from DJI's calibration.
+
+5. **Verification & Regression**  
+   Cross-check values against the existing UXSDK widgets (HSI pitch bar, zoom slider). If firmware updates modify key scaling, these comparisons will highlight discrepancies before they reach higher-level vision features.
+
 ### LOOK AT - FlightControllerKey.KeyLookAt
 **File:** `/Users/kamil/git/xMobile-SDK-Android-V5/SampleCode-V5/android-sdk-v5-sample/src/main/java/dji/sampleV5/aircraft/models/LookAtVM.kt`  
 **Line:** 57

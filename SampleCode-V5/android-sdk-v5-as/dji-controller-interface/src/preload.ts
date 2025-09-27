@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Bridge communication
   sendBridgeCommand: (command: any) => ipcRenderer.invoke('send-bridge-command', command),
   getConnectionStatus: () => ipcRenderer.invoke('get-connection-status'),
+  pickKmzFile: () => ipcRenderer.invoke('pick-kmz-file'),
   
   // Event listeners
   onBridgeData: (callback: (data: any) => void) => {
@@ -54,6 +55,7 @@ declare global {
       onSecondaryVideoFrame: (callback: (frame: any) => void) => void;
       onConnectionStatus: (callback: (status: string) => void) => void;
       removeAllListeners: (channel: string) => void;
+      pickKmzFile: () => Promise<{ path?: string; name?: string; base64?: string; error?: string } | null>;
     };
   }
 }

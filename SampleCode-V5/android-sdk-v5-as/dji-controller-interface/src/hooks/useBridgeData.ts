@@ -108,6 +108,7 @@ export const useBridgeData = () => {
                   type: 'state' as const,
                   timestamp,
                   state: typeof entry.state === 'string' ? entry.state : undefined,
+                  label: typeof entry.label === 'string' ? entry.label : undefined,
                 };
               }
               if (type === 'executing') {
@@ -120,6 +121,8 @@ export const useBridgeData = () => {
                     ? entry.current_waypoint_index
                     : undefined,
                   raw: typeof entry.raw === 'string' ? entry.raw : undefined,
+                  label: typeof entry.label === 'string' ? entry.label : undefined,
+                  execute_state: typeof entry.execute_state === 'string' ? entry.execute_state : undefined,
                 };
               }
               if (type === 'interrupt') {
@@ -134,6 +137,7 @@ export const useBridgeData = () => {
                   type: 'interrupt' as const,
                   timestamp,
                   error,
+                  label: typeof entry.label === 'string' ? entry.label : undefined,
                 };
               }
               return null;

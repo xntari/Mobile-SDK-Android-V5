@@ -5,6 +5,8 @@ import {
   FlightCommandAck,
   ControllerData,
   TelemetryDiagnosticEntry,
+  WaypointStatusTelemetry,
+  WaypointTimelineEntry,
 } from "../types";
 import { useBridgeCommands } from "../hooks/useBridgeCommands";
 import { useManualControl } from "../context/ManualControlContext";
@@ -920,8 +922,11 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
   const lastFlySafeWarning = lastAck?.fly_safe?.warning_notification;
   const flyToContext = lastAck?.fly_to_context;
   const waypointStatus = telemetry?.waypoint_status;
-  const missionStateLabel = formatMissionState(waypointStatus?.state);
-  const missionStateBadge = missionStateClass(waypointStatus?.state);
+  const missionTimeline = (waypointStatus?.timeline ?? []) as WaypointTimelineEntry[];
+  const latestMissionState = [...missionTimeline].reverse().find((entry) => entry.type === 'state');
+  const missionStateRaw = latestMissionState?.state ?? waypointStatus?.state;
+  const missionStateLabel = latestMissionState?.label ?? formatMissionState(missionStateRaw);
+  const missionStateBadge = missionStateClass(missionStateRaw);
   const missionId = waypointStatus?.mission_id;
   const missionPath = waypointStatus?.mission_path;
   const missionTimestamp = waypointStatus?.timestamp
@@ -931,12 +936,13 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
   const missionInterrupt = waypointStatus?.last_interrupt;
   const missionBackend = waypointStatus?.backend;
   const missionActive = Boolean(
-    waypointStatus?.state &&
+    missionStateRaw &&
       !["ready", "finished", "idle", "not_supported", "unknown"].includes(
-        waypointStatus.state.toLowerCase(),
+        missionStateRaw.toLowerCase(),
       ),
   );
   const canStopMission = missionActive;
+  const missionTimelineDisplay = [...missionTimeline].slice(-5).reverse();
 
   return (
     <>
@@ -1144,20 +1150,39 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                 Updated:{" "}
                 <span className="text-gray-200">{missionTimestamp ?? "–"}</span>
               </div>
-              {missionInterrupt?.description && (
-                <div className="text-status-error">
-                  Interrupt: {missionInterrupt.description}
-                  {missionInterrupt.code && (
-                    <span className="text-gray-400"> ({missionInterrupt.code})</span>
-                  )}
-                </div>
-              )}
-              {missionPath && (
-                <div className="text-[10px] text-gray-400 leading-tight">
-                  KMZ: <span className="text-gray-300" title={missionPath}>{missionPath}</span>
-                </div>
-              )}
-            </div>
+            {missionInterrupt?.description && (
+              <div className="text-status-error">
+                Interrupt: {missionInterrupt.description}
+                {missionInterrupt.code && (
+                  <span className="text-gray-400"> ({missionInterrupt.code})</span>
+                )}
+              </div>
+            )}
+            {missionPath && (
+              <div className="text-[10px] text-gray-400 leading-tight">
+                KMZ: <span className="text-gray-300" title={missionPath}>{missionPath}</span>
+              </div>
+            )}
+            {missionTimelineDisplay.length > 0 && (
+              <div className="pt-2 border-t border-gray-800 space-y-1 text-[10px] text-gray-400 max-h-20 overflow-y-auto">
+                {missionTimelineDisplay.map((entry, idx) => {
+                  const fallbackLabel = entry.type === 'state'
+                    ? formatMissionState(entry.state)
+                    : entry.type === 'executing' && entry.execute_state
+                      ? entry.execute_state.replace(/_/g, ' ').toUpperCase()
+                      : entry.type.toUpperCase();
+                  const entryLabel = entry.label ?? fallbackLabel;
+                  const entryTime = entry.timestamp ? `${formatRelativeTime(entry.timestamp)} ago` : '–';
+                  return (
+                    <div key={`${entry.type}-${idx}`} className="flex items-center justify-between gap-2">
+                      <span className="text-gray-200">{entryLabel}</span>
+                      <span className="text-gray-500">{entryTime}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
             <div className="mt-2 grid grid-cols-1 gap-2">
               <button
                 type="button"

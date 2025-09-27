@@ -18,7 +18,9 @@ import dji.sdk.keyvalue.key.KeyTools
 import dji.sdk.keyvalue.value.common.LocationCoordinate2D
 import dji.v5.manager.KeyManager
 import dji.v5.manager.diagnostic.DeviceStatusManager
+import android.util.Base64
 import org.json.JSONObject
+import java.io.File
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -148,6 +150,7 @@ class FlightCommandHandler(
             "virtual_stick_override" -> handleVirtualStickOverride(clientId, action, params)
             "fly_to_prepare" -> handleFlyToPrepare(clientId, action, params)
             "waypoint_stop" -> handleWaypointStop(clientId, action)
+            "waypoint_load_kmz" -> handleWaypointLoadKmz(clientId, action, params)
 
             else -> {
                 Log.w(TAG, "Unsupported flight command action '$actionRaw' from $clientId")
@@ -770,6 +773,47 @@ class FlightCommandHandler(
             TAG,
             "fly_to_prepare stage=$stage failed: domain=$domainStr code=$codeStr description=${error.description()} capability=${snapshot?.get("capability")}"
         )
+    }
+
+    private fun handleWaypointLoadKmz(clientId: String, action: String, params: JSONObject?) {
+        val executor = waypointMissionExecutor
+        if (executor == null) {
+            respond(clientId, action, false, message = "Waypoint executor unavailable")
+            return
+        }
+
+        if (params == null) {
+            respond(clientId, action, false, message = "waypoint_load_kmz requires params")
+            return
+        }
+
+        val rawName = params.optString("file_name", "").trim()
+        val base64Data = params.optString("file_data", "").trim()
+        if (rawName.isEmpty() || base64Data.isEmpty()) {
+            respond(clientId, action, false, message = "waypoint_load_kmz requires file_name and file_data")
+            return
+        }
+
+        val sanitizedName = sanitizeKmzFileName(rawName)
+        val kmzBytes = try {
+            Base64.decode(base64Data, Base64.DEFAULT)
+        } catch (e: IllegalArgumentException) {
+            respond(clientId, action, false, message = "Invalid KMZ payload: ${e.message}")
+            return
+        }
+
+        executor.executeExternalKmz(sanitizedName, kmzBytes) { result ->
+            when (result) {
+                is WaypointMissionExecutor.Result.Success -> respond(clientId, action, true, extra = result.extra)
+                is WaypointMissionExecutor.Result.Failure -> respond(clientId, action, false, message = result.message, error = result.error, extra = result.extra)
+            }
+        }
+    }
+
+    private fun sanitizeKmzFileName(input: String): String {
+        val trimmed = input.substringAfterLast('/').substringAfterLast('\\')
+        val replaced = trimmed.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        return if (replaced.isBlank()) "external_${System.currentTimeMillis()}.kmz" else replaced
     }
 
     private fun handleWaypointStop(clientId: String, action: String) {

@@ -8,7 +8,7 @@ import { addMetersToLatLon, bearingOffsetToMeters, normalizeHeadingDegrees } fro
 import { TelemetryData, FlyToStatus, WaypointStatusTelemetry, FlightCommandAck, WaypointTimelineEntry } from '../types';
 import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
 
-type MissionLogKind = 'command' | 'telemetry' | 'simulation' | 'laser' | 'manual';
+type MissionLogKind = 'command' | 'telemetry' | 'simulation' | 'laser' | 'manual' | 'kmz';
 
 interface MissionLogEntry {
   id: string;
@@ -41,6 +41,24 @@ const formatLatLon = (value?: number) =>
 
 const formatMissionStateLabel = (state?: string) =>
   state ? state.replace(/_/g, ' ').toUpperCase() : 'UNKNOWN';
+
+const missionStateClassName = (state?: string) => {
+  if (!state) return 'text-gray-400';
+  const normalized = state.toLowerCase();
+  if (normalized.includes('error') || normalized.includes('interrupt')) {
+    return 'text-status-error';
+  }
+  if (['executing', 'enter_wayline', 'flying'].includes(normalized)) {
+    return 'text-status-good';
+  }
+  if (['uploading', 'preparing', 'ready', 'paused'].includes(normalized)) {
+    return 'text-yellow-300';
+  }
+  if (normalized === 'finished') {
+    return 'text-gray-200';
+  }
+  return 'text-gray-300';
+};
 
 const formatRelativeTime = (timestamp?: number) => {
   if (!timestamp) return '–';
@@ -80,6 +98,17 @@ const formatSeconds = (seconds: number) => {
   if (seconds < 60) return `${seconds.toFixed(1)}s`;
   const mins = seconds / 60;
   return mins < 60 ? `${mins.toFixed(1)}m` : `${(mins / 60).toFixed(1)}h`;
+};
+
+const formatBytes = (bytes?: number) => {
+  if (!bytes || !Number.isFinite(bytes) || bytes <= 0) return 'unknown size';
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  const gb = mb / 1024;
+  return `${gb.toFixed(2)} GB`;
 };
 
 interface ManualTargetState {
@@ -328,22 +357,46 @@ export const FlyToPanel: React.FC = () => {
   const lastWaypointStateRef = React.useRef<string | null>(null);
   const lastWaypointIndexRef = React.useRef<string | null>(null);
   const waypointTimelineSeenRef = React.useRef<Set<string>>(new Set());
+  const [lastLoadedKmz, setLastLoadedKmz] = React.useState<{
+    name: string;
+    path?: string;
+    sizeBytes?: number;
+    timestamp: number;
+  } | null>(null);
 
   React.useEffect(() => objectMemoryTargetStore.subscribe(setTargetSelection), []);
 
   const flyToStatus = telemetry?.fly_to_status as FlyToStatus | undefined;
   const waypointStatus = telemetry?.waypoint_status as WaypointStatusTelemetry | undefined;
-  const missionStateLabel = formatMissionStateLabel(waypointStatus?.state);
+  const missionTimeline = (waypointStatus?.timeline ?? []) as WaypointTimelineEntry[];
+  const latestStateEntry = [...missionTimeline].reverse().find((entry) => entry.type === 'state');
+  const missionStateRaw = latestStateEntry?.state ?? waypointStatus?.state;
+  const missionStateLabel = latestStateEntry?.label ?? formatMissionStateLabel(missionStateRaw);
   const missionActive = Boolean(
-    waypointStatus?.state &&
+    missionStateRaw &&
       !['ready', 'finished', 'idle', 'not_supported', 'unknown'].includes(
-        waypointStatus.state.toLowerCase(),
+        missionStateRaw.toLowerCase(),
       ),
   );
   const missionTimestampLabel = formatRelativeTime(waypointStatus?.timestamp);
   const missionBackend = waypointStatus?.backend ?? previewPath?.backend;
   const missionId = waypointStatus?.mission_id ?? previewPath?.missionId;
   const missionInterrupt = waypointStatus?.last_interrupt;
+  const missionTimelineDisplay = [...missionTimeline].slice(-6).reverse();
+
+  const handleCopyMissionPath = React.useCallback(async (path: string) => {
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(path);
+        setStatusMessage('KMZ path copied to clipboard');
+      } else {
+        setStatusMessage('Clipboard API unavailable');
+      }
+    } catch (error) {
+      console.error('Failed to copy KMZ path', error);
+      setStatusMessage('Failed to copy KMZ path');
+    }
+  }, []);
   const derivedTarget = React.useMemo(() => {
     const anchor = targetSelection?.anchor;
     if (!anchor) return null;
@@ -496,6 +549,64 @@ export const FlyToPanel: React.FC = () => {
     appendLog('Target staged', context, 'manual');
     setStatusMessage(message);
   }, [appendLog]);
+
+  const handleLoadKmzMission = React.useCallback(async () => {
+    try {
+      if (!window?.electronAPI?.pickKmzFile) {
+        setStatusMessage('KMZ picker unavailable in this build');
+        return;
+      }
+
+      const selection = await window.electronAPI.pickKmzFile();
+      if (!selection) {
+        setStatusMessage('KMZ selection cancelled');
+        return;
+      }
+
+      if (selection.error) {
+        setStatusMessage(`KMZ selection failed: ${selection.error}`);
+        return;
+      }
+
+      if (!selection.base64 || !selection.name) {
+        setStatusMessage('Selected KMZ is missing content');
+        return;
+      }
+
+      const sizeBytes = Math.floor((selection.base64.length * 3) / 4);
+      const timestamp = Date.now();
+      const metadata = {
+        name: selection.name,
+        path: selection.path,
+        size_bytes: sizeBytes,
+        selected_at: timestamp,
+      };
+
+      appendLog('KMZ selected', metadata, 'kmz');
+      setLastLoadedKmz({
+        name: selection.name,
+        path: selection.path,
+        sizeBytes,
+        timestamp,
+      });
+      setSimPreview(null);
+      setStatusMessage('Uploading KMZ mission…');
+
+      const result = await sendFlightCommand('waypoint_load_kmz', {
+        file_name: selection.name,
+        file_data: selection.base64,
+      });
+
+      if (result?.success === false) {
+        setStatusMessage(result.error || result.error_message || 'waypoint_load_kmz rejected');
+      } else {
+        setStatusMessage('KMZ mission upload requested');
+      }
+    } catch (error) {
+      console.error('KMZ load failed', error);
+      setStatusMessage(error instanceof Error ? error.message : 'waypoint_load_kmz failed');
+    }
+  }, [appendLog, sendFlightCommand]);
 
   React.useEffect(() => {
     const api = (window as any).electronAPI;
@@ -1057,7 +1168,7 @@ export const FlyToPanel: React.FC = () => {
   }, [waypointStatus]);
 
   React.useEffect(() => {
-    const entries = waypointStatus?.timeline;
+    const entries = missionTimeline;
     if (!entries || entries.length === 0) {
       return;
     }
@@ -1447,6 +1558,42 @@ export const FlyToPanel: React.FC = () => {
         </section>
 
         <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-gray-400 uppercase text-[11px]">Load KMZ Mission</div>
+            {lastLoadedKmz && (
+              <div className="text-[10px] text-gray-400 truncate">
+                Last: <span className="text-gray-200">{lastLoadedKmz.name}</span>
+                {lastLoadedKmz.sizeBytes ? (
+                  <span className="text-gray-500"> · {formatBytes(lastLoadedKmz.sizeBytes)}</span>
+                ) : null}
+                <span className="text-gray-500"> · {formatRelativeTime(lastLoadedKmz.timestamp)}</span>
+              </div>
+            )}
+          </div>
+          <div className="grid grid-cols-1 gap-2">
+            <button
+              type="button"
+              className="px-2 py-1 rounded bg-dji-blue text-white hover:bg-dji-blue/80"
+              onClick={handleLoadKmzMission}
+            >
+              Select & Execute KMZ
+            </button>
+            {lastLoadedKmz?.path && (
+              <button
+                type="button"
+                className="px-2 py-1 rounded border border-gray-700 text-gray-200 hover:text-white hover:border-gray-500"
+                onClick={() => handleCopyMissionPath(lastLoadedKmz.path!)}
+              >
+                Copy KMZ Path
+              </button>
+            )}
+          </div>
+          <div className="mt-2 text-[10px] text-gray-500">
+            Uploads a DJI Waypoint KMZ package to the bridge and executes it via the waypoint backend. Use this to replay missions created in Pilot or field recordings.
+          </div>
+        </section>
+
+        <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
           <div className="text-gray-400 uppercase text-[11px] mb-1">Return to Home</div>
           <div className="grid grid-cols-2 gap-2">
             <button className="px-2 py-1 rounded bg-status-good/20 border border-status-good/50 text-status-good" onClick={() => handleReturnHome('return_home_start')}>
@@ -1461,7 +1608,7 @@ export const FlyToPanel: React.FC = () => {
         <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
           <div className="flex items-center justify-between mb-1">
             <div className="text-gray-400 uppercase text-[11px]">Waypoint Preview</div>
-            <div className={`text-[11px] font-semibold ${missionActive ? 'text-status-good' : 'text-gray-400'}`}>
+            <div className={`text-[11px] font-semibold ${missionStateClassName(missionStateRaw)}`}>
               {missionStateLabel}
             </div>
           </div>
@@ -1488,7 +1635,45 @@ export const FlyToPanel: React.FC = () => {
                 )}
               </div>
             )}
+            {missionId && missionBackend && (
+              <div className="text-[10px] text-gray-400 leading-tight">
+                Backend origin: <span className="text-gray-300">{missionBackend}</span>
+              </div>
+            )}
+            {waypointStatus?.mission_path && (
+              <div className="text-[10px] text-gray-400 leading-tight flex items-center gap-2">
+                <span className="truncate" title={waypointStatus.mission_path}>
+                  KMZ: <span className="text-gray-300">{waypointStatus.mission_path}</span>
+                </span>
+                <button
+                  type="button"
+                  className="px-1 py-0.5 border border-gray-700 rounded text-gray-300 hover:text-white hover:border-gray-500"
+                  onClick={() => handleCopyMissionPath(waypointStatus.mission_path!)}
+                >
+                  Copy
+                </button>
+              </div>
+            )}
           </div>
+          {missionTimelineDisplay.length > 0 && (
+            <div className="mt-2 border-t border-gray-800 pt-2 space-y-1.5 text-[10px] text-gray-400 max-h-28 overflow-y-auto">
+              {missionTimelineDisplay.map((entry, idx) => {
+                const fallbackLabel = entry.type === 'state'
+                  ? formatMissionStateLabel(entry.state)
+                  : entry.type === 'executing' && entry.execute_state
+                    ? entry.execute_state.replace(/_/g, ' ').toUpperCase()
+                    : entry.type.toUpperCase();
+                const entryLabel = entry.label ?? fallbackLabel;
+                const entryTime = entry.timestamp ? `${formatRelativeTime(entry.timestamp)} ago` : '–';
+                return (
+                  <div key={`${entry.type}-${idx}`} className="flex items-center justify-between gap-2">
+                    <span className="text-gray-200">{entryLabel}</span>
+                    <span className="text-gray-500">{entryTime}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <div className="mt-2 grid grid-cols-1 gap-2">
             <button
               type="button"
@@ -1533,7 +1718,9 @@ export const FlyToPanel: React.FC = () => {
                               ? 'bg-purple-700/40 text-purple-100'
                               : entry.kind === 'laser'
                                 ? 'bg-amber-600/40 text-amber-100'
-                                : 'bg-emerald-700/40 text-emerald-100'
+                                : entry.kind === 'kmz'
+                                  ? 'bg-indigo-700/40 text-indigo-100'
+                                  : 'bg-emerald-700/40 text-emerald-100'
                           }`}
                       >
                         {entry.kind.toUpperCase()}

@@ -32,6 +32,7 @@ class WaypointMissionBridgeModel(
 
     private val stateListener = WaypointMissionExecuteStateListener { state ->
         val now = System.currentTimeMillis()
+        Log.d(TAG, "Waypoint state update: ${state.name}")
         latestState.set(state)
         lastUpdate.set(now)
 
@@ -42,7 +43,8 @@ class WaypointMissionBridgeModel(
                 mapOf(
                     "type" to "state",
                     "state" to stateName,
-                    "timestamp" to now
+                    "timestamp" to now,
+                    "label" to stateLabel(stateName)
                 )
             )
         }
@@ -58,13 +60,18 @@ class WaypointMissionBridgeModel(
 
     private val executingInfoListener = object : WaylineExecutingInfoListener {
         override fun onWaylineExecutingInfoUpdate(info: WaylineExecutingInfo) {
-            val now = System.currentTimeMillis()
-            latestExecutingInfo.set(info)
-            lastUpdate.set(now)
+        val now = System.currentTimeMillis()
+        latestExecutingInfo.set(info)
+        lastUpdate.set(now)
 
-            val waylineId = runCatching { info.waylineID }.getOrNull()
-            val waypointIndex = runCatching { info.currentWaypointIndex }.getOrNull()
-            val missionId = runCatching { info.missionFileName }.getOrNull()
+        val waylineId = runCatching { info.waylineID }.getOrNull()
+        val waypointIndex = runCatching { info.currentWaypointIndex }.getOrNull()
+        val missionId = runCatching { info.missionFileName }.getOrNull()
+        val executeStateName = resolveExecuteState(info)
+        Log.d(
+            TAG,
+            "Waypoint executing update: mission=${missionId ?: "?"} wayline=${waylineId ?: "?"} index=${waypointIndex ?: "?"} state=${executeStateName ?: "unknown"}"
+        )
             val key = "${missionId ?: "unknown"}:${waylineId ?: -1}:${waypointIndex ?: -1}"
             val previousKey = lastWaypointKey.getAndSet(key)
             if (previousKey != key) {
@@ -75,7 +82,9 @@ class WaypointMissionBridgeModel(
                         "mission_id" to missionId,
                         "wayline_id" to waylineId,
                         "current_waypoint_index" to waypointIndex,
-                        "raw" to info.toString()
+                        "execute_state" to executeStateName,
+                        "raw" to info.toString(),
+                        "label" to executingLabel(waylineId, waypointIndex, executeStateName)
                     )
                 )
             }
@@ -90,7 +99,8 @@ class WaypointMissionBridgeModel(
                     mapOf(
                         "type" to "interrupt",
                         "timestamp" to now,
-                        "error" to serializeError(error)
+                        "error" to serializeError(error),
+                        "label" to interruptLabel(error)
                     )
                 )
             }
@@ -143,6 +153,7 @@ class WaypointMissionBridgeModel(
         runCatching { info.waylineID }.onSuccess { map["wayline_id"] = it }
         runCatching { info.currentWaypointIndex }.onSuccess { map["current_waypoint_index"] = it }
         runCatching { info.missionFileName }.onSuccess { map["mission_id"] = it }
+        resolveExecuteState(info)?.let { map["execute_state"] = it }
         return map
     }
 
@@ -162,8 +173,64 @@ class WaypointMissionBridgeModel(
         }
     }
 
+    private fun stateLabel(stateName: String): String = when (stateName.lowercase(Locale.ROOT)) {
+        "uploading" -> "Uploading mission"
+        "ready" -> "Ready"
+        "prepare" -> "Preparing"
+        "preparing" -> "Preparing"
+        "executing" -> "Executing"
+        "enter_wayline" -> "Entering wayline"
+        "exit_wayline" -> "Exiting wayline"
+        "finish" -> "Finished"
+        "finished" -> "Finished"
+        "paused" -> "Paused"
+        "resume" -> "Resumed"
+        else -> stateName.replace('_', ' ').replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.ROOT) else it.toString() }
+    }
+
+    private fun executingLabel(waylineId: Int?, waypointIndex: Int?, executeState: String?): String = buildString {
+        append("Waypoint ")
+        append(if (waypointIndex != null && waypointIndex >= 0) "#${waypointIndex}" else "progress")
+        if (waylineId != null && waylineId >= 0) {
+            append(" (Wayline $waylineId)")
+        }
+        executeState?.let {
+            append(" · ")
+            append(it.replace('_', ' ').replaceFirstChar { ch -> if (ch.isLowerCase()) ch.titlecase(Locale.ROOT) else ch.toString() })
+        }
+    }
+
+    private fun resolveExecuteState(info: WaylineExecutingInfo): String? {
+        return runCatching {
+            val method = info.javaClass.methods.firstOrNull { method ->
+                method.name == "getExecuteState" && method.parameterCount == 0
+            }
+            val raw = method?.invoke(info) ?: return null
+            raw.toString().lowercase(Locale.ROOT)
+        }.getOrElse { throwable ->
+            if (!methodsLogged) {
+                methodsLogged = true
+                val methodNames = info.javaClass.methods.joinToString { it.name }
+                Log.w(TAG, "Waypoint executeState unavailable; methods: $methodNames")
+            }
+            null
+        }
+    }
+
+    private fun interruptLabel(error: IDJIError): String {
+        val description = error.description()
+        val code = error.errorCode()?.toString()
+        return when {
+            !description.isNullOrBlank() && !code.isNullOrBlank() -> "$description ($code)"
+            !description.isNullOrBlank() -> description
+            !code.isNullOrBlank() -> "Interrupt $code"
+            else -> "Interrupt"
+        }
+    }
+
     companion object {
         private const val TAG = "WaypointMissionBridge"
         private const val MAX_TIMELINE_ENTRIES = 50
+        private var methodsLogged = false
     }
 }

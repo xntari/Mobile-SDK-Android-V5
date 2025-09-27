@@ -124,6 +124,7 @@ export type WaypointTimelineEntry =
       type: 'state';
       timestamp?: number;
       state?: string;
+      label?: string;
     }
   | {
       type: 'executing';
@@ -132,11 +133,14 @@ export type WaypointTimelineEntry =
       wayline_id?: number;
       current_waypoint_index?: number;
       raw?: string;
+      label?: string;
+      execute_state?: string;
     }
   | {
       type: 'interrupt';
       timestamp?: number;
       error?: WaypointInterruptStatus;
+      label?: string;
     };
 
 export interface WaypointStatusTelemetry {
@@ -196,9 +200,11 @@ export interface FlightCommandAck extends BridgeMessage {
   backend?: string;
   mission_id?: string;
   mission_path?: string;
+  file_path?: string;
   wayline_ids?: number[];
   auto_flight_speed?: number;
   fallback_reason?: string;
+  debug?: Record<string, any> | null;
 }
 
 export interface PreflightStatus extends BridgeMessage {

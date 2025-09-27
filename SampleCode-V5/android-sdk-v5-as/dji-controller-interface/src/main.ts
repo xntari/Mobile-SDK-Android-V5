@@ -1,5 +1,6 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import * as path from 'path';
+import * as fs from 'fs';
 import WebSocket from 'ws';
 
 interface BridgeMessage {
@@ -230,6 +231,37 @@ class DJIControllerApp {
     // Get connection status
     ipcMain.handle('get-connection-status', () => {
       return this.connectionStatus;
+    });
+
+    ipcMain.handle('pick-kmz-file', async () => {
+      try {
+        if (!this.mainWindow) {
+          return { error: 'Window not ready' };
+        }
+        const result = await dialog.showOpenDialog(this.mainWindow, {
+          title: 'Select KMZ Mission File',
+          properties: ['openFile'],
+          filters: [
+            { name: 'KMZ Missions', extensions: ['kmz'] },
+            { name: 'All Files', extensions: ['*'] },
+          ],
+        });
+
+        if (result.canceled || result.filePaths.length === 0) {
+          return null;
+        }
+
+        const filePath = result.filePaths[0];
+        const data = await fs.promises.readFile(filePath);
+        return {
+          path: filePath,
+          name: path.basename(filePath),
+          base64: data.toString('base64'),
+        };
+      } catch (error: any) {
+        console.error('Failed to pick KMZ file:', error);
+        return { error: error?.message ?? 'Unknown error' };
+      }
     });
   }
 

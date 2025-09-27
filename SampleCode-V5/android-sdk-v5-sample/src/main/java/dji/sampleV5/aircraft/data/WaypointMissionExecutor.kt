@@ -1,18 +1,25 @@
 package dji.sampleV5.aircraft.data
 
 import android.content.Context
+import android.location.Location
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import dji.sdk.keyvalue.key.FlightControllerKey
 import dji.sdk.keyvalue.key.KeyTools
+import dji.sdk.keyvalue.key.ProductKey
 import dji.sdk.keyvalue.key.RtkMobileStationKey
 import dji.sdk.keyvalue.value.common.LocationCoordinate2D
 import dji.sdk.keyvalue.value.common.LocationCoordinate3D
 import dji.sdk.keyvalue.value.flightcontroller.FlyToMode
+import dji.sdk.keyvalue.value.product.ProductType
 import dji.sdk.keyvalue.value.rtkmobilestation.RTKTakeoffAltitudeInfo
 import dji.v5.common.callback.CommonCallbacks
 import dji.v5.common.error.IDJIError
 import dji.v5.common.utils.GpsUtils
 import dji.v5.manager.KeyManager
+import dji.v5.manager.aircraft.waypoint3.WaylineExecutingInfoListener
+import dji.v5.manager.aircraft.waypoint3.WaypointMissionExecuteStateListener
 import dji.v5.manager.aircraft.waypoint3.WaypointMissionManager
 import com.dji.wpmzsdk.manager.WPMZManager
 import dji.sdk.wpmz.value.mission.Wayline
@@ -33,9 +40,16 @@ import dji.sdk.wpmz.value.mission.WaylineWaypointTurnParam
 import dji.sdk.wpmz.value.mission.WaylineWaypointYawMode
 import dji.sdk.wpmz.value.mission.WaylineWaypointYawParam
 import dji.sdk.wpmz.value.mission.WaylineWaypointYawPathMode
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.nio.charset.StandardCharsets
+import java.util.Locale
+import java.util.concurrent.TimeUnit
+import java.util.zip.ZipInputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import dji.v5.manager.aircraft.waypoint3.model.WaylineExecutingInfo
+import kotlin.math.abs
 import kotlin.math.max
 
 /**
@@ -46,6 +60,11 @@ class WaypointMissionExecutor(
     private val contextProvider: () -> Context?,
     private val runOnUiThread: (action: () -> Unit) -> Unit
 ) {
+
+    private data class WaylineMetadata(
+        val waylineIds: List<Int> = emptyList(),
+        val autoFlightSpeed: Double? = null
+    )
 
     data class Request(
         val targetLocation: LocationCoordinate3D,
@@ -66,11 +85,131 @@ class WaypointMissionExecutor(
         ) : Result()
     }
 
+    private fun computeHorizontalDistance(start: LocationCoordinate3D?, end: LocationCoordinate3D): Double? {
+        val from = start ?: return null
+        val results = FloatArray(1)
+        Location.distanceBetween(from.latitude, from.longitude, end.latitude, end.longitude, results)
+        return results.firstOrNull()?.toDouble()
+    }
+
+    private fun estimateMissionDuration(
+        horizontalDistance: Double?,
+        horizontalSpeed: Double,
+        verticalDistance: Double,
+        verticalSpeed: Double
+    ): Double? {
+        val horizontalTime = horizontalDistance?.div(max(horizontalSpeed, MIN_SPEED)) ?: 0.0
+        val verticalTime = if (verticalDistance > 0) verticalDistance / max(verticalSpeed, MIN_VERTICAL_SPEED) else 0.0
+        val total = horizontalTime + verticalTime
+        return if (total > 0) total else null
+    }
+
+    private fun setWaylineMetric(wayline: Wayline, value: Double, vararg methodCandidates: String) {
+        methodCandidates.forEach { name ->
+            runCatching {
+                val method = wayline.javaClass.methods.firstOrNull { it.name == name && it.parameterTypes.size == 1 }
+                if (method != null) {
+                    method.invoke(wayline, value)
+                    return
+                }
+            }
+        }
+    }
+
+    private fun resolveDroneInfo(productType: ProductType?): DroneInfoResult? {
+        if (productType == null) return null
+
+        logAvailableDroneTypes(productType)
+
+        val normalized = productType.name.replace("DJI_", "")
+        val matchingEnum = WaylineDroneType.values().firstOrNull { type ->
+            type.name.equals(normalized, true) ||
+                type.name.replace("_", "").equals(normalized.replace("_", ""), true)
+        }
+
+        val enumValue = matchingEnum?.let { getDroneEnumValue(it) }
+        val info = WaylineDroneInfo()
+
+        return when {
+            matchingEnum != null && enumValue != null -> {
+                info.setDroneType(matchingEnum)
+                info.setDroneSubType(0)
+                DroneInfoResult(info, enumValue)
+            }
+            DRONE_TYPE_OVERRIDES.containsKey(productType.name) -> {
+                val override = DRONE_TYPE_OVERRIDES[productType.name] ?: return null
+                val overrideEnum = findDroneEnumByValue(override)
+                if (overrideEnum != null) {
+                    info.setDroneType(overrideEnum)
+                    info.setDroneSubType(0)
+                } else {
+                    setDroneEnumValueReflect(info, override)
+                    info.setDroneSubType(0)
+                }
+                DroneInfoResult(info, override)
+            }
+            else -> {
+                Log.w(TAG, "No waypoint drone enum mapping for product $productType; falling back to UNKNOWN")
+                null
+            }
+        }
+    }
+
+    private fun getDroneEnumValue(type: WaylineDroneType): Int? {
+        return runCatching {
+            val method = WaylineDroneType::class.java.methods.firstOrNull { it.name == "value" && it.parameterTypes.isEmpty() }
+            (method?.invoke(type) as? Number)?.toInt()
+        }.getOrNull()
+    }
+
+    private fun findDroneEnumByValue(value: Int): WaylineDroneType? {
+        val method = WaylineDroneType::class.java.methods.firstOrNull { it.name == "value" && it.parameterTypes.isEmpty() }
+        return WaylineDroneType.values().firstOrNull { enum ->
+            runCatching { (method?.invoke(enum) as? Number)?.toInt() }.getOrNull() == value
+        }
+    }
+
+    private fun setDroneEnumValueReflect(info: WaylineDroneInfo, value: Int) {
+        runCatching {
+            val method = info.javaClass.methods.firstOrNull {
+                it.parameterTypes.size == 1 &&
+                    it.parameterTypes.first().let { type -> type == Int::class.javaPrimitiveType || type == java.lang.Integer::class.java }
+                        && (it.name == "setDroneEnumValue" || it.name == "setDroneTypeValue")
+            }
+            if (method != null) {
+                method.invoke(info, value)
+            } else {
+                Log.w(TAG, "Unable to reflectively set drone enum value; using UNKNOWN")
+            }
+        }.onFailure {
+            Log.w(TAG, "Failed setting drone enum via reflection", it)
+        }
+    }
+
+    private fun logAvailableDroneTypes(productType: ProductType?) {
+        if (!droneTypeLogged.compareAndSet(false, true)) return
+
+        val valueMethod = WaylineDroneType::class.java.methods.firstOrNull { it.name == "value" && it.parameterTypes.isEmpty() }
+        val summary = WaylineDroneType.values().joinToString { enum ->
+            val value = runCatching { (valueMethod?.invoke(enum) as? Number)?.toInt() }.getOrNull()
+            "${enum.name}:${value ?: "?"}"
+        }
+        Log.i(TAG, "Waypoint drone enums: $summary (product=$productType)")
+
+        val infoMethods = WaylineDroneInfo().javaClass.methods.joinToString { it.name }
+        Log.i(TAG, "WaypointDroneInfo methods: $infoMethods")
+    }
+
+    private data class DroneInfoResult(val info: WaylineDroneInfo, val enumValue: Int)
+
     private val TAG = "WaypointMissionExecutor"
     private val initialized = AtomicBoolean(false)
     private val missionManager by lazy { WaypointMissionManager.getInstance() }
     private val activeMissionId = AtomicReference<String?>(null)
     private val activeMissionPath = AtomicReference<String?>(null)
+    private val uploadInProgress = AtomicBoolean(false)
+    private val startWatcherRef = AtomicReference<MissionStartWatcher?>(null)
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
     fun execute(request: Request, callback: (Result) -> Unit) {
         val context = contextProvider.invoke()
@@ -96,6 +235,9 @@ class WaypointMissionExecutor(
         val homeLocation = runCatching {
             keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyHomeLocation)) as? LocationCoordinate2D
         }.getOrNull()
+        val productType = runCatching {
+            keyManager.getValue(KeyTools.createKey(ProductKey.KeyProductType)) as? ProductType
+        }.getOrNull()
         val altitudeAgl = runCatching {
             (keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyAltitude)) as? Number)?.toDouble()
         }.getOrNull()
@@ -119,11 +261,34 @@ class WaypointMissionExecutor(
         val currentLocation = aircraftLocation3D ?: aircraftLocation2D?.let { LocationCoordinate3D(it.latitude, it.longitude, altitudeAgl ?: ultrasonicHeight ?: 0.0) }
         val currentHeight = altitudeAgl ?: ultrasonicHeight ?: 0.0
 
+        val droneInfoResult = resolveDroneInfo(productType)
+
+        val takeoffDebug = mutableMapOf<String, Any?>(
+            "computed_takeoff_asl" to takeoffAsl,
+            "takeoff_altitude_raw" to takeoffAltitudeRaw,
+            "rtk_takeoff_altitude" to rtkTakeoffInfo?.altitude?.toDouble(),
+            "relative_altitude" to currentHeight,
+            "home_latitude" to (homeLocation?.latitude ?: aircraftLocation2D?.latitude),
+            "home_longitude" to (homeLocation?.longitude ?: aircraftLocation2D?.longitude),
+            "product_type" to productType?.name
+        )
+        droneInfoResult?.enumValue?.let { takeoffDebug["drone_enum_value"] = it }
+
         val targetRelativeHeight = computeTargetHeight(
             request = request,
             takeoffAsl = takeoffAsl,
             currentHeight = currentHeight
         )
+
+        val horizontalDistance = computeHorizontalDistance(currentLocation, request.targetLocation)
+        val estimatedDuration = estimateMissionDuration(
+            horizontalDistance = horizontalDistance,
+            horizontalSpeed = request.maxSpeed ?: DEFAULT_SPEED,
+            verticalDistance = abs(targetRelativeHeight - currentHeight),
+            verticalSpeed = request.securityTakeoffHeight ?: DEFAULT_VERTICAL_SPEED
+        )
+        takeoffDebug["horizontal_distance"] = horizontalDistance
+        takeoffDebug["estimated_duration"] = estimatedDuration
 
         val missionFile = createMissionFile(context)
         val missionId = missionFile.nameWithoutExtension
@@ -136,7 +301,10 @@ class WaypointMissionExecutor(
                 targetRelativeHeight = targetRelativeHeight,
                 currentRelativeHeight = currentHeight,
                 speed = request.maxSpeed ?: DEFAULT_SPEED,
-                securityTakeoffHeight = request.securityTakeoffHeight
+                securityTakeoffHeight = request.securityTakeoffHeight,
+                horizontalDistance = horizontalDistance,
+                estimatedDuration = estimatedDuration,
+                droneInfoResult = droneInfoResult
             )
         }
 
@@ -163,8 +331,55 @@ class WaypointMissionExecutor(
             waylineIds = listOf(0),
             speed = request.maxSpeed ?: DEFAULT_SPEED,
             reason = request.reason,
+            extra = takeoffDebug,
             callback = callback
         )
+    }
+
+    fun executeExternalKmz(fileName: String, kmzData: ByteArray, callback: (Result) -> Unit) {
+        val context = contextProvider.invoke()
+        if (context == null) {
+            callback(Result.Failure("Waypoint fallback unavailable (no context)", extra = mapOf("backend" to BACKEND_ID)))
+            return
+        }
+
+        ensureInitialized(context)
+
+        runCatching {
+            val outDir = File(context.cacheDir, "external_waypoints")
+            if (!outDir.exists()) outDir.mkdirs()
+            val sanitized = sanitizeFileName(fileName)
+            val kmzFile = File(outDir, sanitized)
+            kmzFile.writeBytes(kmzData)
+
+            val metadata = parseWaylineMetadata(kmzFile)
+            val waylineIds = metadata.waylineIds.ifEmpty { listOf(0) }
+            val speed = metadata.autoFlightSpeed ?: DEFAULT_SPEED
+            val missionId = kmzFile.nameWithoutExtension.ifBlank { "external_${System.currentTimeMillis()}" }
+            val extra = mutableMapOf<String, Any?>(
+                "source" to "external_kmz",
+                "file_path" to kmzFile.absolutePath,
+                "wayline_ids" to waylineIds,
+                "auto_flight_speed" to metadata.autoFlightSpeed
+            )
+
+            uploadAndStartMission(
+                missionFile = kmzFile,
+                missionId = missionId,
+                waylineIds = waylineIds,
+                speed = speed,
+                reason = "external_kmz",
+                extra = extra,
+                callback = callback
+            )
+        }.onFailure { throwable ->
+            callback(
+                Result.Failure(
+                    message = "Failed to execute KMZ: ${throwable.message}",
+                    extra = mapOf("backend" to BACKEND_ID, "source" to "external_kmz")
+                )
+            )
+        }
     }
 
     private fun ensureInitialized(context: Context) {
@@ -188,8 +403,17 @@ class WaypointMissionExecutor(
         val lat = homeLocation?.latitude ?: aircraftLocation?.latitude
         val lon = homeLocation?.longitude ?: aircraftLocation?.longitude
 
-        val homePointAltitude = rtkTakeoffInfo?.altitude?.toDouble() ?: takeoffAltitudeRaw
+        val homePointAltitude = takeoffAltitudeRaw
         val ellipsoidTotal = homePointAltitude?.let { it + relativeAltitude }
+
+        val rtkAltitude = rtkTakeoffInfo?.altitude?.toDouble()
+        if (rtkAltitude != null && !rtkAltitude.isNaN()) {
+            if (lat != null && lon != null && !lat.isNaN() && !lon.isNaN()) {
+                return runCatching { GpsUtils.egm96Altitude(rtkAltitude + relativeAltitude, lat, lon) }
+                    .getOrElse { rtkAltitude } - relativeAltitude
+            }
+            return rtkAltitude
+        }
 
         val altitudeAsl = when {
             ellipsoidTotal != null && lat != null && lon != null && !lat.isNaN() && !lon.isNaN() ->
@@ -202,7 +426,62 @@ class WaypointMissionExecutor(
             return altitudeAsl - relativeAltitude
         }
 
-        return homePointAltitude ?: takeoffAltitudeRaw
+        return homePointAltitude
+    }
+
+    private fun sanitizeFileName(input: String): String {
+        val trimmed = input.substringAfterLast('/').substringAfterLast('\\')
+        val candidate = if (trimmed.endsWith(".kmz", ignoreCase = true)) trimmed else "$trimmed.kmz"
+        val replaced = candidate.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        return if (replaced.isBlank()) {
+            "external_${System.currentTimeMillis()}.kmz"
+        } else {
+            replaced
+        }
+    }
+
+    private fun parseWaylineMetadata(kmzFile: File): WaylineMetadata {
+        return kotlin.runCatching {
+            ZipInputStream(kmzFile.inputStream()).use { zip ->
+                var entry = zip.nextEntry
+                while (entry != null) {
+                    if (!entry.isDirectory && entry.name.endsWith("waylines.wpml", ignoreCase = true)) {
+                        val content = ByteArrayOutputStream().use { buffer ->
+                            val data = ByteArray(4096)
+                            var read: Int
+                            while (zip.read(data).also { read = it } != -1) {
+                                buffer.write(data, 0, read)
+                            }
+                            buffer.toString(StandardCharsets.UTF_8.name())
+                        }
+
+                        val waylineIds = Regex("<wpml:waylineId>(\\d+)</wpml:waylineId>")
+                            .findAll(content)
+                            .mapNotNull { match -> match.groupValues.getOrNull(1)?.toIntOrNull() }
+                            .distinct()
+                            .toList()
+
+                        val speed = Regex("<wpml:autoFlightSpeed>([0-9.]+)</wpml:autoFlightSpeed>")
+                            .find(content)
+                            ?.groupValues
+                            ?.getOrNull(1)
+                            ?.toDoubleOrNull()
+
+                        zip.closeEntry()
+
+                        return@use WaylineMetadata(
+                            waylineIds = if (waylineIds.isNotEmpty()) waylineIds else listOf(0),
+                            autoFlightSpeed = speed
+                        )
+                    }
+                    entry = zip.nextEntry
+                }
+            }
+            WaylineMetadata()
+        }.getOrElse {
+            Log.w(TAG, "Failed to parse KMZ metadata: ${it.message}")
+            WaylineMetadata()
+        }
     }
 
     private fun computeTargetHeight(
@@ -240,7 +519,10 @@ class WaypointMissionExecutor(
         targetRelativeHeight: Double,
         currentRelativeHeight: Double,
         speed: Double,
-        securityTakeoffHeight: Double?
+        securityTakeoffHeight: Double?,
+        horizontalDistance: Double?,
+        estimatedDuration: Double?,
+        droneInfoResult: DroneInfoResult?
     ) {
         val waypoints = mutableListOf<WaylineExecuteWaypoint>()
 
@@ -294,12 +576,16 @@ class WaypointMissionExecutor(
                 setSecurityTakeOffHeight(it)
                 setIsSecurityTakeOffHeightSet(true)
             }
-            setDroneInfo(WaylineDroneInfo().apply {
+            val droneInfo = droneInfoResult?.info ?: WaylineDroneInfo().apply {
                 setDroneType(WaylineDroneType.UNKNOWN)
                 setDroneSubType(0)
-            })
+            }
+            setDroneInfo(droneInfo)
             setPayloadInfo(emptyList())
         }
+
+        horizontalDistance?.let { setWaylineMetric(wayline, it, "setWaylineDistance", "setDistance") }
+        estimatedDuration?.let { setWaylineMetric(wayline, it, "setWaylineDuration", "setDuration") }
 
         runCatching {
             missionFile.parentFile?.let { parent ->
@@ -357,8 +643,26 @@ class WaypointMissionExecutor(
         waylineIds: List<Int>,
         speed: Double,
         reason: String,
+        extra: Map<String, Any?>?,
         callback: (Result) -> Unit
     ) {
+        if (!uploadInProgress.compareAndSet(false, true)) {
+            Log.w(TAG, "Rejecting mission request while upload is in progress")
+            callback(
+                Result.Failure(
+                    message = "Waypoint mission busy",
+                    extra = mapOf(
+                        "backend" to BACKEND_ID,
+                        "mission_id" to missionId,
+                        "mission_path" to missionFile.absolutePath,
+                        "wayline_ids" to waylineIds,
+                        "debug" to extra
+                    )
+                )
+            )
+            return
+        }
+
         val missionManager = WaypointMissionManager.getInstance()
 
         runOnUiThread {
@@ -371,7 +675,7 @@ class WaypointMissionExecutor(
 
                     override fun onSuccess() {
                         Log.i(TAG, "Waypoint KMZ upload success: ${missionFile.name}")
-                        startMission(missionManager, missionId, waylineIds, missionFile, speed, reason, callback)
+                        startMission(missionManager, missionId, waylineIds, missionFile, speed, reason, extra, callback)
                     }
 
                     override fun onFailure(error: IDJIError) {
@@ -385,7 +689,8 @@ class WaypointMissionExecutor(
                                     "backend" to BACKEND_ID,
                                     "mission_id" to missionId,
                                     "mission_path" to missionFile.absolutePath,
-                                    "wayline_ids" to waylineIds
+                                    "wayline_ids" to waylineIds,
+                                    "debug" to extra
                                 )
                             )
                         )
@@ -402,6 +707,7 @@ class WaypointMissionExecutor(
         missionFile: File,
         speed: Double,
         reason: String,
+        extra: Map<String, Any?>?,
         callback: (Result) -> Unit
     ) {
         missionManager.startMission(
@@ -409,21 +715,18 @@ class WaypointMissionExecutor(
             waylineIds,
             object : CommonCallbacks.CompletionCallback {
                 override fun onSuccess() {
-                    Log.i(TAG, "Waypoint mission started: $missionId -> $waylineIds")
-                    activeMissionId.set(missionId)
-                    activeMissionPath.set(missionFile.absolutePath)
-                    callback(
-                        Result.Success(
-                            mapOf(
-                                "backend" to BACKEND_ID,
-                                "mission_id" to missionId,
-                                "mission_path" to missionFile.absolutePath,
-                                "wayline_ids" to waylineIds,
-                                "auto_flight_speed" to speed,
-                                "fallback_reason" to reason
-                            )
-                        )
+                    Log.i(TAG, "Waypoint mission start acknowledged: $missionId -> $waylineIds")
+                    val watcher = MissionStartWatcher(
+                        missionId = missionId,
+                        missionFile = missionFile,
+                        waylineIds = waylineIds,
+                        speed = speed,
+                        reason = reason,
+                        extra = extra,
+                        callback = callback
                     )
+                    startWatcherRef.getAndSet(watcher)?.cancel()
+                    watcher.begin()
                 }
 
                 override fun onFailure(error: IDJIError) {
@@ -437,7 +740,10 @@ class WaypointMissionExecutor(
                                 "backend" to BACKEND_ID,
                                 "mission_id" to missionId,
                                 "mission_path" to missionFile.absolutePath,
-                                "wayline_ids" to waylineIds
+                                "wayline_ids" to waylineIds,
+                                "dji_error_code" to error.errorCode()?.toString(),
+                                "dji_error_description" to error.description(),
+                                "debug" to extra
                             )
                         )
                     )
@@ -476,6 +782,8 @@ class WaypointMissionExecutor(
     fun clearActiveMission() {
         activeMissionId.set(null)
         activeMissionPath.set(null)
+        uploadInProgress.set(false)
+        startWatcherRef.getAndSet(null)?.cancel()
     }
 
     fun backendId(): String = BACKEND_ID
@@ -483,7 +791,283 @@ class WaypointMissionExecutor(
     companion object {
         private const val BACKEND_ID = "waypoint_v2"
         private const val DEFAULT_SPEED = 3.0
+        private const val DEFAULT_VERTICAL_SPEED = 1.5
         private const val MIN_SPEED = 0.5
+        private const val MIN_VERTICAL_SPEED = 0.5
         private const val MIN_HEIGHT = 0.0
+        private val DRONE_TYPE_OVERRIDES = mapOf(
+            "MATRICE_350_RTK" to 89,
+            "M350_RTK" to 89
+        )
+        private val droneTypeLogged = AtomicBoolean(false)
+        private val TERMINAL_STATES = setOf(
+            "ready",
+            "finished",
+            "idle",
+            "not_supported"
+        )
+        private val IGNORED_STATES = setOf(
+            "uploading",
+            "ready",
+            "idle",
+            "not_supported"
+        )
+        private val START_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(6)
+        private const val START_SUCCESS_DELAY_MS = 1500L
+
+        private fun resolveExecuteState(info: WaylineExecutingInfo): String? = callStringMethod(info, "executeState")
+        private fun resolveExitReason(info: WaylineExecutingInfo): String? = callStringMethod(info, "exitReason")
+        private fun resolveWaypointIndex(info: WaylineExecutingInfo): Int? = callIntMethod(info, "waypoint")
+
+        private fun callStringMethod(info: WaylineExecutingInfo, keyword: String): String? {
+            return runCatching {
+                info.javaClass.methods.firstOrNull { method ->
+                    method.parameterCount == 0 && method.name.contains(keyword, ignoreCase = true)
+                }?.let { method ->
+                    method.isAccessible = true
+                    method.invoke(info)?.toString()
+                }
+            }.getOrNull()
+        }
+
+        private fun callIntMethod(info: WaylineExecutingInfo, keyword: String): Int? {
+            return runCatching {
+                info.javaClass.methods.firstOrNull { method ->
+                    method.parameterCount == 0 && method.name.contains(keyword, ignoreCase = true)
+                }?.let { method ->
+                    method.isAccessible = true
+                    val value = method.invoke(info)
+                    when (value) {
+                        is Number -> value.toInt()
+                        is String -> value.toIntOrNull()
+                        else -> null
+                    }
+                }
+            }.getOrNull()
+        }
+
+        private fun isFailureExitReason(reason: String?): Boolean {
+            if (reason.isNullOrBlank()) return false
+            val normalized = reason.lowercase(Locale.ROOT)
+            if (normalized.contains("normal") || normalized.contains("success") || normalized.contains("complete")) {
+                return false
+            }
+            return true
+        }
+    }
+
+    private inner class MissionStartWatcher(
+        private val missionId: String,
+        private val missionFile: File,
+        private val waylineIds: List<Int>,
+        private val speed: Double,
+        private val reason: String,
+        private val extra: Map<String, Any?>?,
+        private val callback: (Result) -> Unit
+    ) {
+        private val resolved = AtomicBoolean(false)
+        private var progress = false
+        private var initialStateConsumed = false
+        private var successPosted = false
+        private var lastExecuteState: String? = null
+        private var lastExitReason: String? = null
+        private var lastWaypointIndex: Int? = null
+
+        private val stateListener = WaypointMissionExecuteStateListener { state ->
+            val stateName = state.name.lowercase(Locale.ROOT)
+            if (resolved.get()) return@WaypointMissionExecuteStateListener
+            Log.d(
+                TAG,
+                "MissionStartWatcher state=$stateName progress=$progress mission=$missionId exit=$lastExitReason exec=$lastExecuteState"
+            )
+
+            if (!initialStateConsumed) {
+                initialStateConsumed = true
+                if (stateName == "ready" || stateName == "uploading") {
+                    return@WaypointMissionExecuteStateListener
+                }
+            }
+
+            if (!IGNORED_STATES.contains(stateName) && !TERMINAL_STATES.contains(stateName)) {
+                markProgress()
+            } else if (TERMINAL_STATES.contains(stateName)) {
+                handleTerminalState(stateName)
+            }
+        }
+
+        private val executingInfoListener = object : WaylineExecutingInfoListener {
+            override fun onWaylineExecutingInfoUpdate(info: WaylineExecutingInfo) {
+                if (resolved.get()) return
+                val execState = resolveExecuteState(info)
+                val exitReason = resolveExitReason(info)
+                val waypointIndex = resolveWaypointIndex(info)
+                if (!execState.isNullOrBlank()) {
+                    lastExecuteState = execState
+                }
+                if (!exitReason.isNullOrBlank()) {
+                    lastExitReason = exitReason
+                }
+                if (waypointIndex != null) {
+                    lastWaypointIndex = waypointIndex
+                }
+                Log.d(
+                    TAG,
+                    "MissionStartWatcher executing info mission=${info.missionFileName} exec=$execState exit=$exitReason index=$waypointIndex"
+                )
+                val normalizedState = execState?.lowercase(Locale.ROOT)
+                if (!normalizedState.isNullOrBlank() && normalizedState != "unknown") {
+                    markProgress()
+                }
+            }
+
+            override fun onWaylineExecutingInterruptReasonUpdate(error: IDJIError?) {
+                if (resolved.get()) return
+                if (error != null) {
+                    Log.w(TAG, "MissionStartWatcher interrupt mission=$missionId code=${error.errorCode()} reason=${error.description()}")
+                    fail(
+                        message = "Waypoint mission interrupted: ${error.description()}",
+                        error = error,
+                        extraInfo = mapOf(
+                        "interrupt_code" to error.errorCode()?.toString(),
+                        "interrupt_description" to error.description()
+                    )
+                )
+            }
+        }
+        }
+
+        private val timeoutRunnable = Runnable {
+            if (resolved.get()) return@Runnable
+            fail(
+                message = "Mission start timeout",
+                error = null,
+                extraInfo = mapOf("timeout_ms" to START_TIMEOUT_MS)
+            )
+        }
+
+        private val successRunnable = Runnable {
+            if (!resolved.get()) {
+                succeed()
+            }
+        }
+
+        private fun markProgress() {
+            if (!progress) {
+                progress = true
+            }
+            scheduleSuccess()
+        }
+
+        private fun scheduleSuccess() {
+            if (successPosted) return
+            successPosted = true
+            mainHandler.postDelayed(successRunnable, START_SUCCESS_DELAY_MS)
+        }
+
+        private fun cancelSuccess() {
+            if (!successPosted) return
+            successPosted = false
+            mainHandler.removeCallbacks(successRunnable)
+        }
+
+        private fun handleTerminalState(stateName: String) {
+            if (resolved.get()) return
+            val exitReason = lastExitReason
+            if (!progress) {
+                fail(
+                    message = "Mission aborted before execution (state=$stateName)",
+                    error = null,
+                    extraInfo = mapOf(
+                        "mission_state" to stateName,
+                        "exit_reason" to exitReason,
+                        "execute_state" to lastExecuteState
+                    )
+                )
+                return
+            }
+
+            if (isFailureExitReason(exitReason)) {
+                fail(
+                    message = exitReason ?: "Mission aborted (state=$stateName)",
+                    error = null,
+                    extraInfo = mapOf(
+                        "mission_state" to stateName,
+                        "exit_reason" to exitReason,
+                        "execute_state" to lastExecuteState,
+                        "last_waypoint_index" to lastWaypointIndex
+                    )
+                )
+            }
+        }
+
+        fun begin() {
+            runOnUiThread {
+                missionManager.addWaypointMissionExecuteStateListener(stateListener)
+                missionManager.addWaylineExecutingInfoListener(executingInfoListener)
+            }
+            mainHandler.postDelayed(timeoutRunnable, START_TIMEOUT_MS)
+        }
+
+        fun cancel() {
+            mainHandler.removeCallbacks(timeoutRunnable)
+            cancelSuccess()
+            runOnUiThread {
+                missionManager.removeWaypointMissionExecuteStateListener(stateListener)
+                missionManager.removeWaylineExecutingInfoListener(executingInfoListener)
+            }
+        }
+
+        private fun succeed() {
+            if (!resolved.compareAndSet(false, true)) return
+            cancel()
+            startWatcherRef.compareAndSet(this, null)
+            activeMissionId.set(missionId)
+            activeMissionPath.set(missionFile.absolutePath)
+            uploadInProgress.set(false)
+            callback(
+                Result.Success(
+                    mapOf(
+                        "backend" to BACKEND_ID,
+                        "mission_id" to missionId,
+                        "mission_path" to missionFile.absolutePath,
+                        "wayline_ids" to waylineIds,
+                        "auto_flight_speed" to speed,
+                        "fallback_reason" to reason,
+                        "debug" to extra
+                    )
+                )
+            )
+        }
+
+        private fun fail(message: String, error: IDJIError?, extraInfo: Map<String, Any?> = emptyMap()) {
+            if (!resolved.compareAndSet(false, true)) return
+            cancel()
+            startWatcherRef.compareAndSet(this, null)
+            activeMissionId.set(null)
+            activeMissionPath.set(null)
+            uploadInProgress.set(false)
+            val combinedExtra = mutableMapOf<String, Any?>(
+                "backend" to BACKEND_ID,
+                "mission_id" to missionId,
+                "mission_path" to missionFile.absolutePath,
+                "wayline_ids" to waylineIds,
+                "fallback_reason" to reason,
+                "debug" to extra
+            )
+            extraInfo.forEach { (key, value) -> combinedExtra[key] = value }
+            callback(
+                Result.Failure(
+                    message = message,
+                    error = error,
+                    extra = combinedExtra.also {
+                        it["auto_flight_speed"] = speed
+                        it["mission_start_reason"] = reason
+                        it["exit_reason"] = lastExitReason
+                        it["execute_state"] = lastExecuteState
+                        it["last_waypoint_index"] = lastWaypointIndex
+                    }
+                )
+            )
+        }
     }
 }

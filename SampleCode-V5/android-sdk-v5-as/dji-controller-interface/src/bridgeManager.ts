@@ -195,6 +195,7 @@ class BridgeManager {
                   type: 'state',
                   timestamp: entryTimestamp,
                   state: typeof entry.state === 'string' ? entry.state : undefined,
+                  label: typeof entry.label === 'string' ? entry.label : undefined,
                 };
               }
               if (type === 'executing') {
@@ -207,6 +208,8 @@ class BridgeManager {
                     ? entry.current_waypoint_index
                     : undefined,
                   raw: typeof entry.raw === 'string' ? entry.raw : undefined,
+                  label: typeof entry.label === 'string' ? entry.label : undefined,
+                  execute_state: typeof entry.execute_state === 'string' ? entry.execute_state : undefined,
                 };
               }
               if (type === 'interrupt') {
@@ -221,6 +224,7 @@ class BridgeManager {
                   type: 'interrupt',
                   timestamp: entryTimestamp,
                   error,
+                  label: typeof entry.label === 'string' ? entry.label : undefined,
                 };
               }
               return null;
