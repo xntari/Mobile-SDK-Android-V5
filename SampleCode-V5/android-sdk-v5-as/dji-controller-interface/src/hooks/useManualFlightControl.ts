@@ -118,6 +118,15 @@ const KEY_GROUPS = {
 
 const SUPPORTED_KEYS = new Set<string>(Object.values(KEY_GROUPS).flat());
 
+const MOTOR_STICK_KEY = 'KeyK';
+const MOTOR_STICK_MACRO_DURATION_MS = 1200;
+const MOTOR_STICK_AXES: AxisState = {
+  yaw: 1,
+  throttle: -1,
+  roll: -1,
+  pitch: -1,
+};
+
 interface ManualFlightControlState {
   active: boolean;
   status: ManualFlightControlStatus;
@@ -289,6 +298,7 @@ export const useManualFlightControl = (
   const bridgeLostNotifiedRef = useRef(false);
   const resumeInProgressRef = useRef(false);
   const tickRef = useRef<() => void>(() => {});
+  const macroOverrideRef = useRef<{ axes: AxisState; until: number } | null>(null);
 
   const pointerSupported = useMemo(pointerLockAvailable, []);
 
@@ -522,6 +532,7 @@ export const useManualFlightControl = (
       keysRef.current.clear();
       mouseYawRef.current = 0;
       mousePitchRef.current = 0;
+      macroOverrideRef.current = null;
 
       if (
         pointerSupported &&
@@ -741,30 +752,39 @@ export const useManualFlightControl = (
       roll: clamp(keyAxes.roll, -1, 1),
       pitch: pitchWithMouse,
     };
+    const sendTimestamp = Date.now();
+    const macro = macroOverrideRef.current;
+    let commandAxes = nextAxes;
+    if (macro) {
+      if (sendTimestamp >= macro.until) {
+        macroOverrideRef.current = null;
+      } else {
+        commandAxes = macro.axes;
+      }
+    }
 
     setState((prev) => ({
       ...prev,
-      axes: axesEqual(prev.axes, nextAxes) ? prev.axes : nextAxes,
-      lastCommandMs: Date.now(),
+      axes: axesEqual(prev.axes, commandAxes) ? prev.axes : commandAxes,
+      lastCommandMs: sendTimestamp,
       analytics: {
         ...prev.analytics,
         commandCount: prev.analytics.commandCount + 1,
-        sessionStart: prev.analytics.sessionStart ?? Date.now(),
+        sessionStart: prev.analytics.sessionStart ?? sendTimestamp,
       },
     }));
 
-    const sendTimestamp = Date.now();
     recordSessionEntry({
       kind: "axes",
       timestamp: sendTimestamp,
-      yaw: nextAxes.yaw,
-      throttle: nextAxes.throttle,
-      roll: nextAxes.roll,
-      pitch: nextAxes.pitch,
+      yaw: commandAxes.yaw,
+      throttle: commandAxes.throttle,
+      roll: commandAxes.roll,
+      pitch: commandAxes.pitch,
       status: "sent",
     });
 
-    sendFlightCommand("virtual_stick_override", nextAxes)
+    sendFlightCommand("virtual_stick_override", commandAxes)
       .then((result: any) => {
         const now = Date.now();
         lastCommandRef.current = now;
@@ -961,6 +981,7 @@ export const useManualFlightControl = (
 
   const kill = useCallback(async () => {
     cleanupSession({ exitPointerLock: true });
+    macroOverrideRef.current = null;
     const killNotification = createNotification(
       "kill",
       "Kill switch executed; manual control released",
@@ -1007,6 +1028,26 @@ export const useManualFlightControl = (
     }
   }, [cleanupSession, createNotification, recordSessionEvent, sendFlightCommand]);
 
+  const triggerMotorMacro = useCallback(() => {
+    if (!stateRef.current.active) {
+      return;
+    }
+    macroOverrideRef.current = {
+      axes: { ...MOTOR_STICK_AXES },
+      until: Date.now() + MOTOR_STICK_MACRO_DURATION_MS,
+    };
+    recordSessionEvent('motor_macro_trigger');
+    setState((prev) => ({
+      ...prev,
+      notification:
+        prev.notification ?? {
+          type: 'override',
+          message: 'Motor start macro sent',
+          timestamp: Date.now(),
+        },
+    }));
+  }, [recordSessionEvent]);
+
   const handleKeyDown = useCallback(
     (event: KeyboardEvent) => {
       if (!stateRef.current.active) {
@@ -1019,6 +1060,14 @@ export const useManualFlightControl = (
         return;
       }
 
+      if (event.code === MOTOR_STICK_KEY) {
+        event.preventDefault();
+        if (!event.repeat) {
+          triggerMotorMacro();
+        }
+        return;
+      }
+
       if (!SUPPORTED_KEYS.has(event.code)) {
         return;
       }
@@ -1028,8 +1077,8 @@ export const useManualFlightControl = (
         keysRef.current.add(event.code);
         updateAxesSnapshot();
       }
-    },
-    [kill, updateAxesSnapshot],
+  },
+    [kill, triggerMotorMacro, updateAxesSnapshot],
   );
 
   const handleKeyUp = useCallback(

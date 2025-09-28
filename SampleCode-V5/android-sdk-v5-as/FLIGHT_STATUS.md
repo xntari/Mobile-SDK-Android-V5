@@ -4,32 +4,37 @@
 
 This document captures the current feature set, open work, and test procedures for the bridge + desktop flight-control workflow. Treat it as the pre-flight reference when validating new builds or gathering datapoints in the field.
 Use only standard ascii characters here - don't use ✅  or similar
+> **Transcript logging** - Append the user's instructions and your thought process (with ISO 8601 timestamps) to transcript.txt after every working session so we can reconstruct decision history later.
 ---
 
-## TL;DR (Sep 27 2025 21:15 - workspace, HEAD 0499508629a4c5f17dde80c678e9798288c53fe0)
+## TL;DR (Sep 28 2025 20:58 - workspace, HEAD a9dac908f66c7a5533ebadd768efcb85aac58a97)
 
 - **Document discipline** - Update this file after every bridge/desktop change. Status, safety checklists, operator notes, and backlog items must always reflect the running code. Never mark a feature complete without field verification.
-- **Manual mission tooling** - Desktop Fly-To panel now supports map clicks, laser range fixes, manual lat/lon entry, mission simulation, and timeline export; validate on hardware before relying on it in the field.
+- **Transcript discipline** - Keep transcript.txt current: append the latest user instructions and your thought process with ISO 8601 timestamps whenever you touch the project.
+- **Mission planner** - The shared mission planner store feeds the main map, Fly-To panel, Orientation, and HSI; map clicks (stage/waypoint/orbit) auto-populate targets, default altitudes come from set-height or the safety floor, and multi-waypoint plans now execute through the waypoint fallback backend with logging.
+- **Manual mission tooling** - Desktop Fly-To panel still supports map clicks, laser fixes, manual lat/lon entry, mission simulation, and timeline export; validate on hardware before relying on it in the field.
 - **External KMZ playback** - Fly-To panel can ingest DJI Pilot-generated KMZ files, forward them to the bridge, and auto-execute the uploaded mission with logged metadata (name, path, size). Use bench tests/simulator first, then capture field evidence before routine use.
-- **Field validation focus** - Collect hardware evidence for the 16 Hz keyboard/mouse stream, `waypoint_v2` fallback (mission id + KMZ logs), external KMZ execution, auto-mode gating, FlySafe toasts, the new mission simulation workflow, and session exports. Capture CSV/JSON logs, telemetry screenshots, and note any NFZ height bubbles blocking movement.
+- **Field validation focus** - Collect hardware evidence for the 16 Hz keyboard/mouse stream, mission-plan execution (including altitude hold versus security floor), `waypoint_v2` fallback (mission id + KMZ logs), external KMZ execution, auto-mode gating, FlySafe toasts, the new mission simulation workflow, and session exports. Capture CSV/JSON logs, telemetry screenshots, and note any NFZ height bubbles blocking movement.
 - **Recent changes (latest first)**
-  1. 2025-09-27 - Flight Commands panel now exposes simulator enable/disable with location presets; bridge telemetry/command acks include simulator state and the Fly-To panel shows the active mode badge.
-  2. 2025-09-27 - Waypoint telemetry now captures pause/resume events, waypoint break-point info, and DJI error detail; Flight Commands and Fly-To panels add Pause/Resume controls that dispatch the bridge commands.
-  3. 2025-09-25 - Desktop Fly-To panel can pick DJI KMZ missions, push them to the bridge, and log selection metadata (name/path/size) alongside copy-to-clipboard controls.
-  4. 2025-09-25 - Waypoint execution state, waypoint index, and interrupt reasons now stream in `waypoint_status.timeline`; Flight Commands + Fly-To panels render the progress list, and fallback takeoff ASL now reuses the RTK home value (no ~6 m offset).
-  5. 2025-09-25 - Fly-To panel supports manual targets (map clicks, laser fixes, keyboard entry), mission simulation preview, waypoint stop control, and JSON timeline export.
-  6. 2025-09-25 - Intelligent Fly-To is now bypassed on platforms that advertise no supported modes; the bridge immediately generates a Waypoint V2 mission and reports its mission id/path.
-  7. 2025-09-25 - Auto-mode telemetry now gates Force Land / RTH Stop buttons; docs updated with gating behaviour.
-  8. 2025-09-24 - Fly-to context + FlySafe data stream to the desktop; Controller Insight limits card shows warning heights.
-  9. 2025-09-23 - Manual control presets, kill/override audio cues, and keyboard session exports landed.
-  10. 2025-09-08 - Simulator research documented (requires real aircraft, motors stay off, full API surface available for bench validation).
+  1. 2025-09-28 - Multi-waypoint mission plans now run end-to-end (planner → bridge → waypoint fallback), security take-off height clamps plan legs, default altitudes follow set-height or the safety floor, Orientation/HSI render home + next-waypoint arrows, and `KeyK` fires the motor start/shutdown stick macro.
+  2. 2025-09-27 - Flight Commands panel now exposes simulator enable/disable with location presets; bridge telemetry/command acks include simulator state and the Fly-To panel shows the active mode badge.
+  3. 2025-09-27 - Waypoint telemetry now captures pause/resume events, waypoint break-point info, and DJI error detail; Flight Commands and Fly-To panels add Pause/Resume controls that dispatch the bridge commands.
+  4. 2025-09-25 - Desktop Fly-To panel can pick DJI KMZ missions, push them to the bridge, and log selection metadata (name/path/size) alongside copy-to-clipboard controls.
+  5. 2025-09-25 - Waypoint execution state, waypoint index, and interrupt reasons now stream in `waypoint_status.timeline`; Flight Commands + Fly-To panels render the progress list, and fallback takeoff ASL now reuses the RTK home value (no ~6 m offset).
+  6. 2025-09-25 - Fly-To panel supports manual targets (map clicks, laser fixes, keyboard entry), mission simulation preview, waypoint stop control, and JSON timeline export.
+  7. 2025-09-25 - Intelligent Fly-To is now bypassed on platforms that advertise no supported modes; the bridge immediately generates a Waypoint V2 mission and reports its mission id/path.
+  8. 2025-09-25 - Auto-mode telemetry now gates Force Land / RTH Stop buttons; docs updated with gating behaviour.
+  9. 2025-09-24 - Fly-to context + FlySafe data stream to the desktop; Controller Insight limits card shows warning heights.
+  10. 2025-09-23 - Manual control presets, kill/override audio cues, and keyboard session exports landed.
+  11. 2025-09-08 - Simulator research documented (requires real aircraft, motors stay off, full API surface available for bench validation).
 
   Next
 
-  1. Field-validate the waypoint execution timeline (capture command log JSON plus telemetry screenshots during an actual mission) and confirm takeoff ASL parity between telemetry and fly-to context.
-  2. Run bench + field tests of the external KMZ loader (log selection metadata, mission ack, timeline entries, and flight behaviour); document any DJI error codes.
-  3. Add KMZ lifecycle tooling (download link + cache rotation) and document a simulator/bench validation flow in the status doc.
+  1. Field-validate the mission planner pipeline (multi-waypoint + orbit mix) on hardware: confirm altitude never dips below the configured security floor and timeline logs show pause/resume/break-point data.
+  2. Exercise the refreshed Map panel interactions (stage target, Shift+Click waypoint, Option+Click orbit) in simulator and hardware; capture telemetry/screenshots showing mission overlays, Orientation arrows, and HSI guidance.
+  3. Run bench + field tests of the external KMZ loader (log selection metadata, mission ack, timeline entries, and flight behaviour); document any DJI error codes.
   4. Capture bench evidence for the new simulator toggle (enable/disable, telemetry snapshot, command ack) and confirm Fly-To behaviours stay in sync while simulated.
+  5. Define orbit/curved-waypoint parameterisation (radius, dwell, camera heading) for planner entries before enabling more advanced POI/orbit execution in production.
 
 ---
 
@@ -43,6 +48,8 @@ Use only standard ascii characters here - don't use ✅  or similar
 - **Manual control tuning UI** – presets for overall stick sensitivity plus per-preset mouse-yaw slider persisted in localStorage.
 - **Continuous override stream** – virtual-stick overrides run ~16 Hz, auto-resume after decoder/WebSocket resets, and every frame is captured in session exports.
 - **Simulator controls (bench)** – Flight Commands panel enable/disable calls bring up DJI simulator with location presets (motors stay off); telemetry + command acks now report simulator state and the Fly-To badge tracks the active mode.
+- **Simulator video gating** – FPV and H20N decoders automatically pause (status overlay + listener cleanup) while simulator mode is enabled to keep desktop performance snappy.
+- **Mission plan drafting (beta)** – Fly-To panel can stage multiple waypoints/orbits, renders them on the live telemetry map, logs each addition, and now dispatches the entire plan via the waypoint backend (watch the new Execute button).
 - **Fly-To waypoint fallback** – When intelligent Fly-To advertises no supported modes, the bridge now generates a Waypoint V2 KMZ (current position → target) and starts it automatically; command acks include mission id/path/wayline ids.
 - **Waypoint telemetry/abort plumbing** – Bridge streams `waypoint_status` (execute state, active mission id/path) and exposes a `waypoint_stop` command so the fallback mission can be cancelled from the desktop.
 - **Mission start validation** – After pushing a KMZ the bridge now waits for PREPARING/ENTER_WAYLINE telemetry before acknowledging success; early READY/FINISHED/interrupt states surface as explicit errors with DJI codes.
@@ -54,9 +61,12 @@ Use only standard ascii characters here - don't use ✅  or similar
 - **Manual mission planning** – Desktop panel accepts map clicks, laser range fixes, and manual lat/lon/alt inputs, provides a mission simulation summary, and records/exportable mission timelines.
 - **Waypoint timeline surfaces** – Mission panels now show the live timeline (state/order, waypoint index, interrupt label) pulled from `waypoint_status.timeline` so operators can confirm progress without diving into logs.
 - **Pause/resume telemetry & controls** – Bridge emits mission pause/resume events with DJI error context and latest break-point info; desktop adds Pause/Resume buttons so operators can clear a pause without adb or Pilot.
+- **Manual keyboard/mouse flight** – lifecycle automation works in dry runs (`virtual_stick_enable → override → disable`). Validate WASD/Space/Shift/QE inputs, pointer-lock yaw/pitch (mouse up = forward, down = backward), and log aircraft response when NFZ limits intervene.
+- **Manual session export (CSV/JSON)** – ensure logs capture session start/stop, override frames, kill switch events, and FlySafe restrictions during real flights.
+- **Waypoint fallback missions** – Confirm `backend=waypoint_v2` runs end-to-end (KMZ upload, mission start, completion/abort) and capture generated KMZ files for post-flight analysis.
+- **FlySafe telemetry & toasts** – desktop surfaces DJI FlySafe notifications and surrounding zone data. Capture warning bubble screenshots whenever `IN_NFZ_MAX_HEIGHT` blocks movement.
 
 ### 1.2 Needs field validation / monitoring
-- **Manual keyboard/mouse flight** – lifecycle automation works in dry runs (`virtual_stick_enable → override → disable`). Validate WASD/Space/Shift/QE inputs, pointer-lock yaw/pitch (mouse up = forward, down = backward), and log aircraft response when NFZ limits intervene.
 - **Kill switch & release flow** – ESC should zero sticks, disable virtual stick, and emit toast/audio. Confirm behaviour in-aircraft (include CSV/JSON excerpts + screenshots).
 - **RC override detection** – bridge streams `authority_owner`/`change_reason`; desktop raises toast/logs when control transfers. Gather evidence during dual-controller swaps.
 - **Flight-command error context** – acknowledgements include FC error type/code, FlySafe warning height, and `fly_to_context` (altitude, limit margins, violation flags). Record these when commands fail to build a playbook.
@@ -66,11 +76,8 @@ Use only standard ascii characters here - don't use ✅  or similar
 - **Fly-to status telemetry** – mission info/capability listeners feed `fly_to_status`. Confirm live mode/height/capability data matches DJI Pilot readouts.
 - **Emergency command gating** – Force Land, Cancel/Confirm Landing, and RTH Stop buttons only unlock when telemetry reports AUTO LAND / GO HOME. Validate state transitions on aircraft.
 - **Controller Insight panel (beta)** – shows physical RC sticks, software virtual-stick command, last override ack, and flight limits (max height/distance, go-home height). Master/slave telemetry still pending.
-- **FlySafe telemetry & toasts** – desktop surfaces DJI FlySafe notifications and surrounding zone data. Capture warning bubble screenshots whenever `IN_NFZ_MAX_HEIGHT` blocks movement.
 - **Relative fly-to & RTH desktop panel (beta)** – forward/back/left/right/up/down moves plus RTH start/stop exist; verify aircraft executes commands and collect acknowledgement payloads.
-- **Manual session export (CSV/JSON)** – ensure logs capture session start/stop, override frames, kill switch events, and FlySafe restrictions during real flights.
 - **Auto-mode status telemetry (beta)** – track GO HOME / AUTO LAND status updates and confirm UI remains in sync with aircraft behaviour.
-- **Waypoint fallback missions** – Confirm `backend=waypoint_v2` runs end-to-end (KMZ upload, mission start, completion/abort) and capture generated KMZ files for post-flight analysis.
 - **Waypoint mission telemetry** - Validate the new `waypoint_status` stream (state transitions, executing info, timeline entries, last interrupt) and the `waypoint_stop` command against real hardware. Confirm abort resets the mission id and that telemetry clears once the aircraft returns to READY.
 - **Takeoff altitude parity** - During field runs compare `takeoff_altitude` in telemetry with `fly_to_context.takeoff_altitude_asl`; report any divergence (expect values to match within sensor noise).
 - **Desktop mission preview (beta)** – Check that the Fly-To mission log, stop button, and map preview reflect actual flights (or simulator runs). Capture screenshots, ack payloads, and KMZ paths for traceability.
@@ -163,11 +170,13 @@ Keep this checklist updated whenever safety-critical behaviour changes.
 - **Pointer-lock mouse pitch** – when active, horizontal motion feeds yaw and vertical motion feeds pitch (up = forward, down = back) for fine manual trimming.
 - **HUD controls** – theme toggle (classic/high-contrast), overlay mode (panel/inline/none), and opacity slider persist in localStorage.
 - **Analytics** – Flight Commands panel shows command count + last command time; notifications reset counters when a session ends.
+- **Motor macro (KeyK)** – Press `KeyK` while manual control is active to send the dual-stick arm/disarm pattern (~1.2 s hold). The command log records the override event; always confirm props are clear before using it on hardware.
 
 ### 4.2 Simulator Mode (bench)
 - The Flight Commands panel now includes simulator controls. Set latitude/longitude (defaults pull from the latest home point or aircraft position), choose a satellite count (defaults to 12), optionally add an altitude hint, then press **Enable Simulator**. Command acknowledgements capture the `requested` payload and telemetry flips `simulator.mode=simulator`.
 - Quick presets — **Use Home**, **Use Aircraft**, and **Use Config** — make bench setups faster. A powered aircraft connection is still required; props stay off while simulator telemetry reflects the virtual flight.
 - Use **Disable Simulator** to return to live control. The Fly-To panel mirrors the REAL/SIMULATOR badge so mission planning stays aligned with bridge state.
+- FPV and H20N video pipelines automatically stop decoding when the simulator is active; the cards show a “Simulator Mode” overlay until you return to live flight.
 - Capture bench evidence (command ack JSON, telemetry snapshot, `adb logcat`) whenever you exercise the simulator so field crews can trust the workflow.
 
 ### 4.3 Diagnostics & Logging
@@ -182,6 +191,11 @@ Keep this checklist updated whenever safety-critical behaviour changes.
 ### 4.4 Fly-To & RTH Panel
 - A mode badge (REAL/SIMULATOR) now sits above the panel; confirm it reads SIMULATOR before running bench missions and REAL before live flights.
 - Configure **Security Takeoff Height** (m AGL) before sending missions; defaults to 20 m per DJI sample. Combined with `Set height`, this determines the climb profile used by both simulation and execution.
+- Waypoint fallback now clamps both the climb waypoint and target waypoint to that security height unless the pilot explicitly requests a lower altitude (Set Height / absolute target). Expect no more 2 m hover after takeoff; report any regressions with command/telemetry logs.
+- The live map now shares the primary MapDisplay feed: aircraft/home markers update with telemetry, staged targets highlight immediately, and planned waypoints/orbits render as you build a mission.
+- The main **Map** panel is now interactive: Click to stage the mission target, `Shift+Click` to append a waypoint, and `Option/Alt+Click` to add an orbit placeholder (radius/turns honour the Fly-To panel settings). These updates stream straight into the mission timeline and HSI.
+- Use the new **Mission Plan (beta)** card to queue multiple waypoints or orbit placeholders (radius + turns). Entries log to the mission timeline so benches capture context even before waypoint generation ships.
+- The Execute button converts the staged plan into a Waypoint V3 mission; confirm the geometry in simulator/bench first, especially for orbit placeholders (currently treated as straight fly-to points).
 - Takeoff altitude fields (telemetry + fly-to context) now share the SDK-provided MSL value. Use this as the reference for `Target ΔTO` and simulation checks; report any new divergence in field logs.
 - Drone metadata in KMZ now uses the actual aircraft enum (M350=89 today); if the SDK cannot match a type we log the enum list and fall back to UNKNOWN. Ack `debug` includes the resolved enum value.
 - **Targeting** now supports three inputs: manual lat/lon/alt fields, “Place via map” (click the preview map to drop a waypoint), and “Use laser fix” (captures the most recent LRF result). The source badge beside the heading reflects the current input.
@@ -248,9 +262,9 @@ Keep this list groomed; link each item to task tracking where applicable.
 ### 7.1 Navigation primitives (immediate, in progress)
 - Validate existing relative fly-to UI (forward/back/left/right/up/down, optional speed) and RTH start/stop buttons in the field; log any FlySafe/NFZ rejections with `fly_to_context` snapshots.
 - Extend Fly-To logging with raw DJI error codes, target altitude, and FlySafe warning height so pilots can diagnose failures quickly (confirm coverage with `waypoint_v2` extras).
-- Waypoint-based fly-to fallback + bridge telemetry/abort controls implemented; desktop mission log/stop/map preview shipped—next up is on-aircraft validation and multi-waypoint authoring.
+- Waypoint fallback + mission planner execution path is live; next step is on-aircraft validation (security-height hold, pause/resume, break-point recovery) with full timeline/export logs.
 - Modularise the bridge further so intelligent and waypoint backends share a common telemetry/logging layer and the desktop can annotate which path executed.
-- Extend mission authoring toward multi-waypoint workflows (climb-to-altitude legs, hold/orbit primitives, HSI overlays, “record manual flight”).
+- Extend mission authoring toward advanced workflows (orbit radius/dwell tuning, curved segments/POI encoding, “record manual flight” replay).
 - Validate the simulation preview against flight telemetry and expose additional configuration (wind assumptions, speed caps, loiter duration).
 - Determine if DJI simulator can be used to debug mission planning/execution (see docs/SIMULATOR.md) once waypoint telemetry is exposed.
 
@@ -268,9 +282,9 @@ Keep this list groomed; link each item to task tracking where applicable.
 - Extend manual session exports with full telemetry (altitude, speed, attitude) per frame.
 
 ### 7.4 Simulator enablement
-- Add bridge command + desktop controls for `SimulatorManager` (enable/disable with location & satellite presets) so we can bench-test without props spinning.
+- Simulator controls (enable/disable with location & satellite presets) ship in the Flight Commands panel; gather bench evidence that telemetry/video gating behaves and capture ack/error logs.
 - Document a bench-test checklist: connect aircraft via USB, enable simulator, confirm motors remain off, run takeoff/land/manual overrides, and collect telemetry to ensure parity with live flights.
-- Evaluate CI feasibility: script simulator sessions (takeoff → relative fly-to → land) for regression tests once waypoint backend is in place.
+- Evaluate CI feasibility: script simulator sessions (takeoff -> relative fly-to -> land) for regression tests once waypoint backend is in place.
 - Track limitations in docs (needs physical aircraft, limited physics, wind only via presets) and call out scenarios that still require field validation.
 
 ### 7.5 UI polish / Components
@@ -297,5 +311,5 @@ Before heading on-site:
 During the test, annotate each significant event (command, toast, diagnostic) with timestamps so logs can be aligned later.
 
 ---
-
-_Last updated: Sep 25 2025 – waypoint fallback telemetry + abort controls wired; desktop mission UI next._
+Keep conversation history updated in transcript.txt. Read-friendly formatting. Use verbose/full transcript
+_Last updated: Sep 28 2025 - multi-waypoint mission planner executes through waypoint fallback; transcript logging policy captured._

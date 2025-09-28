@@ -67,7 +67,9 @@ class WaypointMissionExecutor(
 
     private data class WaylineMetadata(
         val waylineIds: List<Int> = emptyList(),
-        val autoFlightSpeed: Double? = null
+        val autoFlightSpeed: Double? = null,
+        val securityTakeOffHeight: Double? = null,
+        val waypoints: List<Map<String, Any?>> = emptyList()
     )
 
     data class Request(
@@ -77,7 +79,23 @@ class WaypointMissionExecutor(
         val flyToHeight: Int?,
         val maxSpeed: Double?,
         val securityTakeoffHeight: Double?,
-        val reason: String
+        val reason: String,
+        val plan: List<PlanPoint> = emptyList()
+    )
+
+    data class PlanPoint(
+        val latitude: Double,
+        val longitude: Double,
+        val altitude: Double?,
+        val kind: String? = null
+    )
+
+    private data class PlanPointResolved(
+        val latitude: Double,
+        val longitude: Double,
+        val executeHeight: Double,
+        val kind: String? = null,
+        val altitudeAsl: Double? = null
     )
 
     sealed class Result {
@@ -211,6 +229,8 @@ class WaypointMissionExecutor(
     private val missionManager by lazy { WaypointMissionManager.getInstance() }
     private val activeMissionId = AtomicReference<String?>(null)
     private val activeMissionPath = AtomicReference<String?>(null)
+    private val activeMissionWaypoints = AtomicReference<List<Map<String, Any?>>>(emptyList())
+    private val activeMissionSecurityHeight = AtomicReference<Double?>(null)
     private val uploadInProgress = AtomicBoolean(false)
     private val startWatcherRef = AtomicReference<MissionStartWatcher?>(null)
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
@@ -267,6 +287,10 @@ class WaypointMissionExecutor(
 
         val droneInfoResult = resolveDroneInfo(productType)
 
+        val securityFloor = request.securityTakeoffHeight
+            ?.takeIf { !it.isNaN() && it > 0.0 }
+            ?: DEFAULT_SECURITY_TAKEOFF_HEIGHT
+
         val takeoffDebug = mutableMapOf<String, Any?>(
             "computed_takeoff_asl" to takeoffAsl,
             "takeoff_altitude_raw" to takeoffAltitudeRaw,
@@ -274,21 +298,96 @@ class WaypointMissionExecutor(
             "relative_altitude" to currentHeight,
             "home_latitude" to (homeLocation?.latitude ?: aircraftLocation2D?.latitude),
             "home_longitude" to (homeLocation?.longitude ?: aircraftLocation2D?.longitude),
-            "product_type" to productType?.name
+            "product_type" to productType?.name,
+            "security_takeoff_height" to securityFloor
         )
         droneInfoResult?.enumValue?.let { takeoffDebug["drone_enum_value"] = it }
+
+        val manualHeightOverride = request.mode == FlyToMode.SET_HEIGHT ||
+            request.flyToHeight != null ||
+            request.targetAltitudeAsl != null
+
+        val planResolved = mutableListOf<PlanPointResolved>()
+        if (request.plan.isNotEmpty()) {
+            request.plan.forEachIndexed { index, point ->
+                val lat = point.latitude
+                val lon = point.longitude
+                if (lat.isNaN() || lon.isNaN()) {
+                    Log.w(TAG, "Skipping plan waypoint $index due to invalid coordinates: $lat,$lon")
+                    return@forEachIndexed
+                }
+
+                val altitudeAsl = point.altitude
+                val baseRelative = when {
+                    altitudeAsl != null && takeoffAsl != null -> altitudeAsl - takeoffAsl
+                    altitudeAsl != null -> altitudeAsl
+                    else -> currentHeight
+                }
+
+                val executeHeight = if (altitudeAsl != null) {
+                    max(MIN_HEIGHT, baseRelative)
+                } else {
+                    max(max(MIN_HEIGHT, baseRelative), securityFloor)
+                }
+
+                planResolved.add(
+                    PlanPointResolved(
+                        latitude = lat,
+                        longitude = lon,
+                        executeHeight = executeHeight,
+                        kind = point.kind,
+                        altitudeAsl = altitudeAsl
+                    )
+                )
+            }
+        }
 
         val targetRelativeHeight = computeTargetHeight(
             request = request,
             takeoffAsl = takeoffAsl,
-            currentHeight = currentHeight
+            currentHeight = currentHeight,
+            manualHeightOverride = manualHeightOverride
         )
 
-        val horizontalDistance = computeHorizontalDistance(currentLocation, request.targetLocation)
+        val finalTargetHeight = planResolved.lastOrNull()?.executeHeight ?: targetRelativeHeight
+
+        takeoffDebug["manual_height_override"] = manualHeightOverride
+        takeoffDebug["target_relative_height"] = finalTargetHeight
+        if (planResolved.isNotEmpty()) {
+            takeoffDebug["plan_waypoint_count"] = planResolved.size
+            takeoffDebug["plan_waypoints"] = planResolved.mapIndexed { index, waypoint ->
+                mapOf(
+                    "index" to index,
+                    "latitude" to waypoint.latitude,
+                    "longitude" to waypoint.longitude,
+                    "execute_height" to waypoint.executeHeight,
+                    "kind" to waypoint.kind,
+                    "altitude_asl" to waypoint.altitudeAsl
+                )
+            }
+        }
+
+        val horizontalDistance: Double? = if (planResolved.isNotEmpty()) {
+            var total = 0.0
+            val results = FloatArray(1)
+            var prevLat = currentLocation?.latitude ?: planResolved.first().latitude
+            var prevLon = currentLocation?.longitude ?: planResolved.first().longitude
+            planResolved.forEach { waypoint ->
+                Location.distanceBetween(prevLat, prevLon, waypoint.latitude, waypoint.longitude, results)
+                total += results.firstOrNull()?.toDouble() ?: 0.0
+                prevLat = waypoint.latitude
+                prevLon = waypoint.longitude
+            }
+            total
+        } else {
+            computeHorizontalDistance(currentLocation, request.targetLocation)
+        }
+
+        val verticalDistance = abs((planResolved.lastOrNull()?.executeHeight ?: finalTargetHeight) - currentHeight)
         val estimatedDuration = estimateMissionDuration(
             horizontalDistance = horizontalDistance,
             horizontalSpeed = request.maxSpeed ?: DEFAULT_SPEED,
-            verticalDistance = abs(targetRelativeHeight - currentHeight),
+            verticalDistance = verticalDistance,
             verticalSpeed = request.securityTakeoffHeight ?: DEFAULT_VERTICAL_SPEED
         )
         takeoffDebug["horizontal_distance"] = horizontalDistance
@@ -302,13 +401,15 @@ class WaypointMissionExecutor(
                 missionFile = missionFile,
                 currentLocation = currentLocation,
                 targetLocation = request.targetLocation,
-                targetRelativeHeight = targetRelativeHeight,
+                targetRelativeHeight = finalTargetHeight,
                 currentRelativeHeight = currentHeight,
                 speed = request.maxSpeed ?: DEFAULT_SPEED,
                 securityTakeoffHeight = request.securityTakeoffHeight,
                 horizontalDistance = horizontalDistance,
                 estimatedDuration = estimatedDuration,
-                droneInfoResult = droneInfoResult
+                droneInfoResult = droneInfoResult,
+                manualHeightOverride = manualHeightOverride,
+                plan = planResolved
             )
         }
 
@@ -366,6 +467,15 @@ class WaypointMissionExecutor(
                 "wayline_ids" to waylineIds,
                 "auto_flight_speed" to metadata.autoFlightSpeed
             )
+            metadata.securityTakeOffHeight?.let { extra["security_takeoff_height"] = it }
+
+            if (metadata.waypoints.isNotEmpty()) {
+                activeMissionWaypoints.set(metadata.waypoints)
+            }
+            val resolvedSecurity = metadata.securityTakeOffHeight
+                ?.takeIf { !it.isNaN() && it > 0.0 }
+                ?: DEFAULT_SECURITY_TAKEOFF_HEIGHT
+            activeMissionSecurityHeight.set(resolvedSecurity)
 
             uploadAndStartMission(
                 missionFile = kmzFile,
@@ -471,11 +581,52 @@ class WaypointMissionExecutor(
                             ?.getOrNull(1)
                             ?.toDoubleOrNull()
 
+                        val securityHeight = Regex("<wpml:takeOffSecurityHeight>([-0-9.]+)</wpml:takeOffSecurityHeight>")
+                            .find(content)
+                            ?.groupValues
+                            ?.getOrNull(1)
+                            ?.toDoubleOrNull()
+
+                        val waypointSummaries = Regex("<Placemark>(.*?)</Placemark>", setOf(RegexOption.DOT_MATCHES_ALL))
+                            .findAll(content)
+                            .mapNotNull { placemarkMatch ->
+                                val block = placemarkMatch.groupValues.getOrNull(1) ?: return@mapNotNull null
+                                val index = Regex("<wpml:index>(\\d+)</wpml:index>")
+                                    .find(block)
+                                    ?.groupValues
+                                    ?.getOrNull(1)
+                                    ?.toIntOrNull()
+                                val coordMatch = Regex("<coordinates>\\s*([-.0-9]+),([-.0-9]+)")
+                                    .find(block)
+                                val lon = coordMatch?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+                                val lat = coordMatch?.groupValues?.getOrNull(2)?.toDoubleOrNull()
+                                val height = Regex("<wpml:executeHeight>([-.0-9]+)</wpml:executeHeight>")
+                                    .find(block)
+                                    ?.groupValues
+                                    ?.getOrNull(1)
+                                    ?.toDoubleOrNull()
+
+                                if (index == null || lat == null || lon == null) {
+                                    null
+                                } else {
+                                    mapOf(
+                                        "index" to index,
+                                        "latitude" to lat,
+                                        "longitude" to lon,
+                                        "execute_height" to height,
+                                        "kind" to "waypoint"
+                                    )
+                                }
+                            }
+                            .toList()
+
                         zip.closeEntry()
 
                         return@use WaylineMetadata(
                             waylineIds = if (waylineIds.isNotEmpty()) waylineIds else listOf(0),
-                            autoFlightSpeed = speed
+                            autoFlightSpeed = speed,
+                            securityTakeOffHeight = securityHeight,
+                            waypoints = waypointSummaries
                         )
                     }
                     entry = zip.nextEntry
@@ -491,20 +642,31 @@ class WaypointMissionExecutor(
     private fun computeTargetHeight(
         request: Request,
         takeoffAsl: Double?,
-        currentHeight: Double
+        currentHeight: Double,
+        manualHeightOverride: Boolean
     ): Double {
         val mode = request.mode
         val flyToHeight = request.flyToHeight?.toDouble()
         val targetAsl = request.targetAltitudeAsl
         val relativeFromAsl = if (targetAsl != null && takeoffAsl != null) targetAsl - takeoffAsl else null
 
-        return when {
+        val desired = when {
             mode == FlyToMode.SET_HEIGHT && flyToHeight != null -> flyToHeight
-            mode == FlyToMode.SMART_HEIGHT -> currentHeight
             relativeFromAsl != null -> relativeFromAsl
             flyToHeight != null -> flyToHeight
+            mode == FlyToMode.SMART_HEIGHT -> currentHeight
             else -> currentHeight
-        }.let { max(MIN_HEIGHT, it) }
+        }
+
+        if (manualHeightOverride) {
+            return max(MIN_HEIGHT, desired)
+        }
+
+        val securityFloor = request.securityTakeoffHeight
+            ?.takeIf { !it.isNaN() && it > 0.0 }
+            ?: DEFAULT_SECURITY_TAKEOFF_HEIGHT
+
+        return max(max(MIN_HEIGHT, desired), securityFloor)
     }
 
     private fun createMissionFile(context: Context): File {
@@ -526,9 +688,44 @@ class WaypointMissionExecutor(
         securityTakeoffHeight: Double?,
         horizontalDistance: Double?,
         estimatedDuration: Double?,
-        droneInfoResult: DroneInfoResult?
+        droneInfoResult: DroneInfoResult?,
+        manualHeightOverride: Boolean,
+        plan: List<PlanPointResolved>
     ) {
+        val securityFloor = securityTakeoffHeight
+            ?.takeIf { !it.isNaN() && it > 0.0 }
+            ?: DEFAULT_SECURITY_TAKEOFF_HEIGHT
+        val usingPlan = plan.isNotEmpty()
+
+        val targetHeight = if (usingPlan) {
+            plan.last().executeHeight
+        } else if (manualHeightOverride) {
+            max(MIN_HEIGHT, targetRelativeHeight)
+        } else {
+            max(max(MIN_HEIGHT, targetRelativeHeight), securityFloor)
+        }
+
+        val startHeight = if (usingPlan) {
+            val firstPlanHeight = plan.firstOrNull()?.executeHeight
+            when {
+                firstPlanHeight != null && !currentRelativeHeight.isNaN() -> max(firstPlanHeight, max(MIN_HEIGHT, currentRelativeHeight))
+                firstPlanHeight != null -> max(MIN_HEIGHT, firstPlanHeight)
+                currentRelativeHeight.isNaN() -> targetHeight
+                else -> max(MIN_HEIGHT, max(currentRelativeHeight, securityFloor))
+            }
+        } else if (manualHeightOverride) {
+            when {
+                currentRelativeHeight.isNaN() -> targetHeight
+                currentRelativeHeight > targetHeight -> currentRelativeHeight
+                else -> targetHeight
+            }
+        } else {
+            val currentSafe = if (currentRelativeHeight.isNaN()) MIN_HEIGHT else currentRelativeHeight
+            max(targetHeight, max(MIN_HEIGHT, max(currentSafe, securityFloor)))
+        }
+
         val waypoints = mutableListOf<WaylineExecuteWaypoint>()
+        val waypointSummaries = mutableListOf<Map<String, Any?>>()
 
         if (currentLocation != null) {
             waypoints.add(
@@ -536,21 +733,62 @@ class WaypointMissionExecutor(
                     index = 0,
                     latitude = currentLocation.latitude,
                     longitude = currentLocation.longitude,
-                    executeHeight = currentRelativeHeight,
+                    executeHeight = startHeight,
                     speed = speed
+                )
+            )
+            waypointSummaries.add(
+                mapOf(
+                    "index" to 0,
+                    "latitude" to currentLocation.latitude,
+                    "longitude" to currentLocation.longitude,
+                    "execute_height" to startHeight,
+                    "kind" to "start"
                 )
             )
         }
 
-        val targetIndex = waypoints.size
-        val targetWaypoint = createWaypoint(
-            index = targetIndex,
-            latitude = targetLocation.latitude,
-            longitude = targetLocation.longitude,
-            executeHeight = targetRelativeHeight,
-            speed = speed
-        )
-        waypoints.add(targetWaypoint)
+        if (usingPlan) {
+            plan.forEach { point ->
+                val waypointIndex = waypoints.size
+                val waypoint = createWaypoint(
+                    index = waypointIndex,
+                    latitude = point.latitude,
+                    longitude = point.longitude,
+                    executeHeight = point.executeHeight,
+                    speed = speed
+                )
+                waypoints.add(waypoint)
+                waypointSummaries.add(
+                    mapOf(
+                        "index" to waypointIndex,
+                        "latitude" to point.latitude,
+                        "longitude" to point.longitude,
+                        "execute_height" to point.executeHeight,
+                        "kind" to (point.kind ?: "waypoint")
+                    )
+                )
+            }
+        } else {
+            val targetIndex = waypoints.size
+            val targetWaypoint = createWaypoint(
+                index = targetIndex,
+                latitude = targetLocation.latitude,
+                longitude = targetLocation.longitude,
+                executeHeight = targetHeight,
+                speed = speed
+            )
+            waypoints.add(targetWaypoint)
+            waypointSummaries.add(
+                mapOf(
+                    "index" to targetIndex,
+                    "latitude" to targetLocation.latitude,
+                    "longitude" to targetLocation.longitude,
+                    "execute_height" to targetHeight,
+                    "kind" to if (targetIndex == 0) "waypoint" else "target"
+                )
+            )
+        }
 
         val wayline = Wayline().apply {
             setWaylineId(0)
@@ -562,6 +800,9 @@ class WaypointMissionExecutor(
             setWaylineStartActions(emptyList())
             setActionGroups(emptyList())
         }
+
+        activeMissionWaypoints.set(waypointSummaries.toList())
+        activeMissionSecurityHeight.set(securityFloor)
 
         val mission = WaylineMission().apply {
             val now = System.currentTimeMillis().toDouble()
@@ -759,11 +1000,17 @@ class WaypointMissionExecutor(
     fun currentMissionId(): String? = activeMissionId.get()
 
     fun currentMissionSnapshot(): Map<String, Any?>? = activeMissionId.get()?.let { id ->
-        mapOf(
+        mutableMapOf<String, Any?>(
             "mission_id" to id,
             "mission_path" to activeMissionPath.get(),
             "backend" to BACKEND_ID
-        )
+        ).also { map ->
+            val waypoints = activeMissionWaypoints.get()
+            if (waypoints.isNotEmpty()) {
+                map["waypoints"] = waypoints
+            }
+            activeMissionSecurityHeight.get()?.let { map["security_takeoff_height"] = it }
+        }
     }
 
     fun stopActiveMission(callback: CommonCallbacks.CompletionCallback): Boolean {
@@ -816,6 +1063,8 @@ class WaypointMissionExecutor(
     fun clearActiveMission() {
         activeMissionId.set(null)
         activeMissionPath.set(null)
+        activeMissionWaypoints.set(emptyList())
+        activeMissionSecurityHeight.set(null)
         uploadInProgress.set(false)
         startWatcherRef.getAndSet(null)?.cancel()
     }
@@ -829,6 +1078,7 @@ class WaypointMissionExecutor(
         private const val MIN_SPEED = 0.5
         private const val MIN_VERTICAL_SPEED = 0.5
         private const val MIN_HEIGHT = 0.0
+        private const val DEFAULT_SECURITY_TAKEOFF_HEIGHT = 20.0
         private val DRONE_TYPE_OVERRIDES = mapOf(
             "MATRICE_350_RTK" to 89,
             "M350_RTK" to 89

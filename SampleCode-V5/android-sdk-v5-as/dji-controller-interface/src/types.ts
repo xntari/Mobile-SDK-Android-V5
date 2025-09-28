@@ -220,6 +220,16 @@ export interface WaypointStatusTelemetry {
   mission_path?: string;
   backend?: string;
   timeline?: WaypointTimelineEntry[];
+  waypoints?: WaypointStatusWaypoint[];
+  security_takeoff_height?: number;
+}
+
+export interface WaypointStatusWaypoint {
+  index?: number;
+  latitude?: number;
+  longitude?: number;
+  execute_height?: number;
+  kind?: string;
 }
 
 export interface BridgeMessage {

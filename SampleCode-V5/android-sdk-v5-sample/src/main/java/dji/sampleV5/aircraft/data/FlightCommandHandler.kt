@@ -168,6 +168,7 @@ class FlightCommandHandler(
             "waypoint_resume" -> handleWaypointResume(clientId, action)
             "waypoint_stop" -> handleWaypointStop(clientId, action)
             "waypoint_load_kmz" -> handleWaypointLoadKmz(clientId, action, params)
+            "waypoint_execute_plan" -> handleWaypointExecutePlan(clientId, action, params)
             "simulator_enable" -> handleSimulatorEnable(clientId, action, params)
             "simulator_disable" -> handleSimulatorDisable(clientId, action)
 
@@ -346,7 +347,8 @@ class FlightCommandHandler(
                     flyToHeight = flyToHeightInt,
                     maxSpeed = maxSpeedMeters,
                     securityTakeoffHeight = securityTakeoffHeightMeters,
-                    reason = "intelligent_fly_to_unsupported"
+                    reason = "intelligent_fly_to_unsupported",
+                    plan = emptyList()
                 ),
                 baseExtra = baseExtra,
                 message = "Fallback to waypoint mission: intelligent_fly_to_unsupported"
@@ -409,7 +411,8 @@ class FlightCommandHandler(
                                             flyToHeight = flyToHeightInt,
                                             maxSpeed = maxSpeedMeters,
                                             securityTakeoffHeight = securityTakeoffHeightMeters,
-                                            reason = "start_failed:${error.description() ?: "unknown"}"
+                                            reason = "start_failed:${error.description() ?: "unknown"}",
+                                            plan = emptyList()
                                         ),
                                         baseExtra = baseExtra,
                                         message = error.description() ?: message ?: "start_failed"
@@ -466,15 +469,16 @@ class FlightCommandHandler(
                                     attemptWaypointFallback(
                                         clientId = clientId,
                                         action = action,
-                                        request = WaypointMissionExecutor.Request(
-                                            targetLocation = targetLocation,
-                                            targetAltitudeAsl = targetAltitude,
-                                            mode = flyToMode,
-                                            flyToHeight = flyToHeightInt,
-                                            maxSpeed = maxSpeedMeters,
-                                            securityTakeoffHeight = securityTakeoffHeightMeters,
-                                            reason = "update_param_failed:${message}"
-                                        ),
+                                       request = WaypointMissionExecutor.Request(
+                                           targetLocation = targetLocation,
+                                           targetAltitudeAsl = targetAltitude,
+                                           mode = flyToMode,
+                                           flyToHeight = flyToHeightInt,
+                                           maxSpeed = maxSpeedMeters,
+                                           securityTakeoffHeight = securityTakeoffHeightMeters,
+                                            reason = "update_param_failed:${message}",
+                                            plan = emptyList()
+                                       ),
                                         baseExtra = baseExtra,
                                         message = message
                                     )
@@ -827,6 +831,118 @@ class FlightCommandHandler(
                 is WaypointMissionExecutor.Result.Failure -> respond(clientId, action, false, message = result.message, error = result.error, extra = result.extra)
             }
         }
+    }
+
+    private fun handleWaypointExecutePlan(clientId: String, action: String, params: JSONObject?) {
+        val executor = waypointMissionExecutor
+        if (executor == null) {
+            respond(clientId, action, false, message = "Waypoint executor unavailable")
+            return
+        }
+
+        if (params == null) {
+            respond(clientId, action, false, message = "waypoint_execute_plan requires params")
+            return
+        }
+
+        val planArray = params.optJSONArray("plan")
+        if (planArray == null || planArray.length() == 0) {
+            respond(clientId, action, false, message = "waypoint_execute_plan requires plan array")
+            return
+        }
+
+        val planPoints = mutableListOf<WaypointMissionExecutor.PlanPoint>()
+        for (i in 0 until planArray.length()) {
+            val entry = planArray.optJSONObject(i) ?: continue
+            val latitude = entry.optDouble("latitude", Double.NaN)
+            val longitude = entry.optDouble("longitude", Double.NaN)
+            if (latitude.isNaN() || longitude.isNaN()) {
+                Log.w(TAG, "Skipping plan waypoint $i due to invalid coordinates: $latitude,$longitude")
+                continue
+            }
+            val altitude = entry.optDouble("altitude", Double.NaN).takeIf { !it.isNaN() }
+            val kind = entry.optString("kind", "").takeIf { it.isNotBlank() }
+            planPoints.add(
+                WaypointMissionExecutor.PlanPoint(
+                    latitude = latitude,
+                    longitude = longitude,
+                    altitude = altitude,
+                    kind = kind
+                )
+            )
+        }
+
+        if (planPoints.isEmpty()) {
+            respond(clientId, action, false, message = "No valid waypoints in plan")
+            return
+        }
+
+        val targetJson = params.optJSONObject("target_location")
+        val targetLatitude = targetJson?.optDouble("latitude", Double.NaN) ?: planPoints.last().latitude
+        val targetLongitude = targetJson?.optDouble("longitude", Double.NaN) ?: planPoints.last().longitude
+        if (targetLatitude.isNaN() || targetLongitude.isNaN()) {
+            respond(clientId, action, false, message = "Invalid target coordinates")
+            return
+        }
+
+        val targetAltitude = targetJson?.optDouble("altitude", Double.NaN)?.takeIf { !it.isNaN() }
+        val targetAltitudeAsl = params.optDouble("target_altitude_asl", Double.NaN).takeIf { !it.isNaN() } ?: targetAltitude
+
+        val targetLocation = LocationCoordinate3D(
+            targetLatitude,
+            targetLongitude,
+            targetAltitude ?: 0.0
+        )
+
+        val modeRaw = params.optString("mode", "")
+        val flyToMode = parseFlyToMode(modeRaw.ifBlank { null })
+        val flyToHeight = if (params.has("fly_to_height")) params.optInt("fly_to_height") else null
+        val maxSpeed = params.optDouble("max_speed", Double.NaN).takeIf { !it.isNaN() }
+        val securityTakeoffHeight = params.optDouble("security_takeoff_height", Double.NaN).takeIf { !it.isNaN() }
+        val reason = params.optString("reason", "mission_plan")
+
+        val baseExtra = buildFlyToExtra(
+            targetLocation = targetLocation,
+            targetAltitude = targetAltitudeAsl,
+            altitudeSpecified = targetAltitudeAsl != null,
+            maxSpeed = maxSpeed,
+            securityTakeoffHeight = securityTakeoffHeight,
+            mode = flyToMode,
+            flyToHeight = flyToHeight
+        ).toMutableMap().apply {
+            put("plan_waypoint_count", planPoints.size)
+            put(
+                "plan_waypoints",
+                planPoints.mapIndexed { index, point ->
+                    mapOf(
+                        "index" to index,
+                        "latitude" to point.latitude,
+                        "longitude" to point.longitude,
+                        "altitude" to point.altitude,
+                        "kind" to point.kind
+                    )
+                }
+            )
+        }
+
+        val request = WaypointMissionExecutor.Request(
+            targetLocation = targetLocation,
+            targetAltitudeAsl = targetAltitudeAsl,
+            mode = flyToMode,
+            flyToHeight = flyToHeight,
+            maxSpeed = maxSpeed,
+            securityTakeoffHeight = securityTakeoffHeight,
+            reason = reason,
+            plan = planPoints
+        )
+
+        attemptWaypointFallback(
+            clientId = clientId,
+            action = action,
+            request = request,
+            baseExtra = baseExtra,
+            message = "Executing mission plan (${planPoints.size} waypoints)"
+        )
     }
 
     private fun handleSimulatorEnable(clientId: String, action: String, params: JSONObject?) {

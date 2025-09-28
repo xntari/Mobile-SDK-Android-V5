@@ -4,6 +4,8 @@ import { TelemetryData } from '../types';
 import { rotationMatrixFromEuler, vectorRotate, combineRotationMatrices } from '../utils/poseMath';
 import { getCameraCenterRay, projectRayToGround } from '../utils/rayProjection';
 import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
+import { missionPlannerStore } from '../state/missionPlanner';
+import type { MissionWaypointTarget } from '../types/missionPlanner';
 import { computeTargetMetrics } from '../utils/objectMemoryTarget';
 import { OrientationCompass } from './OrientationCompass';
 
@@ -31,11 +33,15 @@ const defaultVector = { x: 0, y: 0, z: -1 };
 export const OrientationPanel: React.FC<OrientationPanelProps> = ({ telemetry, sendCommand }) => {
   const [isResetting, setIsResetting] = React.useState(false);
   const [objectTarget, setObjectTarget] = React.useState<ObjectMemoryTargetSelection | null>(() => objectMemoryTargetStore.getCurrent());
+  const [missionWaypoint, setMissionWaypoint] = React.useState<MissionWaypointTarget | null>(
+    () => missionPlannerStore.getSnapshot().activeWaypoint ?? null,
+  );
   const targetMetrics = React.useMemo(
     () => computeTargetMetrics(telemetry, objectTarget?.anchor, objectTarget?.clusterLabel ?? objectTarget?.clusterId),
     [telemetry, objectTarget]
   );
   React.useEffect(() => objectMemoryTargetStore.subscribe(setObjectTarget), []);
+  React.useEffect(() => missionPlannerStore.subscribeActiveWaypoint(setMissionWaypoint), []);
   const gimbal = telemetry?.gimbals?.find((g) => g.index === 'LEFT_OR_MAIN');
   const aircraftMatrix = React.useMemo(() => {
     if (!telemetry?.attitude) return null;
@@ -50,6 +56,43 @@ export const OrientationPanel: React.FC<OrientationPanelProps> = ({ telemetry, s
     const combined = combineRotationMatrices([aircraftMatrix, gimbalMatrix]);
     return vectorRotate(defaultVector, combined);
   }, [aircraftMatrix, gimbal?.attitude]);
+
+  const missionMetrics = React.useMemo(() => {
+    if (!telemetry?.location || !missionWaypoint) {
+      return null;
+    }
+
+    const { latitude: lat1, longitude: lon1 } = telemetry.location;
+    const { latitude: lat2, longitude: lon2, altitude } = missionWaypoint;
+    if (
+      typeof lat1 !== 'number' ||
+      typeof lon1 !== 'number' ||
+      typeof lat2 !== 'number' ||
+      typeof lon2 !== 'number'
+    ) {
+      return null;
+    }
+
+    const toRad = (deg: number) => (deg * Math.PI) / 180;
+    const φ1 = toRad(lat1);
+    const φ2 = toRad(lat2);
+    const Δφ = toRad(lat2 - lat1);
+    const Δλ = toRad(lon2 - lon1);
+
+    const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
+    const distance = 6371e3 * c;
+
+    const y = Math.sin(Δλ) * Math.cos(φ2);
+    const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+    const bearing = ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+
+    const altitudeDelta = typeof altitude === 'number' && typeof telemetry.altitude === 'number'
+      ? altitude - telemetry.altitude
+      : null;
+
+    return { distance, bearing, altitudeDelta };
+  }, [telemetry?.location?.latitude, telemetry?.location?.longitude, telemetry?.altitude, missionWaypoint?.latitude, missionWaypoint?.longitude, missionWaypoint?.altitude]);
 
   // Calculate ground point projection for center of image
   const groundPoint = React.useMemo(() => {
@@ -100,12 +143,34 @@ export const OrientationPanel: React.FC<OrientationPanelProps> = ({ telemetry, s
           </div>
         )}
         <div className="flex justify-center">
-          <OrientationCompass telemetry={telemetry} size={240} target={targetMetrics ? {
-            bearing: targetMetrics.bearing,
-            distance: targetMetrics.slantDistance,
-            altitudeDelta: targetMetrics.altitudeDelta,
-          } : undefined} />
+          <OrientationCompass
+            telemetry={telemetry}
+            size={240}
+            target={targetMetrics ? {
+              bearing: targetMetrics.bearing,
+              distance: targetMetrics.slantDistance,
+              altitudeDelta: targetMetrics.altitudeDelta,
+            } : undefined}
+            mission={missionMetrics ? {
+              bearing: missionMetrics.bearing,
+              distance: missionMetrics.distance,
+              altitudeDelta: missionMetrics.altitudeDelta,
+            } : undefined}
+            homeBearing={telemetry?.home_bearing}
+          />
         </div>
+        {missionMetrics && missionWaypoint && (
+          <div className="bg-black/50 border border-amber-500/40 text-amber-200 rounded px-3 py-2 text-[11px] flex items-center justify-between">
+            <div className="font-semibold text-amber-100">Next waypoint</div>
+            <div className="flex items-center gap-3">
+              <span>{missionMetrics.distance.toFixed(1)} m</span>
+              <span>BRG {missionMetrics.bearing.toFixed(0)}°</span>
+              {missionMetrics.altitudeDelta != null && (
+                <span>Δalt {missionMetrics.altitudeDelta.toFixed(1)} m</span>
+              )}
+            </div>
+          </div>
+        )}
         <div className="flex gap-4">
           <section className="flex-1">
             <div className="text-gray-400 uppercase text-[10px]">Aircraft</div>

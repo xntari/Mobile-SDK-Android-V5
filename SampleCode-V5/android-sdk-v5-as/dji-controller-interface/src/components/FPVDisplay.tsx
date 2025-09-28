@@ -54,7 +54,7 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(
       null,
     );
     const [videoStatus, setVideoStatus] = useState<
-      "waiting" | "loading" | "playing" | "error" | "receiving" | "decoding"
+      "waiting" | "loading" | "playing" | "error" | "receiving" | "decoding" | "simulator"
     >("waiting");
     const [frameStats, setFrameStats] = useState({
       frames: 0,
@@ -88,6 +88,7 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(
     const [liveViewPoint, setLiveViewPoint] = useState<LiveViewPinPoint | null>(
       null,
     );
+    const simulatorActive = telemetryData?.simulator?.enabled ?? false;
 
     // HUD toggle
     const [hudEnabled, setHudEnabled] = useState<boolean>(() => {
@@ -580,6 +581,27 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(
         offscreenCtxRef.current = null;
       };
 
+      const teardownAll = () => {
+        cleanup?.();
+        clearDecoderRestartTimer();
+        destroyDecoder();
+        window.electronAPI.removeAllListeners("fpv-video-frame");
+      };
+
+      if (simulatorActive) {
+        teardownAll();
+        setFrameStats({ frames: 0, totalBytes: 0, lastFrame: 0, decodedFrames: 0 });
+        setVideoStatus("simulator");
+        const canvas = canvasRef.current;
+        const ctx = canvas?.getContext("2d");
+        if (canvas && ctx) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+        return () => {
+          teardownAll();
+        };
+      }
+
       const scheduleDecoderRestart = (label: string, delayMs?: number) => {
         destroyDecoder();
         const attempts = decoderRestartAttemptsRef.current;
@@ -995,17 +1017,16 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(
         }
       };
 
+      setVideoStatus((prev) => (prev === "simulator" ? "waiting" : prev));
       setupVideoDecoder();
 
       // Listen for FPV video frames from main process
       (window.electronAPI as any).onFPVVideoFrame(handleVideoFrame);
 
       return () => {
-        cleanup?.();
-        clearDecoderRestartTimer();
-        window.electronAPI.removeAllListeners("fpv-video-frame");
+        teardownAll();
       };
-    }, []);
+    }, [simulatorActive]);
 
     const getStatusOverlay = () => {
       switch (videoStatus) {
@@ -1093,6 +1114,19 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(
                     Try Chrome 94+ or Edge 94+ for WebCodecs support
                   </div>
                 )}
+              </div>
+            </div>
+          );
+
+        case "simulator":
+          return (
+            <div className="absolute inset-0 bg-gray-900 flex items-center justify-center">
+              <div className="text-center text-gray-300">
+                <div className="text-4xl mb-3">🛈</div>
+                <div className="text-lg">Simulator Mode</div>
+                <div className="text-sm text-gray-500 mt-2">
+                  Video decoding paused while simulator is active
+                </div>
               </div>
             </div>
           );

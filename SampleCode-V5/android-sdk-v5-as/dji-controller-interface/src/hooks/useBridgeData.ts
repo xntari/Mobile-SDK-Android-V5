@@ -288,6 +288,34 @@ export const useBridgeData = () => {
           const missionId = typeof status.mission_id === 'string'
             ? status.mission_id
             : (executing?.mission_id ?? undefined);
+          const waypointsRaw = Array.isArray(status.waypoints) ? status.waypoints : undefined;
+          const waypoints = waypointsRaw
+            ?.map((entry: any) => {
+              if (!entry || typeof entry !== 'object') return null;
+              const latitude = typeof entry.latitude === 'number' ? entry.latitude : typeof entry.lat === 'number' ? entry.lat : undefined;
+              const longitude = typeof entry.longitude === 'number' ? entry.longitude : typeof entry.lng === 'number' ? entry.lng : undefined;
+              const executeHeight = typeof entry.execute_height === 'number'
+                ? entry.execute_height
+                : typeof entry.height === 'number'
+                  ? entry.height
+                  : undefined;
+              if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+                return null;
+              }
+              return {
+                index: typeof entry.index === 'number' ? entry.index : undefined,
+                latitude,
+                longitude,
+                execute_height: executeHeight,
+                kind: typeof entry.kind === 'string' ? entry.kind : undefined,
+              };
+            })
+            .filter((entry): entry is { index?: number; latitude: number; longitude: number; execute_height?: number; kind?: string } => Boolean(entry));
+
+          const securityTakeoffHeight = typeof status.security_takeoff_height === 'number'
+            ? status.security_takeoff_height
+            : undefined;
+
           return {
             timestamp: typeof status.timestamp === 'number' ? status.timestamp : undefined,
             state: typeof status.state === 'string' ? status.state : undefined,
@@ -297,6 +325,8 @@ export const useBridgeData = () => {
             executing,
             last_interrupt: interrupt,
             timeline: timelineEntries && timelineEntries.length ? timelineEntries : undefined,
+            waypoints: waypoints && waypoints.length ? waypoints : undefined,
+            security_takeoff_height: securityTakeoffHeight,
           };
         };
 

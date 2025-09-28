@@ -64,7 +64,7 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(
       null,
     );
     const [videoStatus, setVideoStatus] = useState<
-      "waiting" | "loading" | "playing" | "error" | "receiving" | "decoding"
+      "waiting" | "loading" | "playing" | "error" | "receiving" | "decoding" | "simulator"
     >("waiting");
     const [frameStats, setFrameStats] = useState({
       frames: 0,
@@ -97,6 +97,7 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(
     const [liveViewPoint, setLiveViewPoint] = useState<LiveViewPinPoint | null>(
       null,
     );
+    const simulatorActive = telemetryData?.simulator?.enabled ?? false;
     const [clickIndicators, setClickIndicators] = useState<ClickIndicator[]>(
       [],
     );
@@ -147,7 +148,7 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(
     useEffect(() => {
       const unsubscribe = objectMemoryTargetStore.subscribe(setObjectTarget);
       return unsubscribe;
-    }, []);
+    }, [simulatorActive]);
 
     // Clear vision boxes when camera moves (any gimbal command updates) - handled by parent App component now
 
@@ -200,7 +201,7 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(
         .catch((error: any) => {
           console.error("camera_zoom error", error);
         });
-    }, []);
+    }, [simulatorActive]);
 
     const handleZoomSliderChange = React.useCallback(
       (ratio: number) => {
@@ -546,7 +547,7 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(
           stopFreeLook();
         }
       };
-    }, []);
+    }, [simulatorActive]);
 
     // Calculate actual video display rectangle with object-contain behavior
     const calculateDisplayRect = () => {
@@ -1062,6 +1063,27 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(
         offscreenCtxRef.current = null;
       };
 
+      const teardownAll = () => {
+        cleanup?.();
+        clearDecoderRestartTimer();
+        destroyDecoder();
+        window.electronAPI.removeAllListeners("secondary-video-frame");
+      };
+
+      if (simulatorActive) {
+        teardownAll();
+        setFrameStats({ frames: 0, totalBytes: 0, lastFrame: 0, decodedFrames: 0 });
+        setVideoStatus("simulator");
+        const canvas = canvasRef.current;
+        const ctx = canvas?.getContext("2d");
+        if (canvas && ctx) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+        return () => {
+          teardownAll();
+        };
+      }
+
       const scheduleDecoderRestart = (label: string, delayMs?: number) => {
         destroyDecoder();
         const attempts = decoderRestartAttemptsRef.current;
@@ -1479,15 +1501,14 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(
         }
       };
 
+      setVideoStatus((prev) => (prev === "simulator" ? "waiting" : prev));
       setupVideoDecoder();
 
       // Listen for secondary video frames from main process
       (window.electronAPI as any).onSecondaryVideoFrame(handleVideoFrame);
 
       return () => {
-        cleanup?.();
-        clearDecoderRestartTimer();
-        window.electronAPI.removeAllListeners("secondary-video-frame");
+        teardownAll();
       };
     }, []);
 
@@ -1577,6 +1598,19 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(
                     Try Chrome 94+ or Edge 94+ for WebCodecs support
                   </div>
                 )}
+              </div>
+            </div>
+          );
+
+        case "simulator":
+          return (
+            <div className="absolute inset-0 bg-gray-900 flex items-center justify-center">
+              <div className="text-center text-gray-300">
+                <div className="text-4xl mb-3">🛈</div>
+                <div className="text-lg">Simulator Mode</div>
+                <div className="text-sm text-gray-500 mt-2">
+                  H20N decoding paused while simulator is active
+                </div>
               </div>
             </div>
           );
