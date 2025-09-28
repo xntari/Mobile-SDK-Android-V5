@@ -126,6 +126,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
     private val flySafeBridgeModel = FlySafeBridgeModel()
     private val flyToBridgeModel = FlyToMissionBridgeModel()
     private val waypointBridgeModel = WaypointMissionBridgeModel(waypointMissionExecutor)
+    private val simulatorBridgeModel = SimulatorBridgeModel()
 
     private val diagnosticAggregator = DiagnosticAggregator { flySafeBridgeModel.toSnapshotMap() }
 
@@ -147,6 +148,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         flySafeBridgeModel.start()
         flyToBridgeModel.start()
         waypointBridgeModel.start()
+        simulatorBridgeModel.start()
     }
 
     // Retry helper for camera stream registration
@@ -910,6 +912,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         flySafeBridgeModel.stop()
         flyToBridgeModel.stop()
         waypointBridgeModel.stop()
+        simulatorBridgeModel.stop()
         
         try {
             // Close all client connections
@@ -1695,7 +1698,8 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         postActionHook = { clientId, action, success -> handleFlightActionPostHook(clientId, action, success) },
         flySafeSnapshotProvider = { flySafeBridgeModel.toSnapshotMap() },
         flyToStatusProvider = { flyToBridgeModel.toTelemetryMap() },
-        waypointMissionExecutor = waypointMissionExecutor
+        waypointMissionExecutor = waypointMissionExecutor,
+        simulatorBridgeModel = simulatorBridgeModel
     )
 
     private val telemetryStreamer = TelemetryStreamer(
@@ -1804,9 +1808,10 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             "timestamp" to System.currentTimeMillis()
         )
         error?.let {
-            val errorMessage = runCatching { it.description() }.getOrElse { _ ->
-                it.toString()
-            }
+            val errorMessage = runCatching { it.description() }
+                .getOrNull()
+                ?.takeUnless { msg -> msg.isNullOrBlank() }
+                ?: it.toString()
             data["error_message"] = errorMessage
             data["error_type"] = it.javaClass.simpleName
 
@@ -3095,6 +3100,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             ).also { map ->
                 flyToBridgeModel.toTelemetryMap()?.let { map["fly_to_status"] = it }
                 waypointBridgeModel.toTelemetryMap()?.let { map["waypoint_status"] = it }
+                simulatorBridgeModel.toTelemetryMap()?.let { map["simulator"] = it }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to collect telemetry data: ${e.message}")

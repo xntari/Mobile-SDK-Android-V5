@@ -2,6 +2,7 @@ import React from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { Panel } from './Panel';
+import { getSimulatorModeBadge } from './SimulatorControls';
 import { useBridgeCommands } from '../hooks/useBridgeCommands';
 import { useStableBridgeData } from '../hooks/useStableBridgeData';
 import { addMetersToLatLon, bearingOffsetToMeters, normalizeHeadingDegrees } from '../utils/geo';
@@ -378,11 +379,38 @@ export const FlyToPanel: React.FC = () => {
         missionStateRaw.toLowerCase(),
       ),
   );
+  const missionStateNormalized = missionStateRaw?.toLowerCase() ?? '';
   const missionTimestampLabel = formatRelativeTime(waypointStatus?.timestamp);
   const missionBackend = waypointStatus?.backend ?? previewPath?.backend;
   const missionId = waypointStatus?.mission_id ?? previewPath?.missionId;
   const missionInterrupt = waypointStatus?.last_interrupt;
   const missionTimelineDisplay = [...missionTimeline].slice(-6).reverse();
+  const latestPauseEvent = [...missionTimeline].reverse().find((entry) => entry.type === 'event' && entry.event === 'pause');
+  const latestResumeEvent = [...missionTimeline].reverse().find((entry) => entry.type === 'event' && entry.event === 'resume');
+  const pauseTimestamp = latestPauseEvent?.timestamp ?? 0;
+  const resumeTimestamp = latestResumeEvent?.timestamp ?? 0;
+  const pausedByEvent = Boolean(latestPauseEvent && pauseTimestamp >= resumeTimestamp);
+  const missionPaused = pausedByEvent || missionStateNormalized === 'interrupted';
+  const canResumeMission = missionPaused;
+  const canPauseMission = missionActive && !missionPaused;
+  const missionTimelineTooltip = React.useCallback((entry: WaypointTimelineEntry, fallback: string) => {
+    if ('reason' in entry && typeof entry.reason === 'string' && entry.reason) {
+      return entry.reason.replace(/_/g, ' ');
+    }
+    if ('pause_reason' in entry && typeof entry.pause_reason === 'string' && entry.pause_reason) {
+      return entry.pause_reason.replace(/_/g, ' ');
+    }
+    if ('resume_reason' in entry && typeof entry.resume_reason === 'string' && entry.resume_reason) {
+      return entry.resume_reason.replace(/_/g, ' ');
+    }
+    if ('exit_reason' in entry && typeof entry.exit_reason === 'string' && entry.exit_reason) {
+      return entry.exit_reason.replace(/_/g, ' ');
+    }
+    if ('error' in entry && entry.error?.description) {
+      return entry.error.description;
+    }
+    return fallback;
+  }, []);
 
   const handleCopyMissionPath = React.useCallback(async (path: string) => {
     try {
@@ -540,6 +568,11 @@ export const FlyToPanel: React.FC = () => {
       const next = [entry, ...prev];
       return next.slice(0, MAX_LOG_ENTRIES);
     });
+  }, []);
+
+  const handleClearMissionLog = React.useCallback(() => {
+    setLogEntries([]);
+    setStatusMessage('Mission timeline cleared');
   }, []);
 
   const stageManualTarget = React.useCallback((next: ManualTargetState, context: Record<string, any>, message: string) => {
@@ -1074,6 +1107,36 @@ export const FlyToPanel: React.FC = () => {
     }
   };
 
+  const handlePauseMission = async () => {
+    setSimPreview(null);
+    appendLog('Waypoint Pause', {}, 'command');
+    try {
+      const result = await sendFlightCommand('waypoint_pause');
+      if (result?.success === false) {
+        setStatusMessage(result.error || result.error_message || 'waypoint_pause rejected');
+      } else {
+        setStatusMessage('Waypoint mission pause requested');
+      }
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : 'waypoint_pause failed');
+    }
+  };
+
+  const handleResumeMission = async () => {
+    setSimPreview(null);
+    appendLog('Waypoint Resume', {}, 'command');
+    try {
+      const result = await sendFlightCommand('waypoint_resume');
+      if (result?.success === false) {
+        setStatusMessage(result.error || result.error_message || 'waypoint_resume rejected');
+      } else {
+        setStatusMessage('Waypoint mission resume requested');
+      }
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : 'waypoint_resume failed');
+    }
+  };
+
   const handleStopMission = async () => {
     setSimPreview(null);
     appendLog('Waypoint Stop', {}, 'command');
@@ -1097,7 +1160,13 @@ export const FlyToPanel: React.FC = () => {
     if (lastAckRef.current === latest.timestamp) return;
     lastAckRef.current = latest.timestamp;
 
-    if (latest.backend === 'waypoint_v2' || latest.action === 'waypoint_stop') {
+    const actionNormalized = latest.action?.toLowerCase?.() ?? latest.action;
+    if (
+      latest.backend === 'waypoint_v2' ||
+      actionNormalized === 'waypoint_stop' ||
+      actionNormalized === 'waypoint_pause' ||
+      actionNormalized === 'waypoint_resume'
+    ) {
       appendLog(
         `Ack ${latest.action.replace(/_/g, ' ')}`,
         {
@@ -1182,6 +1251,12 @@ export const FlyToPanel: React.FC = () => {
           return `${base}:${entry.mission_id ?? 'mission'}:${entry.wayline_id ?? 'wl'}:${entry.current_waypoint_index ?? index}`;
         case 'interrupt':
           return `${base}:${entry.error?.code ?? entry.error?.description ?? index}`;
+        case 'event':
+          return `${base}:${entry.event ?? 'event'}:${entry.reason ?? index}`;
+        case 'breakpoint':
+          return `${base}:${entry.waypoint_id ?? 'wp'}:${entry.segment_progress ?? 'progress'}`;
+        case 'breakpoint_error':
+          return `${base}:${entry.error?.code ?? index}`;
         default:
           return `${base}:${index}`;
       }
@@ -1210,6 +1285,15 @@ export const FlyToPanel: React.FC = () => {
           break;
         case 'interrupt':
           label = `Interrupt ${entry.error?.code ?? ''}`.trim();
+          break;
+        case 'event':
+          label = `Event ${entry.event ?? ''}`.trim();
+          break;
+        case 'breakpoint':
+          label = 'Break point info';
+          break;
+        case 'breakpoint_error':
+          label = 'Break point error';
           break;
       }
 
@@ -1255,6 +1339,9 @@ export const FlyToPanel: React.FC = () => {
     await sendFlyTo(activeTarget.latitude, activeTarget.longitude, altitude, label);
   };
 
+  const simulatorBadge = React.useMemo(() => getSimulatorModeBadge(telemetry?.simulator), [telemetry?.simulator]);
+  const simulatorStatus = telemetry?.simulator;
+
   return (
     <Panel
       title="Fly-To & RTH"
@@ -1269,6 +1356,33 @@ export const FlyToPanel: React.FC = () => {
             {statusMessage}
           </div>
         )}
+
+        <div className="flex flex-col gap-1 border border-gray-700/60 bg-black/30 rounded-md px-3 py-2 text-[11px] text-gray-300">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`px-2 py-0.5 border rounded ${simulatorBadge.className}`}>
+              {simulatorBadge.label}
+            </span>
+            <span className="text-gray-200">
+              {simulatorStatus?.enabled ? 'Enabled' : 'Disabled'}
+            </span>
+            <span className="text-gray-500">
+              Updated {formatRelativeTime(simulatorStatus?.timestamp)}
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-3 text-gray-400">
+            <span>
+              Motors {simulatorStatus?.motors_on === undefined ? '—' : simulatorStatus.motors_on ? 'ON' : 'OFF'}
+            </span>
+            <span>
+              Flight {simulatorStatus?.flying === undefined ? '—' : simulatorStatus.flying ? 'In Air' : 'Ground'}
+            </span>
+            {simulatorStatus?.configuration && (
+              <span>
+                Config lat {formatLatLon(simulatorStatus.configuration.latitude)} · lon {formatLatLon(simulatorStatus.configuration.longitude)}
+              </span>
+            )}
+          </div>
+        </div>
 
         <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
           <div className="text-gray-400 uppercase text-[11px] mb-2">Relative Move</div>
@@ -1666,7 +1780,11 @@ export const FlyToPanel: React.FC = () => {
                 const entryLabel = entry.label ?? fallbackLabel;
                 const entryTime = entry.timestamp ? `${formatRelativeTime(entry.timestamp)} ago` : '–';
                 return (
-                  <div key={`${entry.type}-${idx}`} className="flex items-center justify-between gap-2">
+                  <div
+                    key={`${entry.type}-${idx}`}
+                    className="flex items-center justify-between gap-2"
+                    title={missionTimelineTooltip(entry, entryLabel)}
+                  >
                     <span className="text-gray-200">{entryLabel}</span>
                     <span className="text-gray-500">{entryTime}</span>
                   </div>
@@ -1674,14 +1792,30 @@ export const FlyToPanel: React.FC = () => {
               })}
             </div>
           )}
-          <div className="mt-2 grid grid-cols-1 gap-2">
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              className="px-2 py-1 rounded bg-gray-800/60 border border-gray-600 text-gray-200 hover:bg-gray-700/70 disabled:opacity-40 disabled:cursor-not-allowed"
+              onClick={handlePauseMission}
+              disabled={!canPauseMission}
+            >
+              Pause
+            </button>
+            <button
+              type="button"
+              className="px-2 py-1 rounded bg-gray-800/60 border border-gray-600 text-gray-200 hover:bg-gray-700/70 disabled:opacity-40 disabled:cursor-not-allowed"
+              onClick={handleResumeMission}
+              disabled={!canResumeMission}
+            >
+              Resume
+            </button>
             <button
               type="button"
               className="px-2 py-1 rounded bg-status-error/20 border border-status-error/60 text-status-error disabled:opacity-40 disabled:cursor-not-allowed"
               onClick={handleStopMission}
               disabled={!missionActive}
             >
-              Stop Waypoint Mission
+              Stop
             </button>
           </div>
           <div className="mt-2 text-[10px] text-gray-500">
@@ -1692,14 +1826,24 @@ export const FlyToPanel: React.FC = () => {
         <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
           <div className="flex items-center justify-between mb-2">
             <div className="text-gray-400 uppercase text-[11px]">Mission Timeline</div>
-            <button
-              type="button"
-              className="px-2 py-1 rounded border border-gray-700 text-gray-300 bg-gray-800/40 disabled:opacity-40 disabled:cursor-not-allowed"
-              onClick={handleExportMissionLog}
-              disabled={!logEntries.length}
-            >
-              Export JSON
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="px-2 py-1 rounded border border-gray-700 text-gray-300 bg-gray-800/40 disabled:opacity-40 disabled:cursor-not-allowed"
+                onClick={handleClearMissionLog}
+                disabled={!logEntries.length}
+              >
+                Clear
+              </button>
+              <button
+                type="button"
+                className="px-2 py-1 rounded border border-gray-700 text-gray-300 bg-gray-800/40 disabled:opacity-40 disabled:cursor-not-allowed"
+                onClick={handleExportMissionLog}
+                disabled={!logEntries.length}
+              >
+                Export JSON
+              </button>
+            </div>
           </div>
           {logEntries.length === 0 ? (
             <div className="text-[11px] text-gray-500">No mission entries recorded yet.</div>

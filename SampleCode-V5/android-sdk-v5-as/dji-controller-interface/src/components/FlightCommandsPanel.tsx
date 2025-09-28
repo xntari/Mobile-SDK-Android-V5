@@ -11,6 +11,7 @@ import {
 import { useBridgeCommands } from "../hooks/useBridgeCommands";
 import { useManualControl } from "../context/ManualControlContext";
 import { Notification } from "./Modal";
+import { SimulatorControls } from "./SimulatorControls";
 
 interface FlightCommandsPanelProps {
   telemetry: TelemetryData | null;
@@ -935,14 +936,41 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
   const missionExecuting = waypointStatus?.executing;
   const missionInterrupt = waypointStatus?.last_interrupt;
   const missionBackend = waypointStatus?.backend;
+  const missionStateNormalized = missionStateRaw?.toLowerCase() ?? '';
   const missionActive = Boolean(
     missionStateRaw &&
       !["ready", "finished", "idle", "not_supported", "unknown"].includes(
-        missionStateRaw.toLowerCase(),
+        missionStateNormalized,
       ),
   );
+  const latestPauseEvent = [...missionTimeline].reverse().find((entry) => entry.type === 'event' && entry.event === 'pause');
+  const latestResumeEvent = [...missionTimeline].reverse().find((entry) => entry.type === 'event' && entry.event === 'resume');
+  const pauseTimestamp = latestPauseEvent?.timestamp ?? 0;
+  const resumeTimestamp = latestResumeEvent?.timestamp ?? 0;
+  const pausedByEvent = Boolean(latestPauseEvent && pauseTimestamp >= resumeTimestamp);
+  const missionPaused = pausedByEvent || missionStateNormalized === 'interrupted';
+  const canResumeMission = missionPaused;
+  const canPauseMission = missionActive && !missionPaused;
   const canStopMission = missionActive;
   const missionTimelineDisplay = [...missionTimeline].slice(-5).reverse();
+  const missionTimelineTooltip = React.useCallback((entry: WaypointTimelineEntry, fallback: string) => {
+    if ('reason' in entry && typeof entry.reason === 'string' && entry.reason) {
+      return entry.reason.replace(/_/g, ' ');
+    }
+    if ('pause_reason' in entry && typeof entry.pause_reason === 'string' && entry.pause_reason) {
+      return entry.pause_reason.replace(/_/g, ' ');
+    }
+    if ('resume_reason' in entry && typeof entry.resume_reason === 'string' && entry.resume_reason) {
+      return entry.resume_reason.replace(/_/g, ' ');
+    }
+    if ('exit_reason' in entry && typeof entry.exit_reason === 'string' && entry.exit_reason) {
+      return entry.exit_reason.replace(/_/g, ' ');
+    }
+    if ('error' in entry && entry.error?.description) {
+      return entry.error.description;
+    }
+    return fallback;
+  }, []);
 
   return (
     <>
@@ -998,6 +1026,13 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
         defaultSize={{ w: 320, h: 420 }}
       >
         <div className="flex flex-col gap-4 text-xs text-gray-200 h-full overflow-y-auto">
+          <SimulatorControls
+            telemetry={telemetry}
+            onSend={handleSend}
+            pendingActions={pendingActions}
+            pendingMeta={pendingMeta}
+            acknowledgements={acknowledgements}
+          />
           <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
             <div className="flex justify-between text-[11px] uppercase text-gray-400 mb-1">
               <span>Status</span>
@@ -1174,7 +1209,11 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                   const entryLabel = entry.label ?? fallbackLabel;
                   const entryTime = entry.timestamp ? `${formatRelativeTime(entry.timestamp)} ago` : '–';
                   return (
-                    <div key={`${entry.type}-${idx}`} className="flex items-center justify-between gap-2">
+                    <div
+                      key={`${entry.type}-${idx}`}
+                      className="flex items-center justify-between gap-2"
+                      title={missionTimelineTooltip(entry, entryLabel)}
+                    >
                       <span className="text-gray-200">{entryLabel}</span>
                       <span className="text-gray-500">{entryTime}</span>
                     </div>
@@ -1183,7 +1222,23 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
               </div>
             )}
           </div>
-            <div className="mt-2 grid grid-cols-1 gap-2">
+            <div className="mt-2 flex gap-2">
+              <button
+                type="button"
+                className={`${toneClass.primary} disabled:opacity-40 disabled:cursor-not-allowed`}
+                onClick={() => handleSend("waypoint_pause")}
+                disabled={!canPauseMission}
+              >
+                Pause Waypoint
+              </button>
+              <button
+                type="button"
+                className={`${toneClass.primary} disabled:opacity-40 disabled:cursor-not-allowed`}
+                onClick={() => handleSend("waypoint_resume")}
+                disabled={!canResumeMission}
+              >
+                Resume Waypoint
+              </button>
               <button
                 type="button"
                 className={`${toneClass.danger} disabled:opacity-40 disabled:cursor-not-allowed`}

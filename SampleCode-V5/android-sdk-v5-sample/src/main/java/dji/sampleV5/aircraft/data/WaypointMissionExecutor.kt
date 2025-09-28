@@ -61,6 +61,10 @@ class WaypointMissionExecutor(
     private val runOnUiThread: (action: () -> Unit) -> Unit
 ) {
 
+    fun dispatchToUi(action: () -> Unit) {
+        runOnUiThread(action)
+    }
+
     private data class WaylineMetadata(
         val waylineIds: List<Int> = emptyList(),
         val autoFlightSpeed: Double? = null
@@ -768,6 +772,36 @@ class WaypointMissionExecutor(
             missionManager.stopMission(missionId, object : CommonCallbacks.CompletionCallback {
                 override fun onSuccess() {
                     clearActiveMission()
+                    callback.onSuccess()
+                }
+
+                override fun onFailure(error: IDJIError) {
+                    callback.onFailure(error)
+                }
+            })
+        }
+        return true
+    }
+
+    fun pauseActiveMission(callback: CommonCallbacks.CompletionCallback): Boolean {
+        runOnUiThread {
+            missionManager.pauseMission(object : CommonCallbacks.CompletionCallback {
+                override fun onSuccess() {
+                    callback.onSuccess()
+                }
+
+                override fun onFailure(error: IDJIError) {
+                    callback.onFailure(error)
+                }
+            })
+        }
+        return true
+    }
+
+    fun resumeActiveMission(callback: CommonCallbacks.CompletionCallback): Boolean {
+        runOnUiThread {
+            missionManager.resumeMission(object : CommonCallbacks.CompletionCallback {
+                override fun onSuccess() {
                     callback.onSuccess()
                 }
 

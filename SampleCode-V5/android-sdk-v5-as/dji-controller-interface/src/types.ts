@@ -108,6 +108,37 @@ export interface FlyToStatus {
   capability?: FlyToCapabilityStatus;
 }
 
+export interface SimulatorConfigurationSnapshot {
+  latitude?: number;
+  longitude?: number;
+  altitude?: number;
+  satellites?: number;
+  frequency_hz?: number;
+  source?: string;
+  timestamp?: number;
+}
+
+export interface SimulatorErrorSnapshot {
+  code?: string;
+  code_value?: number;
+  description?: string;
+  domain?: string;
+}
+
+export interface SimulatorTelemetry {
+  mode?: 'simulator' | 'real';
+  enabled?: boolean;
+  timestamp?: number;
+  listener_registered?: boolean;
+  motors_on?: boolean;
+  flying?: boolean;
+  attitude?: { roll?: number; pitch?: number; yaw?: number };
+  position?: { x?: number; y?: number; z?: number };
+  location?: { latitude?: number; longitude?: number; altitude?: number };
+  configuration?: SimulatorConfigurationSnapshot;
+  last_error?: SimulatorErrorSnapshot;
+}
+
 export interface WaypointExecutingStatus {
   wayline_id?: number;
   current_waypoint_index?: number;
@@ -135,11 +166,48 @@ export type WaypointTimelineEntry =
       raw?: string;
       label?: string;
       execute_state?: string;
+      pause_reason?: string;
+      resume_reason?: string;
+      exit_reason?: string;
     }
   | {
       type: 'interrupt';
       timestamp?: number;
       error?: WaypointInterruptStatus;
+      label?: string;
+    }
+  | {
+      type: 'event';
+      timestamp?: number;
+      event?: string;
+      reason?: string;
+      mission_id?: string;
+      wayline_id?: number;
+      current_waypoint_index?: number;
+      label?: string;
+    }
+  | {
+      type: 'breakpoint';
+      timestamp?: number;
+      mission_id?: string;
+      wayline_id?: number | null;
+      waypoint_id?: number | null;
+      segment_progress?: number | null;
+      recover_action?: string | null;
+      location?: {
+        latitude?: number | null;
+        longitude?: number | null;
+        altitude?: number | null;
+      };
+      source?: string;
+      label?: string;
+    }
+  | {
+      type: 'breakpoint_error';
+      timestamp?: number;
+      mission_id?: string;
+      error?: WaypointInterruptStatus;
+      source?: string;
       label?: string;
     };
 
@@ -205,6 +273,7 @@ export interface FlightCommandAck extends BridgeMessage {
   auto_flight_speed?: number;
   fallback_reason?: string;
   debug?: Record<string, any> | null;
+  simulator?: SimulatorTelemetry;
 }
 
 export interface PreflightStatus extends BridgeMessage {
@@ -291,6 +360,7 @@ export interface TelemetryData extends BridgeMessage {
   diagnostics_severity?: string;
   fly_safe?: any;
   fly_to_status?: FlyToStatus;
+  simulator?: SimulatorTelemetry;
   waypoint_status?: WaypointStatusTelemetry;
   obstacle_avoidance?: {
     enabled: boolean;

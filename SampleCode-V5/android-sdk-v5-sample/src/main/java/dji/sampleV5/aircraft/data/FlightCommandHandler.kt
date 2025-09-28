@@ -19,12 +19,18 @@ import dji.sdk.keyvalue.value.common.LocationCoordinate2D
 import dji.v5.manager.KeyManager
 import dji.v5.manager.diagnostic.DeviceStatusManager
 import android.util.Base64
+import dji.v5.manager.aircraft.simulator.InitializationSettings
+import dji.v5.manager.aircraft.simulator.SimulatorManager
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
 import kotlin.math.roundToInt
 
 private const val TAG = "FlightCommandHandler"
+private const val DEFAULT_SIMULATOR_SATELLITES = 12
+private const val SIMULATOR_MIN_SATELLITES = 6
+private const val SIMULATOR_MAX_SATELLITES = 20
+private const val SIMULATOR_SOURCE_DEFAULT = "flight_commands"
 
 class FlightCommandHandler(
     private val runOnUiThread: ((() -> Unit) -> Unit),
@@ -40,7 +46,8 @@ class FlightCommandHandler(
     private val postActionHook: (clientId: String, action: String, success: Boolean) -> Unit,
     private val flySafeSnapshotProvider: (() -> Map<String, Any?>?)? = null,
     private val flyToStatusProvider: (() -> Map<String, Any?>?)? = null,
-    private val waypointMissionExecutor: WaypointMissionExecutor? = null
+    private val waypointMissionExecutor: WaypointMissionExecutor? = null,
+    private val simulatorBridgeModel: SimulatorBridgeModel? = null
 ) {
 
     private fun respond(
@@ -51,8 +58,9 @@ class FlightCommandHandler(
         error: IDJIError? = null,
         extra: Map<String, Any?>? = null
     ) {
+        val enrichedExtra = attachSimulatorExtra(extra)
         val diagnosticExtra = if (!success) diagnosticExtrasProvider(action) else null
-        val mergedExtra = mergeExtras(extra, diagnosticExtra)
+        val mergedExtra = mergeExtras(enrichedExtra, diagnosticExtra)
         sendFlightCommandResponse(clientId, action, success, message, error, mergedExtra)
         postActionHook(clientId, action, success)
     }
@@ -69,6 +77,13 @@ class FlightCommandHandler(
             merged[key] = value
         }
         return merged
+    }
+
+    private fun attachSimulatorExtra(extra: Map<String, Any?>?): Map<String, Any?>? {
+        val snapshot = simulatorBridgeModel?.statusSnapshot() ?: return extra
+        val map = extra?.toMutableMap() ?: mutableMapOf()
+        map["simulator"] = snapshot
+        return map
     }
 
     fun handle(clientId: String, command: JSONObject) {
@@ -149,8 +164,12 @@ class FlightCommandHandler(
             "virtual_stick_disable" -> toggleVirtualStick(clientId, action, false)
             "virtual_stick_override" -> handleVirtualStickOverride(clientId, action, params)
             "fly_to_prepare" -> handleFlyToPrepare(clientId, action, params)
+            "waypoint_pause" -> handleWaypointPause(clientId, action)
+            "waypoint_resume" -> handleWaypointResume(clientId, action)
             "waypoint_stop" -> handleWaypointStop(clientId, action)
             "waypoint_load_kmz" -> handleWaypointLoadKmz(clientId, action, params)
+            "simulator_enable" -> handleSimulatorEnable(clientId, action, params)
+            "simulator_disable" -> handleSimulatorDisable(clientId, action)
 
             else -> {
                 Log.w(TAG, "Unsupported flight command action '$actionRaw' from $clientId")
@@ -808,6 +827,183 @@ class FlightCommandHandler(
                 is WaypointMissionExecutor.Result.Failure -> respond(clientId, action, false, message = result.message, error = result.error, extra = result.extra)
             }
         }
+    }
+
+    private fun handleSimulatorEnable(clientId: String, action: String, params: JSONObject?) {
+        val latitudeRaw = params?.optDouble("latitude", Double.NaN) ?: Double.NaN
+        val longitudeRaw = params?.optDouble("longitude", Double.NaN) ?: Double.NaN
+        val altitudeRaw = params?.optDouble("altitude", Double.NaN) ?: Double.NaN
+        val satellitesRaw = params?.optInt("satellites", DEFAULT_SIMULATOR_SATELLITES) ?: DEFAULT_SIMULATOR_SATELLITES
+        val frequencyRaw = params?.optInt("frequency_hz", 0) ?: 0
+        val sourceParam = params?.optString("source")?.takeUnless { it.isBlank() }
+
+        if (latitudeRaw.isNaN() || longitudeRaw.isNaN()) {
+            respond(clientId, action, false, message = "simulator_enable requires latitude and longitude")
+            return
+        }
+
+        val satellites = when {
+            satellitesRaw in SIMULATOR_MIN_SATELLITES..SIMULATOR_MAX_SATELLITES -> satellitesRaw
+            satellitesRaw <= 0 -> DEFAULT_SIMULATOR_SATELLITES
+            satellitesRaw < SIMULATOR_MIN_SATELLITES -> SIMULATOR_MIN_SATELLITES
+            else -> SIMULATOR_MAX_SATELLITES
+        }
+        val coordinate = LocationCoordinate2D(latitudeRaw, longitudeRaw)
+        val settings = try {
+            InitializationSettings.createInstance(coordinate, satellites)
+        } catch (e: Exception) {
+            respond(clientId, action, false, message = "Failed to create simulator settings: ${e.message}")
+            return
+        }
+
+        val altitude = altitudeRaw.takeUnless { it.isNaN() }
+        val frequencyHz = frequencyRaw.takeIf { it > 0 }
+        val resolvedSource = sourceParam ?: SIMULATOR_SOURCE_DEFAULT
+
+        val requestSnapshot = mutableMapOf<String, Any?>(
+            "latitude" to latitudeRaw,
+            "longitude" to longitudeRaw,
+            "satellites" to satellites,
+            "source" to resolvedSource
+        )
+        altitude?.let { requestSnapshot["altitude"] = it }
+        frequencyHz?.let { requestSnapshot["frequency_hz"] = it }
+
+        runOnUiThread {
+            try {
+                simulatorBridgeModel?.clearError()
+                SimulatorManager.getInstance().enableSimulator(settings, object : CommonCallbacks.CompletionCallback {
+                    override fun onSuccess() {
+                        simulatorBridgeModel?.recordCommandConfig(
+                            latitude = latitudeRaw,
+                            longitude = longitudeRaw,
+                            altitude = altitude,
+                            satellites = satellites,
+                            frequencyHz = frequencyHz,
+                            source = resolvedSource
+                        )
+                        respond(clientId, action, true, extra = mapOf("requested" to requestSnapshot))
+                    }
+
+                    override fun onFailure(error: IDJIError) {
+                        simulatorBridgeModel?.recordError(simpleErrorMap(error))
+                        respond(
+                            clientId,
+                            action,
+                            false,
+                            error = error,
+                            extra = mapOf("requested" to requestSnapshot)
+                        )
+                    }
+                })
+            } catch (e: Exception) {
+                simulatorBridgeModel?.recordError(mapOf(
+                    "description" to (e.message ?: "simulator enable failed"),
+                    "exception" to e.javaClass.simpleName
+                ))
+                respond(
+                    clientId,
+                    action,
+                    false,
+                    message = e.message ?: "Simulator enable failed",
+                    extra = mapOf("requested" to requestSnapshot)
+                )
+            }
+        }
+    }
+
+    private fun handleSimulatorDisable(clientId: String, action: String) {
+        runOnUiThread {
+            try {
+                val manager = SimulatorManager.getInstance()
+                val enabled = runCatching { manager.isSimulatorEnabled }.getOrDefault(false)
+                if (!enabled) {
+                    respond(clientId, action, true, message = "Simulator already disabled")
+                    return@runOnUiThread
+                }
+
+                simulatorBridgeModel?.clearError()
+                manager.disableSimulator(object : CommonCallbacks.CompletionCallback {
+                    override fun onSuccess() {
+                        respond(clientId, action, true)
+                    }
+
+                    override fun onFailure(error: IDJIError) {
+                        simulatorBridgeModel?.recordError(simpleErrorMap(error))
+                        respond(clientId, action, false, error = error)
+                    }
+                })
+            } catch (e: Exception) {
+                simulatorBridgeModel?.recordError(mapOf(
+                    "description" to (e.message ?: "simulator disable failed"),
+                    "exception" to e.javaClass.simpleName
+                ))
+                respond(clientId, action, false, message = e.message ?: "Simulator disable failed")
+            }
+        }
+    }
+
+    private fun handleWaypointPause(clientId: String, action: String) {
+        val executor = waypointMissionExecutor
+        if (executor == null) {
+            respond(clientId, action, false, message = "Waypoint executor unavailable")
+            return
+        }
+
+        val snapshot = executor.currentMissionSnapshot()
+        val extra = snapshot?.toMutableMap() ?: mutableMapOf<String, Any?>()
+
+        executor.pauseActiveMission(object : CommonCallbacks.CompletionCallback {
+            override fun onSuccess() {
+                respond(clientId, action, true, extra = extra)
+            }
+
+            override fun onFailure(error: IDJIError) {
+                respond(clientId, action, false, error = error, extra = extra)
+            }
+        })
+    }
+
+    private fun handleWaypointResume(clientId: String, action: String) {
+        val executor = waypointMissionExecutor
+        if (executor == null) {
+            respond(clientId, action, false, message = "Waypoint executor unavailable")
+            return
+        }
+
+        val snapshot = executor.currentMissionSnapshot()
+        val extra = snapshot?.toMutableMap() ?: mutableMapOf<String, Any?>()
+
+        executor.resumeActiveMission(object : CommonCallbacks.CompletionCallback {
+            override fun onSuccess() {
+                respond(clientId, action, true, extra = extra)
+            }
+
+            override fun onFailure(error: IDJIError) {
+                respond(clientId, action, false, error = error, extra = extra)
+            }
+        })
+    }
+
+    private fun simpleErrorMap(error: IDJIError): Map<String, Any?> {
+        val map = mutableMapOf<String, Any?>()
+        runCatching { error.errorCode() }.getOrNull()?.let { codeObj ->
+            map["code"] = codeObj.toString()
+            val numeric = runCatching {
+                codeObj.javaClass.methods.firstOrNull { it.name.equals("code", true) && it.parameterCount == 0 }?.invoke(codeObj) as? Number
+            }.getOrNull()
+            numeric?.let { map["code_value"] = it.toInt() }
+        }
+        map["description"] = error.description()?.takeUnless { it.isNullOrBlank() } ?: error.toString()
+        val domain = runCatching {
+            error.javaClass.methods.firstOrNull { it.name.equals("errorDomain", true) && it.parameterCount == 0 }?.invoke(error)
+        }.getOrNull()
+        when (domain) {
+            is Enum<*> -> map["domain"] = domain.name
+            is String -> map["domain"] = domain
+            else -> domain?.let { map["domain"] = it.toString() }
+        }
+        return map
     }
 
     private fun sanitizeKmzFileName(input: String): String {

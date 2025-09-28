@@ -11,7 +11,10 @@ import {
   PreflightStatus,
   TelemetryDiagnosticEntry,
   DeviceStatusInfo,
-  WaypointTimelineEntry
+  WaypointTimelineEntry,
+  SimulatorTelemetry,
+  SimulatorConfigurationSnapshot,
+  SimulatorErrorSnapshot
 } from '../types';
 
 const sanitizeDiagnostic = (entry: any): TelemetryDiagnosticEntry | null => {
@@ -43,6 +46,89 @@ const sanitizeDeviceStatus = (status: any): DeviceStatusInfo | null => {
       ? status.level.toLowerCase()
       : (typeof status.warning_level === 'string' ? status.warning_level.toLowerCase() : undefined),
   };
+};
+
+const sanitizeSimulator = (payload: any): SimulatorTelemetry | undefined => {
+  if (!payload || typeof payload !== 'object') {
+    return undefined;
+  }
+
+  const hasValues = (obj: Record<string, any> | undefined): boolean => {
+    if (!obj) return false;
+    return Object.values(obj).some((value) => {
+      if (value === null || value === undefined) {
+        return false;
+      }
+      if (typeof value === 'number') {
+        return !Number.isNaN(value);
+      }
+      return true;
+    });
+  };
+
+  const prune = <T extends Record<string, any>>(obj: T | undefined): T | undefined => {
+    if (!obj) return undefined;
+    return hasValues(obj) ? obj : undefined;
+  };
+
+  const attitudeRaw = payload.attitude;
+  const attitude = prune({
+    roll: typeof attitudeRaw?.roll === 'number' ? attitudeRaw.roll : undefined,
+    pitch: typeof attitudeRaw?.pitch === 'number' ? attitudeRaw.pitch : undefined,
+    yaw: typeof attitudeRaw?.yaw === 'number' ? attitudeRaw.yaw : undefined,
+  }) as SimulatorTelemetry['attitude'];
+
+  const positionRaw = payload.position;
+  const position = prune({
+    x: typeof positionRaw?.x === 'number' ? positionRaw.x : undefined,
+    y: typeof positionRaw?.y === 'number' ? positionRaw.y : undefined,
+    z: typeof positionRaw?.z === 'number' ? positionRaw.z : undefined,
+  }) as SimulatorTelemetry['position'];
+
+  const locationRaw = payload.location;
+  const location = prune({
+    latitude: typeof locationRaw?.latitude === 'number' ? locationRaw.latitude : undefined,
+    longitude: typeof locationRaw?.longitude === 'number' ? locationRaw.longitude : undefined,
+    altitude: typeof locationRaw?.altitude === 'number' ? locationRaw.altitude : undefined,
+  }) as SimulatorTelemetry['location'];
+
+  const configRaw = payload.configuration;
+  const configuration = prune({
+    latitude: typeof configRaw?.latitude === 'number' ? configRaw.latitude : undefined,
+    longitude: typeof configRaw?.longitude === 'number' ? configRaw.longitude : undefined,
+    altitude: typeof configRaw?.altitude === 'number' ? configRaw.altitude : undefined,
+    satellites: typeof configRaw?.satellites === 'number' ? configRaw.satellites : undefined,
+    frequency_hz: typeof configRaw?.frequency_hz === 'number' ? configRaw.frequency_hz : undefined,
+    source: typeof configRaw?.source === 'string' ? configRaw.source : undefined,
+    timestamp: typeof configRaw?.timestamp === 'number' ? configRaw.timestamp : undefined,
+  }) as SimulatorConfigurationSnapshot | undefined;
+
+  const errorRaw = payload.last_error;
+  const lastError = prune({
+    code: typeof errorRaw?.code === 'string' ? errorRaw.code : undefined,
+    code_value: typeof errorRaw?.code_value === 'number' ? errorRaw.code_value : undefined,
+    description: typeof errorRaw?.description === 'string' ? errorRaw.description : undefined,
+    domain: typeof errorRaw?.domain === 'string' ? errorRaw.domain : undefined,
+  }) as SimulatorErrorSnapshot | undefined;
+
+  const modeRaw = typeof payload.mode === 'string' ? payload.mode.toLowerCase() : undefined;
+  const mode = modeRaw === 'simulator' || modeRaw === 'real' ? (modeRaw as 'simulator' | 'real') : undefined;
+
+  const sanitized: SimulatorTelemetry = {
+    mode,
+    enabled: typeof payload.enabled === 'boolean' ? payload.enabled : undefined,
+    timestamp: typeof payload.timestamp === 'number' ? payload.timestamp : undefined,
+    listener_registered: typeof payload.listener_registered === 'boolean' ? payload.listener_registered : undefined,
+    motors_on: typeof payload.motors_on === 'boolean' ? payload.motors_on : undefined,
+    flying: typeof payload.flying === 'boolean' ? payload.flying : undefined,
+    attitude,
+    position,
+    location,
+    configuration,
+    last_error: lastError,
+  };
+
+  return Object.values(sanitized).some((value) => value !== undefined) ? sanitized : undefined;
 };
 
 export const useBridgeData = () => {
@@ -123,6 +209,9 @@ export const useBridgeData = () => {
                   raw: typeof entry.raw === 'string' ? entry.raw : undefined,
                   label: typeof entry.label === 'string' ? entry.label : undefined,
                   execute_state: typeof entry.execute_state === 'string' ? entry.execute_state : undefined,
+                  pause_reason: typeof entry.pause_reason === 'string' ? entry.pause_reason : undefined,
+                  resume_reason: typeof entry.resume_reason === 'string' ? entry.resume_reason : undefined,
+                  exit_reason: typeof entry.exit_reason === 'string' ? entry.exit_reason : undefined,
                 };
               }
               if (type === 'interrupt') {
@@ -138,6 +227,59 @@ export const useBridgeData = () => {
                   timestamp,
                   error,
                   label: typeof entry.label === 'string' ? entry.label : undefined,
+                };
+              }
+              if (type === 'event') {
+                return {
+                  type: 'event' as const,
+                  timestamp,
+                  event: typeof entry.event === 'string' ? entry.event : undefined,
+                  reason: typeof entry.reason === 'string' ? entry.reason : undefined,
+                  mission_id: typeof entry.mission_id === 'string' ? entry.mission_id : undefined,
+                  wayline_id: typeof entry.wayline_id === 'number' ? entry.wayline_id : undefined,
+                  current_waypoint_index: typeof entry.current_waypoint_index === 'number'
+                    ? entry.current_waypoint_index
+                    : undefined,
+                  label: typeof entry.label === 'string' ? entry.label : undefined,
+                };
+              }
+              if (type === 'breakpoint') {
+                const locationRaw = entry.location;
+                const location = locationRaw && typeof locationRaw === 'object'
+                  ? {
+                      latitude: typeof locationRaw.latitude === 'number' ? locationRaw.latitude : undefined,
+                      longitude: typeof locationRaw.longitude === 'number' ? locationRaw.longitude : undefined,
+                      altitude: typeof locationRaw.altitude === 'number' ? locationRaw.altitude : undefined,
+                    }
+                  : undefined;
+                return {
+                  type: 'breakpoint' as const,
+                  timestamp,
+                  mission_id: typeof entry.mission_id === 'string' ? entry.mission_id : undefined,
+                  wayline_id: typeof entry.wayline_id === 'number' ? entry.wayline_id : undefined,
+                  waypoint_id: typeof entry.waypoint_id === 'number' ? entry.waypoint_id : undefined,
+                  segment_progress: typeof entry.segment_progress === 'number' ? entry.segment_progress : undefined,
+                  recover_action: typeof entry.recover_action === 'string' ? entry.recover_action : undefined,
+                  label: typeof entry.label === 'string' ? entry.label : undefined,
+                  source: typeof entry.source === 'string' ? entry.source : undefined,
+                  location,
+                };
+              }
+              if (type === 'breakpoint_error') {
+                const errorRaw = entry.error;
+                const error = errorRaw && typeof errorRaw === 'object'
+                  ? {
+                      code: typeof errorRaw.code === 'string' ? errorRaw.code : undefined,
+                      description: typeof errorRaw.description === 'string' ? errorRaw.description : undefined,
+                    }
+                  : undefined;
+                return {
+                  type: 'breakpoint_error' as const,
+                  timestamp,
+                  mission_id: typeof entry.mission_id === 'string' ? entry.mission_id : undefined,
+                  label: typeof entry.label === 'string' ? entry.label : undefined,
+                  source: typeof entry.source === 'string' ? entry.source : undefined,
+                  error,
                 };
               }
               return null;
@@ -163,6 +305,7 @@ export const useBridgeData = () => {
           speed: message.ground_speed || message.speed || 0,
           heading: message.heading || 0, // Default if not provided
           waypoint_status: sanitizeWaypointStatus(),
+          simulator: sanitizeSimulator(message.simulator),
         } as TelemetryData;
         
         console.log('🎯 useBridgeData: Setting telemetry data:', mappedTelemetry);
@@ -257,6 +400,10 @@ export const useBridgeData = () => {
           }
           if (message.landing_monitor && typeof message.landing_monitor === 'object') {
             ack.landing_monitor = { ...message.landing_monitor } as any;
+          }
+          const simulatorAck = sanitizeSimulator(message.simulator);
+          if (simulatorAck) {
+            ack.simulator = simulatorAck;
           }
           const history = [...prev.flightCommandLog, ack];
           const MAX_HISTORY = 20;
