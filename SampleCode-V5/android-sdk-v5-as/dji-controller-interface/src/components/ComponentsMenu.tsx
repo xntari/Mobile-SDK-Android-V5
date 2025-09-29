@@ -3,7 +3,7 @@ import { visionPanelControls } from './VisionPanel';
 import { visionRTPanelControls } from './VisionRealtimePanel';
 import { agentPanelControls } from './AgentPanel';
 import { fpvCameraPanelControls, h20nCameraPanelControls } from './CameraPanel';
-import { mapPanelControls, hsiPanelControls, controllerPanelControls, orientationPanelControls, projectionPanelControls, flightCommandsPanelControls } from './panelControls';
+import { mapPanelControls, hsiPanelControls, controllerPanelControls, orientationPanelControls, projectionPanelControls, flightCommandsPanelControls, objectMemoryPanelControls, preflightPanelControls } from './panelControls';
 import {
   getSavedLayouts,
   saveLayout,
@@ -77,6 +77,18 @@ const panelControls: PanelControl[] = [
     title: 'Orientation Debug',
     isVisible: orientationPanelControls.isVisible,
     setVisible: orientationPanelControls.setVisible
+  },
+  {
+    id: 'objectMemory',
+    title: 'Object Memory',
+    isVisible: objectMemoryPanelControls.isVisible,
+    setVisible: objectMemoryPanelControls.setVisible
+  },
+  {
+    id: 'preflight',
+    title: 'Preflight Checklist',
+    isVisible: preflightPanelControls.isVisible,
+    setVisible: preflightPanelControls.setVisible
   },
   {
     id: 'projection',

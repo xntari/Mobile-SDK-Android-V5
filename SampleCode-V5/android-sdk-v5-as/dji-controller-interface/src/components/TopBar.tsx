@@ -2,6 +2,7 @@ import React from 'react';
 import { TopBarProps } from '../types';
 import { SettingsModal } from './SettingsModal';
 import { ComponentsMenu } from './ComponentsMenu';
+import { preflightPanelControls } from './panelControls';
 
 const statusLevelClass = (level?: string | null) => {
   switch ((level || 'normal').toLowerCase()) {
@@ -101,11 +102,15 @@ export const TopBar: React.FC<TopBarProps> = ({
     <div className="h-16 bg-black bg-opacity-90 border-b border-gray-700 flex items-center justify-between px-6 text-sm">
       {/* Left cluster: system status + flight mode */}
       <div className="flex items-center gap-6">
-        <div>
+        <button
+          type="button"
+          className="text-left hover:bg-gray-900/60 rounded px-2 py-1 focus:outline-none focus:ring focus:ring-dji-blue/40"
+          onClick={() => preflightPanelControls.setVisible(true)}
+        >
           <div className={`text-xs uppercase ${statusLevelClass(diagnosticsSeverity)} font-semibold`}>System</div>
           <div className="text-sm text-gray-200 font-medium">{formatStatusLabel(systemStatus?.label)}</div>
           <div className="text-[11px] text-gray-400 max-w-xs truncate">{systemDescription}</div>
-        </div>
+        </button>
         <div>
           <div className="text-xs uppercase text-gray-400">Flight Mode</div>
           <div className="text-sm text-dji-blue font-semibold">{flightMode}</div>

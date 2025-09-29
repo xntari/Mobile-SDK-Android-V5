@@ -431,7 +431,7 @@ export const App: React.FC = () => {
               storageKey="map.panel"
               visibilityEventType="mapPanelVisibilityChange"
             >
-              <MapDisplay />
+              <MapDisplay telemetryData={bridgeData.telemetry} />
             </Panel>
 
             {/* HSI Compass Panel */}

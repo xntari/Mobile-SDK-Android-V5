@@ -7,15 +7,18 @@ Use only standard ascii characters here - don't use ✅  or similar
 > **Transcript logging** - Append the user's instructions and your thought process (with ISO 8601 timestamps) to transcript.txt after every working session so we can reconstruct decision history later.
 ---
 
-## TL;DR (Sep 29 2025 02:28 - workspace, HEAD a9dac908f66c7a5533ebadd768efcb85aac58a97)
+## TL;DR (Sep 29 2025 11:20 - workspace, HEAD a9dac908f66c7a5533ebadd768efcb85aac58a97)
 
 - **Document discipline** - Update this file after every bridge/desktop change. Status, safety checklists, operator notes, and backlog items must always reflect the running code. Never mark a feature complete without field verification.
 - **Transcript discipline** - Keep transcript.txt current: append the latest user instructions and your thought process with ISO 8601 timestamps whenever you touch the project.
 - **Mission planner** - The shared mission planner store feeds the main map, Fly-To panel, Orientation, and HSI; map clicks (stage/waypoint/orbit) auto-populate targets, default altitudes come from set-height or the safety floor, and multi-waypoint plans now execute through the waypoint fallback backend with logging.
+- **Realtime map & video pacing** - Map telemetry now batches through a single requestAnimationFrame cycle (no more per-update `easeTo`), skips recentering while the operator drags, and keeps manual pan smooth; FPV/H20N decoders only throttle when the simulator is running or the panel is hidden so visible feeds stay at full speed.
+- **Panel visibility** - Orientation panel unsubscribes from mission/object stores when hidden, and the shared visibility bus now drives the camera throttles—closing a panel tears subscriptions down immediately.
 - **Fly-To refactor** - Fly-To now fronts the mission planner (defaults, target staging, KMZ import/export). Multi-waypoint runs with RTH/Land finish actions were validated; orbit execution/export still needs work.
-- **Map controls** - Map auto-center now has a manual toggle beside auto-rotate; ctrl+click stages targets while preserving drag-to-pan.
+- **Map controls** - Map auto-center now has a manual toggle beside auto-rotate; click drops a waypoint, Ctrl/⌘+click stages a target, and Option+click adds an orbit without breaking drag-to-pan.
 - **Manual mission tooling** - Desktop Fly-To panel supports map clicks, laser fixes, manual lat/lon entry, mission-wide simulation, and timeline export; validate on hardware before relying on it in the field.
 - **KMZ workflow** - Fly-To loads DJI Pilot-generated KMZ files into the planner for review and export; execution is manual once the plan is inspected.
+- **Performance watch** - Map rAF batching and the initial camera throttle fixes landed; keep profiling long sessions to confirm the dragging jitter is gone and to isolate the remaining decoder-driven CPU spikes (see “Performance & Profiling”).
 - **Field validation focus** - Collect hardware evidence for the 16 Hz keyboard/mouse stream, mission-plan execution (including altitude hold versus security floor), `waypoint_v2` fallback (mission id + KMZ logs), external KMZ execution, auto-mode gating, FlySafe toasts, the new mission simulation workflow, and session exports. Capture CSV/JSON logs, telemetry screenshots, and note any NFZ height bubbles blocking movement.
 - **Recent changes (latest first)**
   1. 2025-09-28 - Multi-waypoint mission plans now run end-to-end (planner → bridge → waypoint fallback), security take-off height clamps plan legs, default altitudes follow set-height or the safety floor, Orientation/HSI render home + next-waypoint arrows, and `KeyK` fires the motor start/shutdown stick macro.
@@ -32,11 +35,11 @@ Use only standard ascii characters here - don't use ✅  or similar
 
   Next
 
-  1. Field-validate the mission planner pipeline (multi-waypoint + Return Home/Land finish) on hardware; capture telemetry/logs and verify orbit behaviour once backend support lands.
-  2. Exercise the refreshed map interactions (drag pan, ctrl+click stage, Shift/Option add) in simulator and hardware; capture telemetry/screenshots showing mission overlays, Orientation arrows, and HSI guidance.
-  3. Profile desktop performance (map update throttling, video gating, worker offload, GPU/OffscreenCanvas settings) to address the slowdowns observed in long sessions; ensure H20N stays disabled in simulator mode.
-  4. Capture bench evidence for the new simulator toggle (enable/disable, telemetry snapshot, command ack) and confirm Fly-To behaviours stay in sync while simulated.
-  5. Define orbit/curved-waypoint parameterisation (radius, dwell, camera heading) for planner entries before enabling production orbit execution/export.
+  1. Map interaction: confirm the throttled telemetry feed + `jumpTo` recentering solve the auto-center/recenter/panning regressions in both idle and in-flight states; capture a short dev:browser trace to prove the renderer stays below ~16 ms and no longer stalls during mouse drags.
+  2. React churn: memoize MapDisplay/Orientation/FPV/H20N and suspend their subscriptions when hidden so telemetry packets don’t re-render closed panels; re-profile to ensure `performWorkUntilDeadline` is no longer dominating the main thread.
+  3. Components menu: add Object Memory and Preflight back to the Components toggle list, and hook the SYSTEM status badge so clicking it opens/previews the Preflight checklist panel.
+  4. Camera pipelines: implement full pacing logic—feeds run at 60 FPS when visible, drop frames (rather than render late) under burst load, and only throttle/stop when the sim is active or the panel is hidden. Goal: eliminate the intermittent “System” (drawImage) spikes without sacrificing real-flight frame rate.
+  5. After the UI stays responsive in long bench sessions, move back to field validation (multi-waypoint + Return Home/Land, orbit behaviour) and capture logs/screens once the mission pipeline is exercised on-aircraft.
 
 ---
 
@@ -282,7 +285,7 @@ Keep this list groomed; link each item to task tracking where applicable.
 - HUD speed/altitude units toggle (m/s ↔︎ mph, meters ↔︎ feet).
 - Battery widget parity with DJI Pilot (dual packs, warnings).
 - Extend manual session exports with full telemetry (altitude, speed, attitude) per frame.
-- Gate FPV/H20N overlays and decode loops when streams are hidden or simulator mode is active; confirm H20N stays idle in simulator sessions.
+- FPV/H20N decode loops now tear down when panels are hidden or the simulator is active; gather long-session traces to confirm the restart path behaves when returning to real flight.
 
 ### 7.4 Simulator enablement
 - Simulator controls (enable/disable with location & satellite presets) ship in the Flight Commands panel; gather bench evidence that telemetry/video gating behaves and capture ack/error logs.
@@ -301,10 +304,10 @@ Keep this list groomed; link each item to task tracking where applicable.
 - Simulator mission regression (upload, start, pause/resume, stop, break-point).
 
 ### 7.7 Performance & Profiling
-- Throttle high-frequency map updates (5–10 Hz) or memoize derived props to reduce `easeTo` churn; pause map animations when auto-center is disabled.
+- Verify the new rAF-driven map update path during long bench sessions (dragging, zoom, live telemetry); capture a fresh trace if jitter returns or if jump-to still competes with manual pans.
 - Move heavy computation (mission preview math, large KMZ parsing) off the renderer main thread via Web Workers/worker_threads.
 - Audit BrowserWindow hardware acceleration/offscreen settings; ensure OffscreenCanvas/WebCodecs are actually engaged when available.
-- Use Chrome DevTools (Performance/Web Vitals, `about:tracing`) to isolate GPU vs CPU bottlenecks and compare frame times with single vs dual video streams.
+- Use Chrome DevTools (Performance/Web Vitals, `about:tracing`) to isolate the remaining FPV/H20N "system" spikes and compare frame times with single vs dual video streams.
 
 ---
 
@@ -321,4 +324,4 @@ During the test, annotate each significant event (command, toast, diagnostic) wi
 
 ---
 Keep conversation history updated in transcript.txt. Read-friendly formatting. Use verbose/full transcript
-_Last updated: Sep 29 2025 - Fly-To panel refactored with mission planner integration, KMZ import/export, and map auto-center toggle; performance profiling queued._
+_Last updated: Sep 29 2025 - Map telemetry now batches via rAF, FPV/H20N throttles respect simulator/visibility state, and performance follow-ups focus on decoder spikes._

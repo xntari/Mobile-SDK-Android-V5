@@ -8,6 +8,9 @@ import { missionPlannerStore } from '../state/missionPlanner';
 import type { MissionWaypointTarget } from '../types/missionPlanner';
 import { computeTargetMetrics } from '../utils/objectMemoryTarget';
 import { OrientationCompass } from './OrientationCompass';
+import { telemetryShallowEqual } from '../utils/telemetryCompare';
+import { orientationPanelControls } from './panelControls';
+import { usePanelVisibility } from '../hooks/usePanelVisibility';
 
 type OrientationPanelProps = {
   telemetry: TelemetryData | null;
@@ -30,35 +33,53 @@ function formatNumber(value?: number, digits = 2): string {
 
 const defaultVector = { x: 0, y: 0, z: -1 };
 
-export const OrientationPanel: React.FC<OrientationPanelProps> = ({ telemetry, sendCommand }) => {
+const OrientationPanelComponent: React.FC<OrientationPanelProps> = ({ telemetry, sendCommand }) => {
+  const panelVisible = usePanelVisibility(
+    orientationPanelControls.isVisible,
+    'orientationPanelVisibilityChange',
+  );
   const [isResetting, setIsResetting] = React.useState(false);
   const [objectTarget, setObjectTarget] = React.useState<ObjectMemoryTargetSelection | null>(() => objectMemoryTargetStore.getCurrent());
   const [missionWaypoint, setMissionWaypoint] = React.useState<MissionWaypointTarget | null>(
     () => missionPlannerStore.getSnapshot().activeWaypoint ?? null,
   );
   const targetMetrics = React.useMemo(
-    () => computeTargetMetrics(telemetry, objectTarget?.anchor, objectTarget?.clusterLabel ?? objectTarget?.clusterId),
-    [telemetry, objectTarget]
+    () => (
+      panelVisible
+        ? computeTargetMetrics(telemetry, objectTarget?.anchor, objectTarget?.clusterLabel ?? objectTarget?.clusterId)
+        : null
+    ),
+    [panelVisible, telemetry, objectTarget]
   );
-  React.useEffect(() => objectMemoryTargetStore.subscribe(setObjectTarget), []);
-  React.useEffect(() => missionPlannerStore.subscribeActiveWaypoint(setMissionWaypoint), []);
+  React.useEffect(() => {
+    if (!panelVisible) {
+      return undefined;
+    }
+    return objectMemoryTargetStore.subscribe(setObjectTarget);
+  }, [panelVisible]);
+  React.useEffect(() => {
+    if (!panelVisible) {
+      return undefined;
+    }
+    return missionPlannerStore.subscribeActiveWaypoint(setMissionWaypoint);
+  }, [panelVisible]);
   const gimbal = telemetry?.gimbals?.find((g) => g.index === 'LEFT_OR_MAIN');
   const aircraftMatrix = React.useMemo(() => {
-    if (!telemetry?.attitude) return null;
+    if (!panelVisible || !telemetry?.attitude) return null;
     const { roll = 0, pitch = 0, yaw = 0 } = telemetry.attitude;
     return rotationMatrixFromEuler({ roll, pitch, yaw });
-  }, [telemetry?.attitude]);
+  }, [panelVisible, telemetry?.attitude]);
 
   const gimbalVector = React.useMemo(() => {
-    if (!aircraftMatrix || !gimbal?.attitude) return null;
+    if (!panelVisible || !aircraftMatrix || !gimbal?.attitude) return null;
     const { pitch = 0, yaw = 0 } = gimbal.attitude;
     const gimbalMatrix = rotationMatrixFromEuler({ roll: 0, pitch, yaw });
     const combined = combineRotationMatrices([aircraftMatrix, gimbalMatrix]);
     return vectorRotate(defaultVector, combined);
-  }, [aircraftMatrix, gimbal?.attitude]);
+  }, [panelVisible, aircraftMatrix, gimbal?.attitude]);
 
   const missionMetrics = React.useMemo(() => {
-    if (!telemetry?.location || !missionWaypoint) {
+    if (!panelVisible || !telemetry?.location || !missionWaypoint) {
       return null;
     }
 
@@ -92,14 +113,14 @@ export const OrientationPanel: React.FC<OrientationPanelProps> = ({ telemetry, s
       : null;
 
     return { distance, bearing, altitudeDelta };
-  }, [telemetry?.location?.latitude, telemetry?.location?.longitude, telemetry?.altitude, missionWaypoint?.latitude, missionWaypoint?.longitude, missionWaypoint?.altitude]);
+  }, [panelVisible, telemetry?.location?.latitude, telemetry?.location?.longitude, telemetry?.altitude, missionWaypoint?.latitude, missionWaypoint?.longitude, missionWaypoint?.altitude]);
 
   // Calculate ground point projection for center of image
   const groundPoint = React.useMemo(() => {
-    if (!telemetry) return null;
+    if (!panelVisible || !telemetry) return null;
     const point = projectRayToGround(telemetry, 640, 360, 1280, 720, false);
     return point;
-  }, [telemetry]);
+  }, [panelVisible, telemetry]);
 
   const handleZeroGimbal = async () => {
     if (!sendCommand || isResetting) return;
@@ -120,6 +141,10 @@ export const OrientationPanel: React.FC<OrientationPanelProps> = ({ telemetry, s
       setTimeout(() => setIsResetting(false), 2000); // Increased to 2 seconds for longer operation
     }
   };
+
+  if (!panelVisible) {
+    return null;
+  }
 
   return (
     <Panel
@@ -237,3 +262,9 @@ export const OrientationPanel: React.FC<OrientationPanelProps> = ({ telemetry, s
     </Panel>
   );
 };
+
+const orientationPropsEqual = (prev: OrientationPanelProps, next: OrientationPanelProps) => {
+  return prev.sendCommand === next.sendCommand && telemetryShallowEqual(prev.telemetry, next.telemetry);
+};
+
+export const OrientationPanel = React.memo(OrientationPanelComponent, orientationPropsEqual);

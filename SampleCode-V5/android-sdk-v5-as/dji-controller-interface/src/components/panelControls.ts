@@ -7,3 +7,5 @@ export const controllerPanelControls = createPanelControls('controller.panel', '
 export const orientationPanelControls = createPanelControls('orientation.panel', 'orientationPanelVisibilityChange');
 export const projectionPanelControls = createPanelControls('projectionControls.panel', 'projectionControlsVisibilityChange');
 export const flightCommandsPanelControls = createPanelControls('flight.commands.panel', 'flightCommandsPanelVisibilityChange');
+export const objectMemoryPanelControls = createPanelControls('objectMemory.panel', 'objectMemoryPanelVisibilityChange');
+export const preflightPanelControls = createPanelControls('preflight.panel', 'preflightPanelVisibilityChange');

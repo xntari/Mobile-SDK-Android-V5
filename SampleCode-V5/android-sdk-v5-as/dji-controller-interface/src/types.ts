@@ -514,6 +514,7 @@ export interface HSICompassProps {
 
 export interface MapDisplayProps {
   flightPath?: Array<{ latitude: number; longitude: number }>;
+  telemetryData?: TelemetryData | null;
   // Note: Map now uses direct electronAPI listeners for telemetry like camera components
 }
 

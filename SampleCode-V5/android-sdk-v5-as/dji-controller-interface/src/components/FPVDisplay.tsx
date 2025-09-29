@@ -21,31 +21,33 @@ import {
   type LiveViewPinPoint,
 } from "../agent/cameraProjectionClient";
 import { projectionModeStore } from "../state/projectionMode";
+import { telemetryShallowEqual } from "../utils/telemetryCompare";
+import { usePanelVisibility } from "../hooks/usePanelVisibility";
+import { fpvCameraPanelControls } from "./CameraPanel";
 
 export interface FPVDisplayRef {
   getSnapshot: () => Promise<string>;
 }
 
-export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(
-  (
-    {
-      width,
-      height,
-      className = "",
-      children,
-      telemetryData,
-      visionDetections = [],
-      agentDetections = [],
-      visionMasks = [],
-      visionKeypoints = [],
-      maskOpacity = 0.25,
-      colorizeById = false,
-      detectThickness = 1,
-      visionHeatmap = null,
-      visionHeatmapOpacity = 0.35,
-    },
-    ref,
-  ) => {
+const FPVDisplayComponent = (
+  {
+    width,
+    height,
+    className = "",
+    children,
+    telemetryData,
+    visionDetections = [],
+    agentDetections = [],
+    visionMasks = [],
+    visionKeypoints = [],
+    maskOpacity = 0.25,
+    colorizeById = false,
+    detectThickness = 1,
+    visionHeatmap = null,
+    visionHeatmapOpacity = 0.35,
+  }: FPVDisplayProps,
+  ref: React.ForwardedRef<FPVDisplayRef>,
+) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const videoDecoderRef = useRef<VideoDecoder | null>(null);
@@ -89,6 +91,14 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(
       null,
     );
     const simulatorActive = telemetryData?.simulator?.enabled ?? false;
+    const panelVisible = usePanelVisibility(
+      fpvCameraPanelControls.isVisible,
+      "fpvCameraPanelVisibilityChange",
+    );
+    const lastRenderTimeRef = useRef<number>(0);
+    const frameIntervalRef = useRef<number>(16);
+    const shouldThrottle = simulatorActive || !panelVisible;
+    frameIntervalRef.current = shouldThrottle ? 200 : 16;
 
     // HUD toggle
     const [hudEnabled, setHudEnabled] = useState<boolean>(() => {
@@ -586,6 +596,7 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(
         clearDecoderRestartTimer();
         destroyDecoder();
         window.electronAPI.removeAllListeners("fpv-video-frame");
+        lastRenderTimeRef.current = 0;
       };
 
       if (simulatorActive) {
@@ -681,6 +692,14 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(
           videoDecoderRef.current = new VideoDecoder({
             output: (frame: VideoFrame) => {
               try {
+                const interval = frameIntervalRef.current;
+                const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                if (interval > 0 && now - lastRenderTimeRef.current < interval) {
+                  frame.close();
+                  return;
+                }
+                lastRenderTimeRef.current = now;
+
                 // Update video dimensions if changed
                 if (
                   videoDimensions.width !== frame.codedWidth ||
@@ -1916,7 +1935,28 @@ export const FPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(
         </div>
       </div>
     );
-  },
-);
+  };
 
-FPVDisplay.displayName = "FPVDisplay";
+FPVDisplayComponent.displayName = "FPVDisplayComponent";
+
+const ForwardFPVDisplay = forwardRef<FPVDisplayRef, FPVDisplayProps>(FPVDisplayComponent);
+ForwardFPVDisplay.displayName = "FPVDisplay";
+
+const fpvPropsEqual = (prev: FPVDisplayProps, next: FPVDisplayProps) => {
+  if (prev.width !== next.width || prev.height !== next.height) return false;
+  if (prev.className !== next.className) return false;
+  if (prev.maskOpacity !== next.maskOpacity) return false;
+  if (prev.colorizeById !== next.colorizeById) return false;
+  if (prev.detectThickness !== next.detectThickness) return false;
+  if (prev.visionHeatmapOpacity !== next.visionHeatmapOpacity) return false;
+  if (prev.visionHeatmap !== next.visionHeatmap) return false;
+  if (prev.children !== next.children) return false;
+  if (prev.visionDetections !== next.visionDetections) return false;
+  if (prev.agentDetections !== next.agentDetections) return false;
+  if (prev.visionMasks !== next.visionMasks) return false;
+  if (prev.visionKeypoints !== next.visionKeypoints) return false;
+  if (!telemetryShallowEqual(prev.telemetryData ?? null, next.telemetryData ?? null)) return false;
+  return true;
+};
+
+export const FPVDisplay = React.memo(ForwardFPVDisplay, fpvPropsEqual);

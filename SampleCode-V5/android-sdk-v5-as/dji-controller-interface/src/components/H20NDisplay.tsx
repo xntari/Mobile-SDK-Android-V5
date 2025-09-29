@@ -22,6 +22,9 @@ import {
 } from "../agent/cameraProjectionClient";
 import { normalizeAngleDeg, shortestAngleDiffDeg } from "../utils/angleUtils";
 import { projectionModeStore } from "../state/projectionMode";
+import { telemetryShallowEqual } from "../utils/telemetryCompare";
+import { usePanelVisibility } from "../hooks/usePanelVisibility";
+import { h20nCameraPanelControls } from "./CameraPanel";
 
 export interface H20NDisplayRef {
   getSnapshot: () => Promise<string>;
@@ -36,26 +39,25 @@ interface ClickIndicator {
   message?: string;
 }
 
-export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(
-  (
-    {
-      width,
-      height,
-      className = "",
-      children,
-      telemetryData,
-      visionDetections = [],
-      agentDetections = [],
-      visionMasks = [],
-      visionKeypoints = [],
-      maskOpacity = 0.25,
-      colorizeById = false,
-      detectThickness = 1,
-      visionHeatmap = null,
-      visionHeatmapOpacity = 0.35,
-    },
-    ref,
-  ) => {
+const H20NDisplayComponent = (
+  {
+    width,
+    height,
+    className = "",
+    children,
+    telemetryData,
+    visionDetections = [],
+    agentDetections = [],
+    visionMasks = [],
+    visionKeypoints = [],
+    maskOpacity = 0.25,
+    colorizeById = false,
+    detectThickness = 1,
+    visionHeatmap = null,
+    visionHeatmapOpacity = 0.35,
+  }: H20NDisplayProps,
+  ref: React.ForwardedRef<H20NDisplayRef>,
+) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const videoDecoderRef = useRef<VideoDecoder | null>(null);
@@ -98,6 +100,14 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(
       null,
     );
     const simulatorActive = telemetryData?.simulator?.enabled ?? false;
+    const panelVisible = usePanelVisibility(
+      h20nCameraPanelControls.isVisible,
+      "h20nCameraPanelVisibilityChange",
+    );
+    const lastRenderTimeRef = useRef<number>(0);
+    const frameIntervalRef = useRef<number>(16);
+    const shouldThrottle = simulatorActive || !panelVisible;
+    frameIntervalRef.current = shouldThrottle ? 200 : 16;
     const [clickIndicators, setClickIndicators] = useState<ClickIndicator[]>(
       [],
     );
@@ -146,19 +156,30 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(
     const zoomDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     useEffect(() => {
+      if (!panelVisible) {
+        return () => {};
+      }
       const unsubscribe = objectMemoryTargetStore.subscribe(setObjectTarget);
-      return unsubscribe;
-    }, [simulatorActive]);
+      return () => {
+        unsubscribe();
+      };
+    }, [panelVisible, simulatorActive]);
 
     // Clear vision boxes when camera moves (any gimbal command updates) - handled by parent App component now
 
     React.useEffect(() => {
+      if (!panelVisible) {
+        return;
+      }
       if (typeof telemetryData?.camera_optics?.zoom_ratio === "number") {
         setZoomValue(telemetryData.camera_optics.zoom_ratio);
       }
-    }, [telemetryData?.camera_optics?.zoom_ratio]);
+    }, [panelVisible, telemetryData?.camera_optics?.zoom_ratio]);
 
     React.useEffect(() => {
+      if (!panelVisible) {
+        return;
+      }
       const lens = telemetryData?.camera_optics?.lens;
       const lensType = telemetryData?.camera_optics?.lens_type;
       const source = lensType || lens || "";
@@ -172,7 +193,7 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(
       if (normalized !== selectedLens) {
         setSelectedLens(normalized);
       }
-    }, [telemetryData?.camera_optics?.lens, selectedLens]);
+    }, [panelVisible, telemetryData?.camera_optics?.lens, selectedLens]);
 
     React.useEffect(
       () => () => {
@@ -1068,7 +1089,22 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(
         clearDecoderRestartTimer();
         destroyDecoder();
         window.electronAPI.removeAllListeners("secondary-video-frame");
+        lastRenderTimeRef.current = 0;
       };
+
+      if (!panelVisible) {
+        teardownAll();
+        const canvas = canvasRef.current;
+        const ctx = canvas?.getContext("2d");
+        if (canvas && ctx) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+        setVideoStatus("waiting");
+        setFrameStats({ frames: 0, totalBytes: 0, lastFrame: 0, decodedFrames: 0 });
+        return () => {
+          teardownAll();
+        };
+      }
 
       if (simulatorActive) {
         teardownAll();
@@ -1163,6 +1199,14 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(
           videoDecoderRef.current = new VideoDecoder({
             output: (frame: VideoFrame) => {
               try {
+                const interval = frameIntervalRef.current;
+                const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                if (interval > 0 && now - lastRenderTimeRef.current < interval) {
+                  frame.close();
+                  return;
+                }
+                lastRenderTimeRef.current = now;
+
                 // Update video dimensions if changed
                 if (
                   videoDimensions.width !== frame.codedWidth ||
@@ -1507,10 +1551,10 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(
       // Listen for secondary video frames from main process
       (window.electronAPI as any).onSecondaryVideoFrame(handleVideoFrame);
 
-      return () => {
-        teardownAll();
-      };
-    }, []);
+    return () => {
+      teardownAll();
+    };
+  }, [panelVisible, simulatorActive]);
 
     const getStatusOverlay = () => {
       switch (videoStatus) {
@@ -2498,7 +2542,28 @@ export const H20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(
         </div>
       </div>
     );
-  },
-);
+  };
 
-H20NDisplay.displayName = "H20NDisplay";
+H20NDisplayComponent.displayName = "H20NDisplayComponent";
+
+const ForwardH20NDisplay = forwardRef<H20NDisplayRef, H20NDisplayProps>(H20NDisplayComponent);
+ForwardH20NDisplay.displayName = "H20NDisplay";
+
+const h20nPropsEqual = (prev: H20NDisplayProps, next: H20NDisplayProps) => {
+  if (prev.width !== next.width || prev.height !== next.height) return false;
+  if (prev.className !== next.className) return false;
+  if (prev.maskOpacity !== next.maskOpacity) return false;
+  if (prev.colorizeById !== next.colorizeById) return false;
+  if (prev.detectThickness !== next.detectThickness) return false;
+  if (prev.visionHeatmapOpacity !== next.visionHeatmapOpacity) return false;
+  if (prev.visionHeatmap !== next.visionHeatmap) return false;
+  if (prev.children !== next.children) return false;
+  if (prev.visionDetections !== next.visionDetections) return false;
+  if (prev.agentDetections !== next.agentDetections) return false;
+  if (prev.visionMasks !== next.visionMasks) return false;
+  if (prev.visionKeypoints !== next.visionKeypoints) return false;
+  if (!telemetryShallowEqual(prev.telemetryData ?? null, next.telemetryData ?? null)) return false;
+  return true;
+};
+
+export const H20NDisplay = React.memo(ForwardH20NDisplay, h20nPropsEqual);

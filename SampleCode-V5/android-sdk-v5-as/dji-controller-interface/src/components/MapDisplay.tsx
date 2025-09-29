@@ -1,7 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { MapDisplayProps, TelemetryData } from '../types';
+import { MapDisplayProps } from '../types';
+import { telemetryShallowEqual } from '../utils/telemetryCompare';
 import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
 import { computeTargetMetrics } from '../utils/objectMemoryTarget';
 import { missionPlannerStore } from '../state/missionPlanner';
@@ -23,6 +24,29 @@ const needsCenterUpdate = (map: maplibregl.Map, lon: number, lat: number) => {
     Math.abs(current.lat - lat) > CENTER_EPSILON_DEGREES ||
     Math.abs(current.lng - lon) > CENTER_EPSILON_DEGREES
   );
+};
+
+const normalizeBearing = (value: number) => {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  let bearing = value % 360;
+  if (bearing < 0) {
+    bearing += 360;
+  }
+  return bearing;
+};
+
+const bearingDelta = (a: number, b: number) => {
+  const diff = ((a - b + 540) % 360) - 180;
+  return Math.abs(diff);
+};
+
+type MapTelemetryUpdate = {
+  telemetry: MapDisplayProps['telemetryData'];
+  targetMetrics: ReturnType<typeof computeTargetMetrics>;
+  autoCenter: boolean;
+  autoRotate: boolean;
 };
 
 const ORBIT_COLORS = {
@@ -53,6 +77,8 @@ const LAND_COLORS = {
   shadow: '0 0 4px rgba(185, 28, 28, 0.35)',
 };
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
 const createPlanMarkerElement = (label: string, kind?: string, highlight = false) => {
   const element = document.createElement('div');
   element.className = 'map-plan-marker';
@@ -80,8 +106,9 @@ const createPlanMarkerElement = (label: string, kind?: string, highlight = false
   return element;
 };
 
-export const MapDisplay: React.FC<MapDisplayProps> = ({
-  flightPath = []
+const MapDisplayComponent: React.FC<MapDisplayProps> = ({
+  flightPath = [],
+  telemetryData: telemetryDataProp = null,
 }) => {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -91,13 +118,17 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
   const manualTargetMarkerRef = useRef<maplibregl.Marker | null>(null);
   const activeWaypointMarkerRef = useRef<maplibregl.Marker | null>(null);
   const planMarkerRefs = useRef<Map<string, maplibregl.Marker>>(new Map());
+  const animationFrameRef = useRef<number | null>(null);
+  const telemetryStateRef = useRef<MapTelemetryUpdate | null>(null);
+  const userInteractingRef = useRef(false);
+  const aircraftArrowRef = useRef<SVGSVGElement | null>(null);
+  const lastMapBearingRef = useRef<number | null>(null);
+  const lastArrowRotationRef = useRef<number | null>(null);
   const initialCenterAppliedRef = useRef(false);
   const manualTargetPanRef = useRef<{ latitude: number; longitude: number } | null>(null);
   const planIdsRef = useRef<Set<string>>(new Set());
   const [mapReady, setMapReady] = useState(false);
-
-  // Direct telemetry data state - updated via electronAPI listener like camera components
-  const [telemetryData, setTelemetryData] = useState<TelemetryData | null>(null);
+  const telemetryData = telemetryDataProp ?? null;
   const [objectTarget, setObjectTarget] = useState<ObjectMemoryTargetSelection | null>(() => objectMemoryTargetStore.getCurrent());
   const [missionPlan, setMissionPlan] = useState<PlannedMissionEntry[]>(() => missionPlannerStore.getSnapshot().plan);
   const [manualTarget, setManualTarget] = useState<ManualTargetState | null>(() => missionPlannerStore.getSnapshot().manualTarget);
@@ -112,11 +143,7 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
     }
   });
 
-  const autoCenterEnabled = React.useMemo(() => {
-    const missionState = telemetryData?.waypoint_status?.state?.toLowerCase();
-    const missionActive = missionState ? !['ready', 'idle', 'unknown', 'not_ready', 'paused'].includes(missionState) : false;
-    return autoCenter && Boolean(telemetryData?.motors_on || missionActive);
-  }, [telemetryData?.motors_on, telemetryData?.waypoint_status?.state, autoCenter]);
+  const autoCenterEnabled = autoCenter;
 
   useEffect(() => {
     const unsubscribe = objectMemoryTargetStore.subscribe(setObjectTarget);
@@ -208,16 +235,25 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
 
   const mapInfo = getMapInfo();
 
+  const lastCenterRef = useRef<[number, number] | null>(null);
+
   const handleRecenter = React.useCallback(() => {
     const map = mapRef.current;
     if (!map) {
       return;
     }
     const target = telemetryData?.location ?? telemetryData?.home_location;
-    if (!target || !Number.isFinite(target.latitude) || !Number.isFinite(target.longitude)) {
+    let center: [number, number] | null = null;
+    if (target && Number.isFinite(target.latitude) && Number.isFinite(target.longitude)) {
+      center = [target.longitude, target.latitude];
+    } else if (lastCenterRef.current) {
+      center = lastCenterRef.current;
+    }
+    if (!center) {
       return;
     }
-    map.easeTo({ center: [target.longitude, target.latitude], duration: 600, essential: true });
+    map.easeTo({ center, duration: 220, essential: true, easing: (t) => t });
+    lastCenterRef.current = center;
   }, [telemetryData?.location?.latitude, telemetryData?.location?.longitude, telemetryData?.home_location?.latitude, telemetryData?.home_location?.longitude]);
 
   // Initialize map
@@ -259,11 +295,46 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
       setMapReady(true);
     });
 
+    const markInteractionStart = () => {
+      userInteractingRef.current = true;
+    };
+    const markInteractionEnd = () => {
+      userInteractingRef.current = false;
+    };
+
+    map.on('dragstart', markInteractionStart);
+    map.on('dragend', markInteractionEnd);
+    map.on('rotatestart', markInteractionStart);
+    map.on('rotateend', markInteractionEnd);
+    map.on('pitchstart', markInteractionStart);
+    map.on('pitchend', markInteractionEnd);
+    map.on('zoomstart', markInteractionStart);
+    map.on('zoomend', markInteractionEnd);
+    map.on('moveend', markInteractionEnd);
+
     return () => {
+      map.off('dragstart', markInteractionStart);
+      map.off('dragend', markInteractionEnd);
+      map.off('rotatestart', markInteractionStart);
+      map.off('rotateend', markInteractionEnd);
+      map.off('pitchstart', markInteractionStart);
+      map.off('pitchend', markInteractionEnd);
+      map.off('zoomstart', markInteractionStart);
+      map.off('zoomend', markInteractionEnd);
+      map.off('moveend', markInteractionEnd);
+
       if (mapRef.current) {
         mapRef.current.remove();
       }
+      userInteractingRef.current = false;
+      if (animationFrameRef.current !== null) {
+        cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
       aircraftMarkerRef.current = null;
+      aircraftArrowRef.current = null;
+      lastMapBearingRef.current = null;
+      lastArrowRotationRef.current = null;
       homeMarkerRef.current = null;
       targetMarkerRef.current = null;
     };
@@ -275,11 +346,28 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
 
     const handleClick = (event: maplibregl.MapMouseEvent) => {
       if (!event?.lngLat) return;
-      const pointerEvent = event.originalEvent as MouseEvent | undefined;
+      const pointerEvent = event.originalEvent as MouseEvent | PointerEvent | undefined;
+      if (pointerEvent && pointerEvent.button !== 0) {
+        return;
+      }
+
       const clampedLat = clampLat(event.lngLat.lat);
       const clampedLon = clampLon(event.lngLat.lng);
 
-      if (pointerEvent?.altKey || pointerEvent?.metaKey) {
+      const wantsOrbit = Boolean(pointerEvent?.altKey);
+      const wantsStageTarget = Boolean(pointerEvent?.ctrlKey || pointerEvent?.metaKey);
+      const wantsWaypoint = Boolean(pointerEvent?.shiftKey || (!wantsOrbit && !wantsStageTarget));
+
+      if (wantsStageTarget) {
+        missionPlannerStore.requestStageTarget({
+          latitude: clampedLat,
+          longitude: clampedLon,
+          source: 'map',
+        });
+        return;
+      }
+
+      if (wantsOrbit) {
         missionPlannerStore.requestAddWaypoint({
           latitude: clampedLat,
           longitude: clampedLon,
@@ -289,20 +377,11 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
         return;
       }
 
-      if (pointerEvent?.shiftKey) {
+      if (wantsWaypoint) {
         missionPlannerStore.requestAddWaypoint({
           latitude: clampedLat,
           longitude: clampedLon,
           kind: 'waypoint',
-          source: 'map',
-        });
-        return;
-      }
-
-      if (pointerEvent?.ctrlKey) {
-        missionPlannerStore.requestStageTarget({
-          latitude: clampedLat,
-          longitude: clampedLon,
           source: 'map',
         });
       }
@@ -315,149 +394,109 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
     };
   }, [mapReady]);
 
-  // Direct electronAPI listener for telemetry data like camera components
-  useEffect(() => {
-    if (!window.electronAPI || !(window.electronAPI as any).onBridgeData) {
-      console.warn('⚠️ electronAPI not available for Map telemetry updates');
+  const applyTelemetryUpdate = useCallback(() => {
+    animationFrameRef.current = null;
+    if (!mapReady) {
       return;
     }
 
-    const handleTelemetryData = (message: any) => {
-      if (message.type === 'telemetry_data' && message.location) {
-        // Convert yaw (-180 to +180) to compass heading (0 to 360)
-        const convertYawToCompass = (yaw: number): number => {
-          let compass = yaw;
-          if (compass < 0) compass += 360;
-          return compass;
-        };
-
-        // Calculate bearing from aircraft to home using great circle formula
-        const calculateBearing = (from: any, to: any): number => {
-          if (!from || !to) return 0;
-
-          const lat1 = from.latitude * Math.PI / 180;
-          const lat2 = to.latitude * Math.PI / 180;
-          const deltaLng = (to.longitude - from.longitude) * Math.PI / 180;
-
-          const y = Math.sin(deltaLng) * Math.cos(lat2);
-          const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLng);
-
-          let bearing = Math.atan2(y, x) * 180 / Math.PI;
-          return (bearing + 360) % 360;
-        };
-
-        const rawYaw = message.attitude?.yaw || message.compass_heading || message.heading || 0;
-        const trueCompassHeading = convertYawToCompass(rawYaw);
-        const bearingToHome = calculateBearing(message.location, message.home_location);
-
-        const mappedTelemetry = {
-          ...message,
-          speed: message.ground_speed || message.speed || 0,
-          heading: trueCompassHeading,
-          attitude: message.attitude || { pitch: 0, roll: 0, yaw: 0 },
-          compass_heading: trueCompassHeading,
-          home_bearing: bearingToHome,
-        } as TelemetryData;
-
-        setTelemetryData(mappedTelemetry);
-      }
-    };
-
-    const listener = (message: any) => {
-      handleTelemetryData(message);
-    };
-
-    (window.electronAPI as any).onBridgeData(listener);
-
-    return () => {
-      // Cleanup would go here if electronAPI supports removeListener
-      if (window.electronAPI && (window.electronAPI as any).removeAllListeners) {
-        try {
-          (window.electronAPI as any).removeAllListeners('bridge-data-map');
-        } catch (error) {
-          // Ignore cleanup errors
-        }
-      }
-    };
-  }, []);
-
-  // Removed dual data source system - using props only
-
-  // Update map center and markers when location changes
-  useEffect(() => {
-    if (!mapRef.current || !mapReady) return;
-
     const map = mapRef.current;
-    const aircraftLocation = telemetryData?.location;
-    const homeLocation = telemetryData?.home_location;
-    const compassHeading = telemetryData?.compass_heading || telemetryData?.heading || 0;
-
-    // Center map on aircraft if available, otherwise on home
-    let targetCenter: [number, number] | null = null;
-    if (!initialCenterAppliedRef.current) {
-      const initialLocation = aircraftLocation || homeLocation;
-      if (initialLocation && Number.isFinite(initialLocation.longitude) && Number.isFinite(initialLocation.latitude)) {
-        targetCenter = [initialLocation.longitude, initialLocation.latitude];
-      }
-    } else if (autoCenterEnabled && aircraftLocation && Number.isFinite(aircraftLocation.longitude) && Number.isFinite(aircraftLocation.latitude)) {
-      targetCenter = [aircraftLocation.longitude, aircraftLocation.latitude];
+    const payload = telemetryStateRef.current;
+    if (!map || !payload) {
+      return;
     }
 
-    if (targetCenter) {
-      if (!initialCenterAppliedRef.current) {
-        map.jumpTo({ center: targetCenter });
-        initialCenterAppliedRef.current = true;
-      } else if (needsCenterUpdate(map, targetCenter[0], targetCenter[1])) {
-        map.jumpTo({ center: targetCenter });
+    const { telemetry, targetMetrics: targetMetricsSnapshot, autoCenter, autoRotate: autoRotateSnapshot } = payload;
+    const aircraftLocation = telemetry?.location;
+    const homeLocation = telemetry?.home_location;
+    const compassHeading = normalizeBearing(
+      typeof telemetry?.compass_heading === 'number'
+        ? telemetry.compass_heading
+        : typeof telemetry?.heading === 'number'
+          ? telemetry.heading
+          : 0,
+    );
+
+    const isFiniteCoordinate = (coord?: { latitude?: number | null; longitude?: number | null } | null) => (
+      coord ? Number.isFinite(coord.latitude) && Number.isFinite(coord.longitude) : false
+    );
+
+    const tryCenter = (lon: number, lat: number, animate: boolean) => {
+      if (!needsCenterUpdate(map, lon, lat)) {
+        return;
       }
-    }
-
-    // Update aircraft marker position and rotation
-    if (aircraftLocation) {
-      if (aircraftMarkerRef.current) {
-        // Update existing marker position and rotation
-        aircraftMarkerRef.current.setLngLat([aircraftLocation.longitude, aircraftLocation.latitude]);
-
-        const aircraftEl = aircraftMarkerRef.current.getElement();
-        if (aircraftEl) {
-          // Arrow rotation depends on mode
-          aircraftEl.style.transform = `rotate(0deg)`;  // Never rotate container
-          const arrowRotation = autoRotate ? 0 : compassHeading;  // Auto-rotate: point up, Fixed north: show heading
-          aircraftEl.innerHTML = `
-            <svg width="24" height="24" viewBox="0 0 16 16" style="fill: #ef4444; transform: rotate(${arrowRotation}deg);">
-              <path d="M8 2 L12 10 L8 8 L4 10 Z"/>
-            </svg>
-          `;
-        }
+      const center = [lon, lat] as [number, number];
+      if (animate) {
+        map.easeTo({ center, duration: 220, easing: (t) => t, essential: true });
       } else {
-        // Create new aircraft marker
-        const aircraftEl = document.createElement('div');
-        aircraftEl.style.width = '30px';
-        aircraftEl.style.height = '30px';
-        aircraftEl.style.fontSize = '24px';
-        aircraftEl.style.color = '#ef4444';
-        aircraftEl.style.textShadow = '0 0 3px rgba(0,0,0,0.8)';
-        aircraftEl.style.display = 'flex';
-        aircraftEl.style.alignItems = 'center';
-        aircraftEl.style.justifyContent = 'center';
-
-        // Arrow rotation depends on mode
-        aircraftEl.style.transform = `rotate(0deg)`;  // Never rotate container
-        const arrowRotation = autoRotate ? 0 : compassHeading;  // Auto-rotate: point up, Fixed north: show heading
-        aircraftEl.innerHTML = `
-          <svg width="24" height="24" viewBox="0 0 16 16" style="fill: #ef4444; transform: rotate(${arrowRotation}deg);">
-            <path d="M8 2 L12 10 L8 8 L4 10 Z"/>
-          </svg>
-        `;
-
-        aircraftMarkerRef.current = new maplibregl.Marker({ element: aircraftEl })
-          .setLngLat([aircraftLocation.longitude, aircraftLocation.latitude])
-          .addTo(map);
+        map.jumpTo({ center });
       }
+      lastCenterRef.current = center;
+    };
+
+    if (!initialCenterAppliedRef.current) {
+      let initialTarget: [number, number] | null = null;
+      if (isFiniteCoordinate(aircraftLocation)) {
+        initialTarget = [aircraftLocation!.longitude!, aircraftLocation!.latitude!];
+      } else if (isFiniteCoordinate(homeLocation)) {
+        initialTarget = [homeLocation!.longitude!, homeLocation!.latitude!];
+      }
+      if (initialTarget) {
+        map.jumpTo({ center: initialTarget });
+        initialCenterAppliedRef.current = true;
+        lastCenterRef.current = initialTarget;
+      }
+    } else if (
+      autoCenter &&
+      isFiniteCoordinate(aircraftLocation) &&
+      !userInteractingRef.current
+    ) {
+      tryCenter(aircraftLocation!.longitude!, aircraftLocation!.latitude!, true);
     }
 
-    // Update home marker
-    if (homeLocation) {
+    const ensureAircraftMarker = (lng: number, lat: number) => {
+      if (!aircraftMarkerRef.current) {
+        const container = document.createElement('div');
+        container.style.width = '36px';
+        container.style.height = '36px';
+        container.style.display = 'flex';
+        container.style.alignItems = 'center';
+        container.style.justifyContent = 'center';
+
+        const svg = document.createElementNS(SVG_NS, 'svg');
+        svg.setAttribute('width', '32');
+        svg.setAttribute('height', '32');
+        svg.setAttribute('viewBox', '0 0 16 16');
+        svg.style.fill = '#ef4444';
+        svg.style.transformOrigin = '50% 50%';
+        svg.style.filter = 'drop-shadow(0 0 3px rgba(0, 0, 0, 0.6))';
+
+        const path = document.createElementNS(SVG_NS, 'path');
+        path.setAttribute('d', 'M8 1 L13 13 L8 10 L3 13 Z');
+        svg.appendChild(path);
+        container.appendChild(svg);
+
+        aircraftArrowRef.current = svg;
+        aircraftMarkerRef.current = new maplibregl.Marker({ element: container })
+          .setLngLat([lng, lat])
+          .addTo(map);
+      } else {
+        aircraftMarkerRef.current.setLngLat([lng, lat]);
+      }
+    };
+
+    if (isFiniteCoordinate(aircraftLocation)) {
+      ensureAircraftMarker(aircraftLocation!.longitude!, aircraftLocation!.latitude!);
+    }
+
+    const desiredArrowRotation = autoRotateSnapshot ? 0 : compassHeading;
+    const arrowSvg = aircraftArrowRef.current;
+    if (arrowSvg && (lastArrowRotationRef.current == null || bearingDelta(normalizeBearing(desiredArrowRotation), normalizeBearing(lastArrowRotationRef.current)) > 0.5)) {
+      arrowSvg.style.transform = `rotate(${desiredArrowRotation}deg)`;
+      lastArrowRotationRef.current = normalizeBearing(desiredArrowRotation);
+    }
+
+    if (isFiniteCoordinate(homeLocation)) {
       if (!homeMarkerRef.current) {
         const homeEl = document.createElement('div');
         homeEl.style.width = '12px';
@@ -467,15 +506,21 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
         homeEl.style.border = '2px solid white';
 
         homeMarkerRef.current = new maplibregl.Marker({ element: homeEl })
-          .setLngLat([homeLocation.longitude, homeLocation.latitude])
+          .setLngLat([homeLocation!.longitude!, homeLocation!.latitude!])
           .addTo(map);
       } else {
-        homeMarkerRef.current.setLngLat([homeLocation.longitude, homeLocation.latitude]);
+        homeMarkerRef.current.setLngLat([homeLocation!.longitude!, homeLocation!.latitude!]);
       }
     }
 
-    const targetPosition = targetMetrics?.targetPosition;
-    if (targetPosition && Number.isFinite(targetPosition.latitude) && Number.isFinite(targetPosition.longitude)) {
+    const targetPosition = targetMetricsSnapshot?.targetPosition;
+    if (
+      targetPosition &&
+      Number.isFinite(targetPosition.latitude) &&
+      Number.isFinite(targetPosition.longitude)
+    ) {
+      const lng = targetPosition.longitude!;
+      const lat = targetPosition.latitude!;
       if (!targetMarkerRef.current) {
         const targetEl = document.createElement('div');
         targetEl.style.width = '8px';
@@ -486,16 +531,42 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
         targetEl.style.boxShadow = '0 0 6px rgba(14, 165, 233, 0.7)';
 
         targetMarkerRef.current = new maplibregl.Marker({ element: targetEl })
-          .setLngLat([targetPosition.longitude, targetPosition.latitude])
+          .setLngLat([lng, lat])
           .addTo(map);
       } else {
-        targetMarkerRef.current.setLngLat([targetPosition.longitude, targetPosition.latitude]);
+        targetMarkerRef.current.setLngLat([lng, lat]);
       }
     } else if (targetMarkerRef.current) {
       targetMarkerRef.current.remove();
       targetMarkerRef.current = null;
     }
-  }, [mapReady, telemetryData, autoRotate, targetMetrics, autoCenterEnabled]);
+
+    const desiredBearing = autoRotateSnapshot ? compassHeading : 0;
+    const normalizedDesired = normalizeBearing(desiredBearing);
+    const currentBearing = normalizeBearing(map.getBearing());
+    if (lastMapBearingRef.current == null || bearingDelta(normalizedDesired, currentBearing) > 0.5 || bearingDelta(normalizedDesired, lastMapBearingRef.current) > 0.5) {
+      map.setBearing(normalizedDesired > 180 ? normalizedDesired - 360 : normalizedDesired);
+      lastMapBearingRef.current = normalizedDesired;
+    }
+  }, [mapReady]);
+
+  useEffect(() => {
+    telemetryStateRef.current = {
+      telemetry: telemetryData,
+      targetMetrics,
+      autoCenter: autoCenterEnabled,
+      autoRotate,
+    };
+
+    if (!mapReady || !mapRef.current) {
+      return;
+    }
+
+    if (animationFrameRef.current !== null) {
+      return;
+    }
+    animationFrameRef.current = requestAnimationFrame(applyTelemetryUpdate);
+  }, [telemetryData, targetMetrics, autoCenterEnabled, autoRotate, mapReady, applyTelemetryUpdate]);
 
   useEffect(() => {
     if (!mapReady || !mapRef.current) {
@@ -510,12 +581,12 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
       }
     });
 
-    if (!autoCenterEnabled) {
+    if (!autoCenterEnabled && !userInteractingRef.current) {
       const previousIds = planIdsRef.current;
       const newEntries = missionPlan.filter((entry) => entry?.id && !previousIds.has(entry.id));
       const latest = newEntries.length ? newEntries[newEntries.length - 1] : null;
       if (latest && Number.isFinite(latest.latitude) && Number.isFinite(latest.longitude)) {
-        mapRef.current.easeTo({ center: [latest.longitude, latest.latitude], duration: 600, essential: true });
+        mapRef.current.jumpTo({ center: [latest.longitude, latest.latitude] });
       }
     }
 
@@ -648,11 +719,15 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
       return;
     }
 
+    if (userInteractingRef.current) {
+      return;
+    }
+
     const lat = manualTarget.latitude;
     const lon = manualTarget.longitude;
     const previous = manualTargetPanRef.current;
     if (!previous || Math.abs(previous.latitude - lat) > 1e-6 || Math.abs(previous.longitude - lon) > 1e-6) {
-      mapRef.current.easeTo({ center: [lon, lat], duration: 600, essential: true });
+      mapRef.current.jumpTo({ center: [lon, lat] });
       manualTargetPanRef.current = { latitude: lat, longitude: lon };
     }
   }, [mapReady, manualTarget?.latitude, manualTarget?.longitude, autoCenterEnabled]);
@@ -693,22 +768,6 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
       localStorage.setItem('map.autoCenter', JSON.stringify(autoCenter));
     } catch {}
   }, [autoCenter]);
-
-  // Auto-rotate map based on compass heading (if enabled)
-  useEffect(() => {
-    if (!mapReady || !mapRef.current || !telemetryData?.location) return;
-
-    const map = mapRef.current;
-    const compassHeading = telemetryData?.compass_heading || telemetryData?.heading || 0;
-
-    if (autoRotate) {
-      // Use exact same logic as HSI compass: rotate by -heading
-      map.rotateTo(compassHeading, { duration: 500 });
-    } else {
-      // Fixed north orientation
-      map.rotateTo(0, { duration: 500 });
-    }
-  }, [mapReady, telemetryData, autoRotate]);
 
   // Add flight path
   useEffect(() => {
@@ -763,7 +822,7 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
 
         <div className="absolute top-2 left-2 flex flex-col gap-2 pointer-events-none select-none">
           <div className="text-[10px] text-gray-200 bg-black/60 px-2 py-1 rounded whitespace-nowrap">
-            Ctrl+Click: stage target · Shift+Click: waypoint · Alt/Option+Click: orbit · Drag: pan
+            Click: waypoint · Ctrl/⌘+Click: stage target · Alt/Option+Click: orbit · Drag: pan
           </div>
           <button
             type="button"
@@ -911,3 +970,33 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
     </div>
   );
 };
+
+const flightPathEqual = (
+  a?: Array<{ latitude: number; longitude: number }> | null,
+  b?: Array<{ latitude: number; longitude: number }> | null
+) => {
+  if (!a && !b) {
+    return true;
+  }
+  if (!a || !b) {
+    return false;
+  }
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i].latitude !== b[i].latitude || a[i].longitude !== b[i].longitude) {
+      return false;
+    }
+  }
+  return true;
+};
+
+const mapPropsEqual = (prev: MapDisplayProps, next: MapDisplayProps) => {
+  if (!flightPathEqual(prev.flightPath ?? null, next.flightPath ?? null)) {
+    return false;
+  }
+  return telemetryShallowEqual(prev.telemetryData ?? null, next.telemetryData ?? null);
+};
+
+export const MapDisplay = React.memo(MapDisplayComponent, mapPropsEqual);
