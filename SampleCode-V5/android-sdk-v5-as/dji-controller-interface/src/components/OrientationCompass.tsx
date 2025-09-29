@@ -280,7 +280,7 @@ export const OrientationCompass: React.FC<OrientationCompassProps> = ({
       <g>
         <polygon
           points={`${tipX},${tipY} ${leftX},${leftY} ${rightX},${rightY}`}
-          fill="#22c55e"
+          fill="#22d55e"
           stroke="#0f766e"
           strokeWidth={2}
         />
@@ -321,9 +321,9 @@ export const OrientationCompass: React.FC<OrientationCompassProps> = ({
       {/* FOV cone */}
       <path
         d={fovPath}
-        fill="#10b981"
+        fill="#1095a1"
         fillOpacity="0.1"
-        stroke="#10b981"
+        stroke="#1095a1"
         strokeWidth="1"
         strokeOpacity="0.3"
       />
@@ -343,12 +343,12 @@ export const OrientationCompass: React.FC<OrientationCompassProps> = ({
           y1={centerY}
           x2={gimbalX}
           y2={gimbalY}
-          stroke="#10b981"
+          stroke="#1095a1"
           strokeWidth="3"
         />
         <polygon
           points={`${gimbalX},${gimbalY - 8} ${gimbalX - 6},${gimbalY + 4} ${gimbalX + 6},${gimbalY + 4}`}
-          fill="#10b981"
+          fill="#1095a1"
           transform={`rotate(${gimbalYawRelative} ${gimbalX} ${gimbalY})`}
         />
       </g>
@@ -390,7 +390,7 @@ export const OrientationCompass: React.FC<OrientationCompassProps> = ({
       <text
         x={size - 10}
         y={centerY}
-        fill="#10b981"
+        fill="#1095a1"
         fontSize="10"
         textAnchor="end"
         dominantBaseline="middle"

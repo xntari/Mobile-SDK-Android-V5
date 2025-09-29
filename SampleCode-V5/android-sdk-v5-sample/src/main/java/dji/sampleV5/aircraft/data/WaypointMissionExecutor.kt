@@ -80,7 +80,8 @@ class WaypointMissionExecutor(
         val maxSpeed: Double?,
         val securityTakeoffHeight: Double?,
         val reason: String,
-        val plan: List<PlanPoint> = emptyList()
+        val plan: List<PlanPoint> = emptyList(),
+        val finishAction: WaylineFinishedAction = WaylineFinishedAction.NO_ACTION
     )
 
     data class PlanPoint(
@@ -409,7 +410,8 @@ class WaypointMissionExecutor(
                 estimatedDuration = estimatedDuration,
                 droneInfoResult = droneInfoResult,
                 manualHeightOverride = manualHeightOverride,
-                plan = planResolved
+                plan = planResolved,
+                finishAction = request.finishAction
             )
         }
 
@@ -690,7 +692,8 @@ class WaypointMissionExecutor(
         estimatedDuration: Double?,
         droneInfoResult: DroneInfoResult?,
         manualHeightOverride: Boolean,
-        plan: List<PlanPointResolved>
+        plan: List<PlanPointResolved>,
+        finishAction: WaylineFinishedAction
     ) {
         val securityFloor = securityTakeoffHeight
             ?.takeIf { !it.isNaN() && it > 0.0 }
@@ -813,7 +816,7 @@ class WaypointMissionExecutor(
 
         val config = WaylineMissionConfig().apply {
             setFlyToWaylineMode(WaylineFlyToWaylineMode.SAFELY)
-            setFinishAction(WaylineFinishedAction.NO_ACTION)
+            setFinishAction(finishAction)
             setExitOnRCLostBehavior(dji.sdk.wpmz.value.mission.WaylineExitOnRCLostBehavior.EXCUTE_RC_LOST_ACTION)
             setExitOnRCLostType(dji.sdk.wpmz.value.mission.WaylineExitOnRCLostAction.GO_BACK)
             setGlobalTransitionalSpeed(speed)

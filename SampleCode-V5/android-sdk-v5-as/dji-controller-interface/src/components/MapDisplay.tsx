@@ -30,6 +30,20 @@ const WAYPOINT_COLORS = {
   shadow: '0 0 4px rgba(29, 78, 216, 0.35)',
 };
 
+const RETURN_HOME_COLORS = {
+  text: '#065f46',
+  background: '#bbf7d0',
+  border: '#047857',
+  shadow: '0 0 4px rgba(4, 120, 87, 0.4)',
+};
+
+const LAND_COLORS = {
+  text: '#7f1d1d',
+  background: '#fecaca',
+  border: '#b91c1c',
+  shadow: '0 0 4px rgba(185, 28, 28, 0.35)',
+};
+
 const createPlanMarkerElement = (label: string, kind?: string, highlight = false) => {
   const element = document.createElement('div');
   element.className = 'map-plan-marker';
@@ -42,7 +56,13 @@ const createPlanMarkerElement = (label: string, kind?: string, highlight = false
   element.style.fontSize = '10px';
   element.style.fontWeight = '600';
 
-  const palette = kind === 'orbit' ? ORBIT_COLORS : WAYPOINT_COLORS;
+  const palette = kind === 'orbit'
+    ? ORBIT_COLORS
+    : kind === 'return_home'
+      ? RETURN_HOME_COLORS
+      : kind === 'land'
+        ? LAND_COLORS
+        : WAYPOINT_COLORS;
   element.style.color = palette.text;
   element.style.backgroundColor = palette.background;
   element.style.border = highlight ? '2px solid #f97316' : `1.5px solid ${palette.border}`;
@@ -74,11 +94,20 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
   const [manualTarget, setManualTarget] = useState<ManualTargetState | null>(() => missionPlannerStore.getSnapshot().manualTarget);
   const [activeWaypoint, setActiveWaypoint] = useState<MissionWaypointTarget | null>(() => missionPlannerStore.getSnapshot().activeWaypoint ?? null);
 
+  const [autoCenter, setAutoCenter] = useState(() => {
+    try {
+      const stored = localStorage.getItem('map.autoCenter');
+      return stored ? JSON.parse(stored) : true;
+    } catch {
+      return true;
+    }
+  });
+
   const autoCenterEnabled = React.useMemo(() => {
     const missionState = telemetryData?.waypoint_status?.state?.toLowerCase();
     const missionActive = missionState ? !['ready', 'idle', 'unknown', 'not_ready', 'paused'].includes(missionState) : false;
-    return Boolean(telemetryData?.motors_on || missionActive);
-  }, [telemetryData?.motors_on, telemetryData?.waypoint_status?.state]);
+    return autoCenter && Boolean(telemetryData?.motors_on || missionActive);
+  }, [telemetryData?.motors_on, telemetryData?.waypoint_status?.state, autoCenter]);
 
   useEffect(() => {
     const unsubscribe = objectMemoryTargetStore.subscribe(setObjectTarget);
@@ -170,6 +199,18 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
 
   const mapInfo = getMapInfo();
 
+  const handleRecenter = React.useCallback(() => {
+    const map = mapRef.current;
+    if (!map) {
+      return;
+    }
+    const target = telemetryData?.location ?? telemetryData?.home_location;
+    if (!target || !Number.isFinite(target.latitude) || !Number.isFinite(target.longitude)) {
+      return;
+    }
+    map.easeTo({ center: [target.longitude, target.latitude], duration: 600, essential: true });
+  }, [telemetryData?.location?.latitude, telemetryData?.location?.longitude, telemetryData?.home_location?.latitude, telemetryData?.home_location?.longitude]);
+
   // Initialize map
   useEffect(() => {
     if (!mapContainer.current) return;
@@ -249,11 +290,13 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
         return;
       }
 
-      missionPlannerStore.requestStageTarget({
-        latitude: clampedLat,
-        longitude: clampedLon,
-        source: 'map',
-      });
+      if (pointerEvent?.ctrlKey) {
+        missionPlannerStore.requestStageTarget({
+          latitude: clampedLat,
+          longitude: clampedLon,
+          source: 'map',
+        });
+      }
     };
 
     map.on('click', handleClick);
@@ -473,7 +516,12 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
       if (!Number.isFinite(entry.latitude) || !Number.isFinite(entry.longitude)) {
         return;
       }
-      const label = entry.kind === 'orbit' ? `O${index + 1}` : `${index + 1}`;
+      const label = (() => {
+        if (entry.kind === 'orbit') return `O${index + 1}`;
+        if (entry.kind === 'return_home') return 'R';
+        if (entry.kind === 'land') return 'L';
+        return `${index + 1}`;
+      })();
       const element = createPlanMarkerElement(label, entry.kind);
 
       const marker = new maplibregl.Marker({ element })
@@ -623,6 +671,12 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
     } catch {}
   }, [autoRotate]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem('map.autoCenter', JSON.stringify(autoCenter));
+    } catch {}
+  }, [autoCenter]);
+
   // Auto-rotate map based on compass heading (if enabled)
   useEffect(() => {
     if (!mapReady || !mapRef.current || !telemetryData?.location) return;
@@ -690,8 +744,17 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
           style={{ minHeight: '120px' }}
         />
 
-        <div className="absolute top-2 left-2 text-[10px] text-gray-200 bg-black/60 px-2 py-1 rounded pointer-events-none select-none whitespace-nowrap">
-          Click: stage · Shift+Click: waypoint · Option+Click: orbit
+        <div className="absolute top-2 left-2 flex flex-col gap-2 pointer-events-none select-none">
+          <div className="text-[10px] text-gray-200 bg-black/60 px-2 py-1 rounded whitespace-nowrap">
+            Ctrl+Click: stage target · Shift+Click: waypoint · Alt/Option+Click: orbit · Drag: pan
+          </div>
+          <button
+            type="button"
+            className="pointer-events-auto text-[10px] text-gray-200 bg-black/60 hover:bg-black/70 px-2 py-1 rounded border border-gray-600 self-start"
+            onClick={handleRecenter}
+          >
+            Recenter map
+          </button>
         </div>
 
         {activeWaypoint && (
@@ -768,7 +831,7 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
       )}
 
       {/* Map rotation toggle */}
-      <div className="mt-2 flex justify-center">
+      <div className="mt-2 flex justify-center gap-2">
         <button
           onClick={() => setAutoRotate(!autoRotate)}
           className={`px-3 py-1 text-xs rounded border transition-colors ${
@@ -778,6 +841,16 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
           }`}
         >
           {autoRotate ? 'Auto-rotate' : 'North up'}
+        </button>
+        <button
+          onClick={() => setAutoCenter((prev) => !prev)}
+          className={`px-3 py-1 text-xs rounded border transition-colors ${
+            autoCenter
+              ? 'bg-dji-blue text-white border-dji-blue'
+              : 'bg-gray-700 text-gray-300 border-gray-600 hover:bg-gray-600'
+          }`}
+        >
+          {autoCenter ? 'Auto-center' : 'Center off'}
         </button>
       </div>
 

@@ -21,6 +21,7 @@ import dji.v5.manager.diagnostic.DeviceStatusManager
 import android.util.Base64
 import dji.v5.manager.aircraft.simulator.InitializationSettings
 import dji.v5.manager.aircraft.simulator.SimulatorManager
+import dji.sdk.wpmz.value.mission.WaylineFinishedAction
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
@@ -900,6 +901,12 @@ class FlightCommandHandler(
         val maxSpeed = params.optDouble("max_speed", Double.NaN).takeIf { !it.isNaN() }
         val securityTakeoffHeight = params.optDouble("security_takeoff_height", Double.NaN).takeIf { !it.isNaN() }
         val reason = params.optString("reason", "mission_plan")
+        val finishActionRaw = params.optString("finish_action", "").lowercase()
+        val finishAction = when (finishActionRaw) {
+            "go_home", "return_home" -> WaylineFinishedAction.GO_HOME
+            "land", "auto_land" -> WaylineFinishedAction.AUTO_LAND
+            else -> WaylineFinishedAction.NO_ACTION
+        }
 
         val baseExtra = buildFlyToExtra(
             targetLocation = targetLocation,
@@ -933,7 +940,8 @@ class FlightCommandHandler(
             maxSpeed = maxSpeed,
             securityTakeoffHeight = securityTakeoffHeight,
             reason = reason,
-            plan = planPoints
+            plan = planPoints,
+            finishAction = finishAction
         )
 
         attemptWaypointFallback(

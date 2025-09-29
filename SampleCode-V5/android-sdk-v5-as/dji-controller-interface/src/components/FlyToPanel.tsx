@@ -1,6 +1,5 @@
 import React from 'react';
-import maplibregl from 'maplibre-gl';
-import 'maplibre-gl/dist/maplibre-gl.css';
+import JSZip from 'jszip';
 import { Panel } from './Panel';
 import { getSimulatorModeBadge } from './SimulatorControls';
 import { useBridgeCommands } from '../hooks/useBridgeCommands';
@@ -10,6 +9,7 @@ import { TelemetryData, FlyToStatus, WaypointStatusTelemetry, FlightCommandAck, 
 import type {
   PlannedMissionEntry,
   ManualTargetState,
+  MissionEntryKind,
   MissionWaypointTarget,
 } from '../types/missionPlanner';
 import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
@@ -25,15 +25,6 @@ interface MissionLogEntry {
   kind: MissionLogKind;
 }
 
-interface MissionPreviewPath {
-  id: string;
-  start?: { latitude: number; longitude: number };
-  target?: { latitude: number; longitude: number };
-  missionId?: string;
-  backend?: string;
-  updatedAt: number;
-}
-
 interface MissionPlanCommandEntry {
   latitude: number;
   longitude: number;
@@ -41,23 +32,6 @@ interface MissionPlanCommandEntry {
   kind?: string;
   radius?: number;
   turns?: number;
-}
-
-interface WaypointMapPreviewProps {
-  path: MissionPreviewPath | null;
-  interactive?: boolean;
-  onSelectTarget?: (location: { latitude: number; longitude: number }) => void;
-  aircraftLocation?: { latitude: number; longitude: number } | null;
-  homeLocation?: { latitude: number; longitude: number } | null;
-  targetLocation?: { latitude: number; longitude: number } | null;
-  planPath?: Array<{ latitude: number; longitude: number }>;
-  planMarkers?: Array<{
-    id: string;
-    latitude: number;
-    longitude: number;
-    kind: 'waypoint' | 'orbit';
-    label: string;
-  }>;
 }
 
 const MAX_LOG_ENTRIES = 40;
@@ -153,288 +127,6 @@ interface SimulationPreview {
   totalDuration: number;
 }
 
-const WaypointMapPreview: React.FC<WaypointMapPreviewProps> = ({
-  path,
-  interactive = false,
-  onSelectTarget,
-  aircraftLocation,
-  homeLocation,
-  targetLocation,
-  planPath,
-  planMarkers,
-}) => {
-  const containerRef = React.useRef<HTMLDivElement | null>(null);
-  const mapRef = React.useRef<maplibregl.Map | null>(null);
-  const aircraftMarkerRef = React.useRef<maplibregl.Marker | null>(null);
-  const homeMarkerRef = React.useRef<maplibregl.Marker | null>(null);
-  const targetMarkerRef = React.useRef<maplibregl.Marker | null>(null);
-  const planMarkerRefs = React.useRef<maplibregl.Marker[]>([]);
-  const lineSourceId = React.useRef(`flyto-preview-line-${Math.random().toString(36).slice(2, 8)}`);
-
-  React.useEffect(() => {
-    if (!containerRef.current || mapRef.current) {
-      return;
-    }
-
-    const map = new maplibregl.Map({
-      container: containerRef.current,
-      style: {
-        version: 8,
-        sources: {
-          'osm-tiles': {
-            type: 'raster',
-            tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-            tileSize: 256,
-            attribution: '© OpenStreetMap contributors',
-          },
-        },
-        layers: [
-          {
-            id: 'osm-tiles-layer',
-            type: 'raster',
-            source: 'osm-tiles',
-          },
-        ],
-      },
-      center: [0, 0],
-      zoom: 15,
-      attributionControl: false,
-      logoPosition: 'bottom-right',
-      interactive: true,
-    });
-
-    mapRef.current = map;
-
-    map.on('load', () => {
-      if (!map.getSource(lineSourceId.current)) {
-        map.addSource(lineSourceId.current, {
-          type: 'geojson',
-          data: {
-            type: 'Feature',
-            geometry: {
-              type: 'LineString',
-              coordinates: [],
-            },
-            properties: {},
-          },
-        });
-
-        map.addLayer({
-          id: `${lineSourceId.current}-layer`,
-          type: 'line',
-          source: lineSourceId.current,
-          paint: {
-            'line-color': '#4ade80',
-            'line-width': 3,
-            'line-dasharray': [2, 2],
-          },
-        });
-      }
-    });
-
-    return () => {
-      if (mapRef.current) {
-        mapRef.current.remove();
-      }
-      mapRef.current = null;
-      aircraftMarkerRef.current = null;
-      homeMarkerRef.current = null;
-      targetMarkerRef.current = null;
-      planMarkerRefs.current.forEach((marker) => marker.remove());
-      planMarkerRefs.current = [];
-    };
-  }, []);
-
-  React.useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-
-    const liveAircraft = aircraftLocation ?? path?.start ?? null;
-    const previewTarget = targetLocation ?? path?.target ?? null;
-
-    if (homeLocation && Number.isFinite(homeLocation.latitude) && Number.isFinite(homeLocation.longitude)) {
-      if (!homeMarkerRef.current) {
-        homeMarkerRef.current = new maplibregl.Marker({ color: '#4ade80' });
-      }
-      homeMarkerRef.current
-        .setLngLat([homeLocation.longitude, homeLocation.latitude])
-        .addTo(map);
-    } else if (homeMarkerRef.current) {
-      homeMarkerRef.current.remove();
-      homeMarkerRef.current = null;
-    }
-
-    if (liveAircraft && Number.isFinite(liveAircraft.latitude) && Number.isFinite(liveAircraft.longitude)) {
-      if (!aircraftMarkerRef.current) {
-        aircraftMarkerRef.current = new maplibregl.Marker({ color: '#38bdf8' });
-      }
-      aircraftMarkerRef.current
-        .setLngLat([liveAircraft.longitude, liveAircraft.latitude])
-        .addTo(map);
-    } else if (aircraftMarkerRef.current) {
-      aircraftMarkerRef.current.remove();
-      aircraftMarkerRef.current = null;
-    }
-
-    if (previewTarget && Number.isFinite(previewTarget.latitude) && Number.isFinite(previewTarget.longitude)) {
-      if (!targetMarkerRef.current) {
-        targetMarkerRef.current = new maplibregl.Marker({ color: '#f97316' });
-      }
-      targetMarkerRef.current
-        .setLngLat([previewTarget.longitude, previewTarget.latitude])
-        .addTo(map);
-    } else if (targetMarkerRef.current) {
-      targetMarkerRef.current.remove();
-      targetMarkerRef.current = null;
-    }
-
-    planMarkerRefs.current.forEach((marker) => marker.remove());
-    planMarkerRefs.current = [];
-    if (planMarkers && planMarkers.length > 0) {
-      planMarkers.forEach((entry, index) => {
-        if (!Number.isFinite(entry.latitude) || !Number.isFinite(entry.longitude)) {
-          return;
-        }
-        const el = document.createElement('div');
-        el.style.width = '10px';
-        el.style.height = '10px';
-        el.style.borderRadius = '50%';
-        el.style.border = '2px solid white';
-        el.style.backgroundColor = entry.kind === 'orbit' ? '#a855f7' : '#facc15';
-        el.style.boxShadow = '0 0 6px rgba(255,255,255,0.6)';
-        el.title = entry.label;
-        const marker = new maplibregl.Marker({ element: el })
-          .setLngLat([entry.longitude, entry.latitude])
-          .addTo(map);
-        planMarkerRefs.current.push(marker);
-      });
-    }
-
-    const coordinates: Array<[number, number]> = [];
-    if (liveAircraft && Number.isFinite(liveAircraft.latitude) && Number.isFinite(liveAircraft.longitude)) {
-      coordinates.push([liveAircraft.longitude, liveAircraft.latitude]);
-    }
-    if (previewTarget && Number.isFinite(previewTarget.latitude) && Number.isFinite(previewTarget.longitude)) {
-      coordinates.push([previewTarget.longitude, previewTarget.latitude]);
-    }
-
-    const planCoordinates = planPath && planPath.length >= 2
-      ? planPath.map((point) => [point.longitude, point.latitude] as [number, number])
-      : [];
-
-    const lineCoordinates = planCoordinates.length >= 2
-      ? planCoordinates
-      : coordinates;
-
-    const sourceId = lineSourceId.current;
-    if (!map.isStyleLoaded()) {
-      map.once('load', () => {
-        const postLoadSource = map.getSource(sourceId) as maplibregl.GeoJSONSource | undefined;
-        if (postLoadSource) {
-          postLoadSource.setData({
-            type: 'Feature',
-            geometry: {
-              type: 'LineString',
-              coordinates: lineCoordinates,
-            },
-            properties: {},
-          });
-        }
-      });
-      return;
-    }
-
-    if (map.getSource(sourceId)) {
-      const source = map.getSource(sourceId) as maplibregl.GeoJSONSource;
-      source.setData({
-        type: 'Feature',
-        geometry: {
-          type: 'LineString',
-          coordinates: lineCoordinates,
-        },
-        properties: {},
-      });
-    }
-
-    const boundsInput = lineCoordinates.length >= 2 ? lineCoordinates : coordinates;
-
-    if (boundsInput.length >= 2) {
-      const bounds = boundsInput.reduce(
-        (acc, coord) => acc.extend(coord),
-        new maplibregl.LngLatBounds(boundsInput[0], boundsInput[0]),
-      );
-      map.fitBounds(bounds, { padding: 30, maxZoom: 18, duration: 300 });
-    } else if (coordinates.length === 1) {
-      const [lng, lat] = coordinates[0];
-      const currentCenter = map.getCenter();
-      if (Math.abs(currentCenter.lat - lat) > 0.00002 || Math.abs(currentCenter.lng - lng) > 0.00002) {
-        map.easeTo({ center: [lng, lat], zoom: Math.max(map.getZoom(), 16.5), duration: 300 });
-      }
-    }
-  }, [
-    path?.target?.latitude,
-    path?.target?.longitude,
-    path?.start?.latitude,
-    path?.start?.longitude,
-    aircraftLocation?.latitude,
-    aircraftLocation?.longitude,
-    homeLocation?.latitude,
-    homeLocation?.longitude,
-    targetLocation?.latitude,
-    targetLocation?.longitude,
-    planPath ? planPath.map((p) => `${p.latitude}:${p.longitude}`).join('|') : '',
-    planMarkers ? planMarkers.map((p) => `${p.latitude}:${p.longitude}:${p.kind}`).join('|') : '',
-  ]);
-
-  React.useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !onSelectTarget) {
-      return;
-    }
-
-    const canvas = map.getCanvas();
-
-    const handleClick = (event: maplibregl.MapMouseEvent) => {
-      if (!interactive) return;
-      const { lngLat } = event;
-      if (!lngLat) return;
-      onSelectTarget({ latitude: clampLat(lngLat.lat), longitude: clampLon(lngLat.lng) });
-    };
-
-    map.on('click', handleClick);
-
-    return () => {
-      map.off('click', handleClick);
-      if (canvas) {
-        canvas.style.cursor = '';
-      }
-    };
-  }, [interactive, onSelectTarget]);
-
-  React.useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-    const canvas = map.getCanvas();
-    if (!canvas) return;
-    if (interactive) {
-      canvas.style.cursor = 'crosshair';
-    } else {
-      canvas.style.cursor = '';
-    }
-  }, [interactive]);
-
-  return (
-    <div className="relative">
-      <div ref={containerRef} className="w-full h-40 rounded border border-gray-700/60 overflow-hidden" />
-      {interactive && (
-        <div className="absolute inset-0 pointer-events-none flex items-center justify-center text-[11px] uppercase tracking-wide text-amber-200 bg-black/20">
-          Click map to set target
-        </div>
-      )}
-    </div>
-  );
-};
-
 export const FlyToPanel: React.FC = () => {
   const { sendFlightCommand } = useBridgeCommands();
   const { bridgeData } = useStableBridgeData();
@@ -444,9 +136,8 @@ export const FlyToPanel: React.FC = () => {
   const [maxSpeed, setMaxSpeed] = React.useState<number>(10);
   const [securityTakeoffHeight, setSecurityTakeoffHeight] = React.useState<number>(20);
   const [flyToMode, setFlyToMode] = React.useState<'smart_height' | 'set_height'>('set_height');
-  const [flyToHeight, setFlyToHeight] = React.useState<number>(50);
+  const [flyToHeight, setFlyToHeight] = React.useState<number>(20);
   const [logEntries, setLogEntries] = React.useState<MissionLogEntry[]>([]);
-  const [previewPath, setPreviewPath] = React.useState<MissionPreviewPath | null>(null);
   const [manualTarget, setManualTarget] = React.useState<ManualTargetState>({ latitude: null, longitude: null, altitude: null });
   const [placingTarget, setPlacingTarget] = React.useState<boolean>(false);
   const [simPreview, setSimPreview] = React.useState<SimulationPreview | null>(null);
@@ -485,8 +176,8 @@ export const FlyToPanel: React.FC = () => {
   );
   const missionStateNormalized = missionStateRaw?.toLowerCase() ?? '';
   const missionTimestampLabel = formatRelativeTime(waypointStatus?.timestamp);
-  const missionBackend = waypointStatus?.backend ?? previewPath?.backend;
-  const missionId = waypointStatus?.mission_id ?? previewPath?.missionId;
+  const missionBackend = waypointStatus?.backend;
+  const missionId = waypointStatus?.mission_id;
   const missionInterrupt = waypointStatus?.last_interrupt;
   const missionTimelineDisplay = [...missionTimeline].slice(-6).reverse();
   const latestPauseEvent = [...missionTimeline].reverse().find((entry) => entry.type === 'event' && entry.event === 'pause');
@@ -613,37 +304,6 @@ export const FlyToPanel: React.FC = () => {
     }
   }, [manualTarget.source]);
 
-  const plannedPathCoordinates = React.useMemo(() => {
-    const waypoints = missionPlan.filter((entry) => entry.kind === 'waypoint');
-    if (!waypoints.length) {
-      return undefined;
-    }
-    const coords: Array<{ latitude: number; longitude: number }> = [];
-    if (telemetry?.location) {
-      coords.push({
-        latitude: telemetry.location.latitude,
-        longitude: telemetry.location.longitude,
-      });
-    }
-    waypoints.forEach((entry) => {
-      coords.push({ latitude: entry.latitude, longitude: entry.longitude });
-    });
-    return coords;
-  }, [missionPlan, telemetry?.location?.latitude, telemetry?.location?.longitude]);
-
-  const plannedMarkers = React.useMemo(() => {
-    if (!missionPlan.length) {
-      return undefined;
-    }
-    return missionPlan.map((entry, index) => ({
-      id: entry.id,
-      latitude: entry.latitude,
-      longitude: entry.longitude,
-      kind: entry.kind,
-      label: entry.kind === 'orbit' ? `O${index + 1}` : `${index + 1}`,
-    }));
-  }, [missionPlan]);
-
   React.useEffect(() => {
     missionPlannerStore.setPlan(missionPlan);
   }, [missionPlan]);
@@ -763,7 +423,11 @@ export const FlyToPanel: React.FC = () => {
       }
       const label = entry.kind === 'orbit'
         ? `O${planIndex + 1}`
-        : `${planIndex + 1}`;
+        : entry.kind === 'return_home'
+          ? 'R'
+          : entry.kind === 'land'
+            ? 'L'
+            : `${planIndex + 1}`;
       return {
         index: planIndex,
         label,
@@ -782,23 +446,6 @@ export const FlyToPanel: React.FC = () => {
     if (manualTarget.latitude == null || manualTarget.longitude == null) {
       return;
     }
-    setPreviewPath((prev) => {
-      const same = prev?.target &&
-        Math.abs(prev.target.latitude - manualTarget.latitude!) < 1e-9 &&
-        Math.abs(prev.target.longitude - manualTarget.longitude!) < 1e-9;
-      if (same) {
-        return prev;
-      }
-      const now = Date.now();
-      return {
-        id: prev?.id ?? `manual-${now}`,
-        start: prev?.start,
-        target: { latitude: manualTarget.latitude!, longitude: manualTarget.longitude! },
-        backend: prev?.backend,
-        missionId: prev?.missionId,
-        updatedAt: now,
-      };
-    });
     setPlacingTarget(false);
   }, [manualTarget.latitude, manualTarget.longitude]);
 
@@ -835,6 +482,16 @@ export const FlyToPanel: React.FC = () => {
   const heightRangeMin = typeof heightRange?.min === 'number' ? heightRange.min : 1;
   const heightRangeMax = typeof heightRange?.max === 'number' ? heightRange.max : 500;
 
+  const defaultTargetAltitudePreview = computeDefaultTargetAltitude();
+  const homeLocation = telemetry?.home_location;
+  const hasHomeLocation = Boolean(homeLocation
+    && Number.isFinite(homeLocation.latitude)
+    && Number.isFinite(homeLocation.longitude));
+  const hasLandingCoordinate = hasHomeLocation
+    || Boolean(telemetry?.location
+      && Number.isFinite(telemetry.location.latitude)
+      && Number.isFinite(telemetry.location.longitude));
+
   const appendLog = React.useCallback((label: string, payload: Record<string, any>, kind: MissionLogKind = 'command') => {
     setLogEntries((prev) => {
       const entry: MissionLogEntry = {
@@ -859,7 +516,11 @@ export const FlyToPanel: React.FC = () => {
       setStatusMessage('Stage a target before adding a waypoint to the plan.');
       return;
     }
-    const altitudeCandidate = activeTarget.altitude ?? telemetry?.location?.altitude ?? telemetry?.altitude ?? null;
+    const altitudeCandidate = defaultTargetAltitudePreview
+      ?? telemetry?.location?.altitude
+      ?? telemetry?.altitude
+      ?? activeTarget.altitude
+      ?? null;
     const entry: PlannedMissionEntry = {
       id: `wp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       kind: 'waypoint',
@@ -870,7 +531,7 @@ export const FlyToPanel: React.FC = () => {
     setMissionPlan((prev) => [...prev, entry]);
     appendLog('Plan waypoint added', entry, 'manual');
     setStatusMessage('Waypoint added to mission plan.');
-  }, [activeTarget, telemetry?.location?.altitude, telemetry?.altitude, appendLog]);
+  }, [activeTarget, telemetry?.location?.altitude, telemetry?.altitude, appendLog, defaultTargetAltitudePreview]);
 
   const addOrbitToPlan = React.useCallback(() => {
     if (!activeTarget || activeTarget.latitude == null || activeTarget.longitude == null) {
@@ -887,19 +548,67 @@ export const FlyToPanel: React.FC = () => {
     }
     const radiusMeters = Math.max(5, Math.round(orbitRadius));
     const turns = Math.max(1, Math.round(orbitTurns));
+    const altitudeCandidate = defaultTargetAltitudePreview
+      ?? telemetry?.location?.altitude
+      ?? telemetry?.altitude
+      ?? activeTarget.altitude
+      ?? null;
     const entry: PlannedMissionEntry = {
       id: `orbit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       kind: 'orbit',
       latitude: activeTarget.latitude,
       longitude: activeTarget.longitude,
-      altitude: activeTarget.altitude ?? telemetry?.location?.altitude ?? telemetry?.altitude ?? null,
+      altitude: altitudeCandidate,
       radius: radiusMeters,
       turns,
     };
     setMissionPlan((prev) => [...prev, entry]);
     appendLog('Plan orbit added', entry, 'manual');
     setStatusMessage(`Orbit added (radius ${radiusMeters} m, ${turns} turn${turns === 1 ? '' : 's'}).`);
-  }, [activeTarget, telemetry?.location?.altitude, telemetry?.altitude, orbitRadius, orbitTurns, appendLog]);
+  }, [activeTarget, telemetry?.location?.altitude, telemetry?.altitude, orbitRadius, orbitTurns, appendLog, defaultTargetAltitudePreview]);
+
+  const addReturnHomeToPlan = React.useCallback(() => {
+    const home = telemetry?.home_location;
+    if (!home || !Number.isFinite(home.latitude) || !Number.isFinite(home.longitude)) {
+      setStatusMessage('Home location unavailable; cannot add Return Home waypoint.');
+      return;
+    }
+
+    const entry: PlannedMissionEntry = {
+      id: `return-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      kind: 'return_home',
+      latitude: clampLat(home.latitude),
+      longitude: clampLon(home.longitude),
+      altitude: defaultTargetAltitudePreview ?? telemetry?.takeoff_altitude ?? telemetry?.location?.altitude ?? null,
+    };
+    setMissionPlan((prev) => [...prev, entry]);
+    appendLog('Plan return-to-home added', entry, 'manual');
+    setStatusMessage('Return-to-home added to mission plan.');
+  }, [telemetry?.home_location?.latitude, telemetry?.home_location?.longitude, telemetry?.takeoff_altitude, telemetry?.location?.altitude, appendLog, defaultTargetAltitudePreview]);
+
+  const addLandToPlan = React.useCallback(() => {
+    const landingCoordinate = telemetry?.home_location ?? telemetry?.location;
+    if (!landingCoordinate || !Number.isFinite(landingCoordinate.latitude) || !Number.isFinite(landingCoordinate.longitude)) {
+      setStatusMessage('Landing coordinate unavailable; cannot add Land waypoint.');
+      return;
+    }
+
+    const landingAltitude = telemetry?.takeoff_altitude
+      ?? telemetry?.location?.altitude
+      ?? defaultTargetAltitudePreview
+      ?? 0;
+
+    const entry: PlannedMissionEntry = {
+      id: `land-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      kind: 'land',
+      latitude: clampLat(landingCoordinate.latitude),
+      longitude: clampLon(landingCoordinate.longitude),
+      altitude: landingAltitude,
+    };
+    setMissionPlan((prev) => [...prev, entry]);
+    appendLog('Plan land added', entry, 'manual');
+    setStatusMessage('Landing step added to mission plan.');
+  }, [telemetry?.home_location?.latitude, telemetry?.home_location?.longitude, telemetry?.location?.latitude, telemetry?.location?.longitude, telemetry?.takeoff_altitude, telemetry?.location?.altitude, appendLog, defaultTargetAltitudePreview]);
 
   const removePlanEntry = React.useCallback((id: string) => {
     setMissionPlan((prev) => prev.filter((entry) => entry.id !== id));
@@ -908,6 +617,14 @@ export const FlyToPanel: React.FC = () => {
   const clearMissionPlan = React.useCallback(() => {
     setMissionPlan([]);
     setStatusMessage('Mission plan cleared.');
+  }, []);
+
+  const updatePlanEntryAltitude = React.useCallback((id: string, altitude: number | null) => {
+    setMissionPlan((prev) => prev.map((entry) => (
+      entry.id === id
+        ? { ...entry, altitude }
+        : entry
+    )));
   }, []);
 
   const stageManualTarget = React.useCallback((next: ManualTargetState, context: Record<string, any>, message: string) => {
@@ -1055,6 +772,91 @@ export const FlyToPanel: React.FC = () => {
         return;
       }
 
+      const parseKmzWaypoints = async (base64: string) => {
+        const binary = atob(base64);
+        const data = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) {
+          data[i] = binary.charCodeAt(i);
+        }
+        const zip = await JSZip.loadAsync(data);
+        const waylineEntry = Object.keys(zip.files).find((name) => /waylines\.wpml$/i.test(name));
+        if (!waylineEntry) {
+          throw new Error('No waylines.wpml found in KMZ');
+        }
+        const xmlString = await zip.file(waylineEntry)!.async('string');
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(xmlString, 'text/xml');
+        const ns = 'http://www.dji.com/wpmz/1.0.6';
+        const finishNode = doc.getElementsByTagNameNS(ns, 'finishAction')?.[0];
+        const finishAction = finishNode?.textContent?.trim().toLowerCase() ?? '';
+        const placemarks = Array.from(doc.getElementsByTagName('Placemark'));
+        const waypoints = placemarks.map((placemark) => {
+          const coordText = placemark.getElementsByTagName('coordinates')?.[0]?.textContent ?? '';
+          const executeHeightText = placemark.getElementsByTagNameNS(ns, 'executeHeight')?.[0]?.textContent ?? '';
+          const parts = coordText.trim().split(',');
+          const longitude = parseFloat(parts[0]);
+          const latitude = parseFloat(parts[1]);
+          const executeHeight = parseFloat(executeHeightText);
+          return {
+            latitude: Number.isFinite(latitude) ? latitude : NaN,
+            longitude: Number.isFinite(longitude) ? longitude : NaN,
+            relativeHeight: Number.isFinite(executeHeight) ? executeHeight : undefined,
+          };
+        }).filter((wp) => Number.isFinite(wp.latitude) && Number.isFinite(wp.longitude));
+
+        return { waypoints, finishAction };
+      };
+
+      const { waypoints, finishAction } = await parseKmzWaypoints(selection.base64);
+
+      if (!waypoints.length) {
+        setStatusMessage('Loaded KMZ does not contain any waypoints.');
+        return;
+      }
+
+      const baseAltitude = telemetry?.takeoff_altitude
+        ?? telemetry?.home_location?.altitude
+        ?? telemetry?.location?.altitude
+        ?? telemetry?.altitude
+        ?? 0;
+
+      const resolvedPlan: PlannedMissionEntry[] = waypoints.map((wp, index) => {
+        const altitudeAbs = wp.relativeHeight != null
+          ? baseAltitude + wp.relativeHeight
+          : defaultTargetAltitudePreview ?? baseAltitude;
+        return {
+          id: `kmz-${Date.now()}-${index}`,
+          kind: 'waypoint',
+          latitude: clampLat(wp.latitude),
+          longitude: clampLon(wp.longitude),
+          altitude: altitudeAbs,
+        };
+      });
+
+      const augmentedPlan = [...resolvedPlan];
+      const finalWaypoint = resolvedPlan[resolvedPlan.length - 1];
+      if (finishAction === 'gohome') {
+        const rthLat = telemetry?.home_location?.latitude ?? finalWaypoint.latitude;
+        const rthLon = telemetry?.home_location?.longitude ?? finalWaypoint.longitude;
+        augmentedPlan.push({
+          id: `kmz-rth-${Date.now()}`,
+          kind: 'return_home',
+          latitude: clampLat(rthLat),
+          longitude: clampLon(rthLon),
+          altitude: defaultTargetAltitudePreview ?? baseAltitude,
+        });
+      } else if (finishAction === 'autoland') {
+        const landingLat = telemetry?.home_location?.latitude ?? telemetry?.location?.latitude ?? finalWaypoint.latitude;
+        const landingLon = telemetry?.home_location?.longitude ?? telemetry?.location?.longitude ?? finalWaypoint.longitude;
+        augmentedPlan.push({
+          id: `kmz-land-${Date.now()}`,
+          kind: 'land',
+          latitude: clampLat(landingLat),
+          longitude: clampLon(landingLon),
+          altitude: telemetry?.takeoff_altitude ?? baseAltitude,
+        });
+      }
+
       const sizeBytes = Math.floor((selection.base64.length * 3) / 4);
       const timestamp = Date.now();
       const metadata = {
@@ -1062,9 +864,11 @@ export const FlyToPanel: React.FC = () => {
         path: selection.path,
         size_bytes: sizeBytes,
         selected_at: timestamp,
+        waypoint_count: resolvedPlan.length,
+        finish_action: finishAction,
       };
 
-      appendLog('KMZ selected', metadata, 'kmz');
+      appendLog('KMZ plan imported', metadata, 'kmz');
       setLastLoadedKmz({
         name: selection.name,
         path: selection.path,
@@ -1072,23 +876,123 @@ export const FlyToPanel: React.FC = () => {
         timestamp,
       });
       setSimPreview(null);
-      setStatusMessage('Uploading KMZ mission…');
-
-      const result = await sendFlightCommand('waypoint_load_kmz', {
-        file_name: selection.name,
-        file_data: selection.base64,
-      });
-
-      if (result?.success === false) {
-        setStatusMessage(result.error || result.error_message || 'waypoint_load_kmz rejected');
-      } else {
-        setStatusMessage('KMZ mission upload requested');
-      }
+      setMissionPlan(augmentedPlan);
+      setStatusMessage(`Loaded KMZ into mission plan (${augmentedPlan.length} entries). Review and simulate before execution.`);
     } catch (error) {
       console.error('KMZ load failed', error);
-      setStatusMessage(error instanceof Error ? error.message : 'waypoint_load_kmz failed');
+      setStatusMessage(error instanceof Error ? error.message : 'Failed to load KMZ');
     }
-  }, [appendLog, sendFlightCommand]);
+  }, [appendLog, telemetry?.home_location?.latitude, telemetry?.home_location?.longitude, telemetry?.location?.latitude, telemetry?.location?.longitude, telemetry?.takeoff_altitude, telemetry?.location?.altitude, telemetry?.altitude, defaultTargetAltitudePreview]);
+
+  const handleSaveKmzMission = React.useCallback(async () => {
+    if (!missionPlan.length) {
+      setStatusMessage('Mission plan is empty — nothing to export.');
+      return;
+    }
+
+    const primaryWaypoints = missionPlan.filter((entry) => entry.kind === 'waypoint' || entry.kind === 'orbit');
+    if (!primaryWaypoints.length) {
+      setStatusMessage('Add at least one waypoint before exporting.');
+      return;
+    }
+
+    const baseAltitude = telemetry?.takeoff_altitude
+      ?? telemetry?.home_location?.altitude
+      ?? telemetry?.location?.altitude
+      ?? telemetry?.altitude
+      ?? 0;
+
+    const finishAction = missionPlan.some((entry) => entry.kind === 'land')
+      ? 'autoLand'
+      : missionPlan.some((entry) => entry.kind === 'return_home')
+        ? 'goHome'
+        : 'noAction';
+
+    const globalSpeed = Math.max(1, Math.round(Number.isFinite(maxSpeed) ? maxSpeed : 5));
+    const securityHeight = Math.max(0, Math.round(Number.isFinite(securityTakeoffHeight) ? securityTakeoffHeight : 20));
+
+    const wpmlWaypoints = primaryWaypoints.map((entry, index) => {
+      const latitude = clampLat(entry.latitude);
+      const longitude = clampLon(entry.longitude);
+      const altitude = typeof entry.altitude === 'number' ? entry.altitude : (defaultTargetAltitudePreview ?? baseAltitude);
+      const relativeHeight = (altitude ?? baseAltitude) - baseAltitude;
+      return `      <Placemark>
+        <Point>
+          <coordinates>
+            ${longitude},${latitude}
+          </coordinates>
+        </Point>
+        <wpml:index>${index}</wpml:index>
+        <wpml:executeHeight>${relativeHeight.toFixed(3)}</wpml:executeHeight>
+        <wpml:waypointSpeed>${globalSpeed}</wpml:waypointSpeed>
+      </Placemark>`;
+    }).join('\n');
+
+    const wpml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2" xmlns:wpml="http://www.dji.com/wpmz/1.0.6">
+  <Document>
+    <wpml:missionConfig>
+      <wpml:flyToWaylineMode>safely</wpml:flyToWaylineMode>
+      <wpml:finishAction>${finishAction}</wpml:finishAction>
+      <wpml:exitOnRCLost>executeLostAction</wpml:exitOnRCLost>
+      <wpml:executeRCLostAction>goBack</wpml:executeRCLostAction>
+      <wpml:takeOffSecurityHeight>${securityHeight}</wpml:takeOffSecurityHeight>
+      <wpml:globalTransitionalSpeed>${globalSpeed}</wpml:globalTransitionalSpeed>
+    </wpml:missionConfig>
+    <Folder>
+      <wpml:templateId>0</wpml:templateId>
+      <wpml:executeHeightMode>relativeToStartPoint</wpml:executeHeightMode>
+      <wpml:waylineId>0</wpml:waylineId>
+      <wpml:autoFlightSpeed>${globalSpeed}</wpml:autoFlightSpeed>
+${wpmlWaypoints}
+    </Folder>
+  </Document>
+</kml>`;
+
+    const templateKmlWaypoints = primaryWaypoints.map((entry) => `${entry.longitude},${entry.latitude},${(entry.altitude ?? baseAltitude).toFixed(3)}`).join(' ');
+    const templateKml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <Placemark>
+      <LineString>
+        <coordinates>
+          ${templateKmlWaypoints}
+        </coordinates>
+      </LineString>
+    </Placemark>
+  </Document>
+</kml>`;
+
+    const zip = new JSZip();
+    zip.file('waylines.wpml', wpml);
+    zip.file('template.kml', templateKml);
+
+    const blob = await zip.generateAsync({ type: 'blob' });
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const fileName = `mission-plan-${timestamp}.kmz`;
+
+    const electronApi = (window as any)?.electronAPI;
+    if (electronApi && typeof electronApi.saveKmzFile === 'function') {
+      const base64Data = await zip.generateAsync({ type: 'base64' });
+      await electronApi.saveKmzFile({ name: fileName, base64: base64Data });
+    } else {
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = fileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+    }
+
+    appendLog('KMZ plan exported', {
+      name: fileName,
+      waypoint_count: primaryWaypoints.length,
+      finish_action: finishAction,
+    }, 'kmz');
+    setStatusMessage(`Mission plan exported to ${fileName}.`);
+  }, [missionPlan, telemetry?.takeoff_altitude, telemetry?.home_location?.altitude, telemetry?.location?.altitude, telemetry?.altitude, maxSpeed, securityTakeoffHeight, appendLog, defaultTargetAltitudePreview]);
 
   React.useEffect(() => {
     const api = (window as any).electronAPI;
@@ -1140,19 +1044,6 @@ export const FlyToPanel: React.FC = () => {
       // shared listener; no removal to avoid breaking other consumers
     };
   }, [appendLog]);
-
-  const handleMapTargetSelect = React.useCallback((location: { latitude: number; longitude: number }) => {
-    const defaultAltitude = computeDefaultTargetAltitude();
-    setManualTarget({
-      latitude: location.latitude,
-      longitude: location.longitude,
-      altitude: defaultAltitude,
-      source: 'map',
-    });
-    setStatusMessage(`Map target set at ${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}`);
-    setPlacingTarget(false);
-    setSimPreview(null);
-  }, [computeDefaultTargetAltitude]);
 
   const updateManualCoordinate = React.useCallback((field: 'latitude' | 'longitude', raw: string) => {
     const trimmed = raw.trim();
@@ -1245,19 +1136,33 @@ export const FlyToPanel: React.FC = () => {
     URL.revokeObjectURL(url);
   }, [logEntries]);
 
-  const simulateMission = React.useCallback(() => {
+  const simulateMissionPlan = React.useCallback(() => {
     if (!telemetry || !telemetry.location) {
-      setStatusMessage('Telemetry unavailable — cannot compute target.');
+      setStatusMessage('Telemetry unavailable — cannot compute mission preview.');
       return;
     }
+
     const telemetrySnapshot = telemetry;
     const startLocation = telemetrySnapshot.location;
     if (!startLocation || !Number.isFinite(startLocation.latitude) || !Number.isFinite(startLocation.longitude)) {
       setStatusMessage('Telemetry missing aircraft location for simulation.');
       return;
     }
-    if (!activeTarget || activeTarget.latitude == null || activeTarget.longitude == null) {
-      setStatusMessage('Set a mission target before simulating.');
+
+    const planEntries = missionPlan.length
+      ? missionPlan
+      : (activeTarget && activeTarget.latitude != null && activeTarget.longitude != null
+        ? [{
+            id: `single-${Date.now()}`,
+            kind: 'waypoint' as MissionEntryKind,
+            latitude: activeTarget.latitude,
+            longitude: activeTarget.longitude,
+            altitude: activeTarget.altitude ?? null,
+          }]
+        : []);
+
+    if (planEntries.length === 0) {
+      setStatusMessage('Add a waypoint to the mission plan before simulating.');
       return;
     }
 
@@ -1267,70 +1172,117 @@ export const FlyToPanel: React.FC = () => {
     const currentAsl = telemetrySnapshot.location.altitude ?? (
       (takeoffAsl ?? 0) + (telemetrySnapshot.altitude_above_takeoff ?? 0)
     );
+    const securityAlt = takeoffAsl != null ? takeoffAsl + securityTakeoffHeight : null;
+    const homeLocation = telemetrySnapshot.home_location;
+    const defaultAltitude = defaultTargetAltitudePreview ?? telemetrySnapshot.location.altitude ?? null;
 
-    let targetAlt = activeTarget.altitude ?? telemetrySnapshot.location.altitude ?? currentAsl;
-    if (flyToMode === 'set_height' && typeof flyToHeight === 'number' && takeoffAsl != null) {
-      targetAlt = takeoffAsl + flyToHeight;
+    type SimPoint = {
+      latitude: number;
+      longitude: number;
+      altitude: number | null;
+      kind: MissionEntryKind;
+    };
+
+    const resolvedPlan: SimPoint[] = [];
+    for (const entry of planEntries) {
+      const kind = entry.kind ?? 'waypoint';
+      let latitude = entry.latitude;
+      let longitude = entry.longitude;
+      if ((kind === 'return_home' || kind === 'land') && homeLocation && Number.isFinite(homeLocation.latitude) && Number.isFinite(homeLocation.longitude)) {
+        latitude = clampLat(homeLocation.latitude);
+        longitude = clampLon(homeLocation.longitude);
+      }
+
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        continue;
+      }
+
+      let altitude = typeof entry.altitude === 'number' ? entry.altitude : defaultAltitude;
+      if (kind === 'land') {
+        altitude = takeoffAsl ?? telemetrySnapshot.location.altitude ?? altitude ?? 0;
+      }
+
+      resolvedPlan.push({
+        latitude,
+        longitude,
+        altitude: altitude ?? null,
+        kind,
+      });
     }
 
-    const securityAlt = takeoffAsl != null ? takeoffAsl + securityTakeoffHeight : null;
-    const horizontalDistance = haversineMeters(
-      { latitude: startLocation.latitude, longitude: startLocation.longitude },
-      { latitude: activeTarget.latitude, longitude: activeTarget.longitude },
-    );
+    if (!resolvedPlan.length) {
+      setStatusMessage('Mission plan did not contain any valid waypoints for simulation.');
+      return;
+    }
+
+    const horizontalSpeed = Math.max(0.5, Number.isFinite(maxSpeed) && maxSpeed > 0 ? maxSpeed : 3);
 
     const segments: SimulationSegment[] = [];
     let totalHorizontalDist = 0;
     let totalVerticalDist = 0;
     let totalDuration = 0;
+
+    let workingLat = startLocation.latitude;
+    let workingLon = startLocation.longitude;
     let workingAlt = currentAsl;
+    let firstLeg = true;
 
-    if (securityAlt != null && securityAlt > workingAlt + 0.1) {
-      const climb = securityAlt - workingAlt;
-      const duration = Math.abs(climb) / DEFAULT_VERTICAL_SPEED_MS;
-      segments.push({
-        label: 'Ascend to security height',
-        distance: 0,
-        speed: DEFAULT_VERTICAL_SPEED_MS,
-        duration,
-        startAltitude: workingAlt,
-        endAltitude: securityAlt,
-      });
-      totalVerticalDist += Math.abs(climb);
-      totalDuration += duration;
-      workingAlt = securityAlt;
-    }
+    resolvedPlan.forEach((target, index) => {
+      const targetAlt = target.altitude ?? workingAlt;
+      if (firstLeg && securityAlt != null && securityAlt > workingAlt + 0.1) {
+        const climb = securityAlt - workingAlt;
+        const duration = Math.abs(climb) / DEFAULT_VERTICAL_SPEED_MS;
+        segments.push({
+          label: 'Ascend to security height',
+          distance: 0,
+          speed: DEFAULT_VERTICAL_SPEED_MS,
+          duration,
+          startAltitude: workingAlt,
+          endAltitude: securityAlt,
+        });
+        totalVerticalDist += Math.abs(climb);
+        totalDuration += duration;
+        workingAlt = securityAlt;
+      }
 
-    if (horizontalDistance > 0.2) {
-      const horizontalSpeed = Math.max(0.5, Number.isFinite(maxSpeed) && maxSpeed > 0 ? maxSpeed : 3);
-      const duration = horizontalDistance / horizontalSpeed;
-      segments.push({
-        label: 'Horizontal translation',
-        distance: horizontalDistance,
-        speed: horizontalSpeed,
-        duration,
-        startAltitude: workingAlt,
-        endAltitude: workingAlt,
-      });
-      totalHorizontalDist += horizontalDistance;
-      totalDuration += duration;
-    }
+      const horizontalDistance = haversineMeters(
+        { latitude: workingLat, longitude: workingLon },
+        { latitude: target.latitude, longitude: target.longitude },
+      );
+      if (horizontalDistance > 0.2) {
+        const duration = horizontalDistance / horizontalSpeed;
+        segments.push({
+          label: target.kind === 'orbit' ? `Leg ${index + 1} (orbit entry)` : `Leg ${index + 1}`,
+          distance: horizontalDistance,
+          speed: horizontalSpeed,
+          duration,
+          startAltitude: workingAlt,
+          endAltitude: workingAlt,
+        });
+        totalHorizontalDist += horizontalDistance;
+        totalDuration += duration;
+      }
 
-    if (targetAlt != null && Math.abs(targetAlt - workingAlt) > 0.1) {
-      const delta = targetAlt - workingAlt;
-      const duration = Math.abs(delta) / DEFAULT_VERTICAL_SPEED_MS;
-      segments.push({
-        label: delta > 0 ? 'Climb to target altitude' : 'Descend to target altitude',
-        distance: 0,
-        speed: DEFAULT_VERTICAL_SPEED_MS,
-        duration,
-        startAltitude: workingAlt,
-        endAltitude: targetAlt,
-      });
-      totalVerticalDist += Math.abs(delta);
-      totalDuration += duration;
-      workingAlt = targetAlt;
-    }
+      if (targetAlt != null && Math.abs(targetAlt - workingAlt) > 0.1) {
+        const delta = targetAlt - workingAlt;
+        const duration = Math.abs(delta) / DEFAULT_VERTICAL_SPEED_MS;
+        segments.push({
+          label: delta > 0 ? `Climb to ${target.kind}` : `Descend to ${target.kind}`,
+          distance: 0,
+          speed: DEFAULT_VERTICAL_SPEED_MS,
+          duration,
+          startAltitude: workingAlt,
+          endAltitude: targetAlt,
+        });
+        totalVerticalDist += Math.abs(delta);
+        totalDuration += duration;
+        workingAlt = targetAlt;
+      }
+
+      workingLat = target.latitude;
+      workingLon = target.longitude;
+      firstLeg = false;
+    });
 
     const totalDistance = totalHorizontalDist + totalVerticalDist;
     const preview: SimulationPreview = {
@@ -1354,11 +1306,11 @@ export const FlyToPanel: React.FC = () => {
       })),
     }, 'simulation');
     setStatusMessage('Simulation ready — review the mission summary below.');
-  }, [activeTarget, appendLog, flyToHeight, flyToMode, maxSpeed, securityTakeoffHeight, telemetry]);
+  }, [telemetry, missionPlan, activeTarget, securityTakeoffHeight, maxSpeed, appendLog, defaultTargetAltitudePreview]);
 
   const handleSimulateMission = React.useCallback(() => {
-    simulateMission();
-  }, [simulateMission]);
+    simulateMissionPlan();
+  }, [simulateMissionPlan]);
 
   const sendFlyTo = async (latitude: number, longitude: number, altitude: number | null, label: string) => {
     const telemetrySnapshot = ensureTelemetry();
@@ -1427,21 +1379,7 @@ export const FlyToPanel: React.FC = () => {
 
     params.target_location.altitude = clampAltitude(resolvedAltitude);
 
-    const now = Date.now();
     appendLog(label, params, 'command');
-    setPreviewPath({
-      id: `request-${now}`,
-      start: telemetrySnapshot.location
-        ? {
-            latitude: telemetrySnapshot.location.latitude,
-            longitude: telemetrySnapshot.location.longitude,
-          }
-        : undefined,
-      target: { latitude, longitude },
-      backend: undefined,
-      missionId: undefined,
-      updatedAt: now,
-    });
 
     try {
       const result = await sendFlightCommand('fly_to_prepare', params);
@@ -1625,26 +1563,6 @@ export const FlyToPanel: React.FC = () => {
         },
         'telemetry',
       );
-
-      setPreviewPath((prev) => {
-        const base = prev ?? {
-          id: `ack-${latest.timestamp}`,
-          start: prev?.start,
-          target: prev?.target,
-          updatedAt: Date.now(),
-        };
-        const targetLocation = latest.target_location;
-        const target = targetLocation && typeof targetLocation.latitude === 'number' && typeof targetLocation.longitude === 'number'
-          ? { latitude: targetLocation.latitude, longitude: targetLocation.longitude }
-          : base.target;
-        return {
-          ...base,
-          backend: latest.backend ?? base.backend,
-          missionId: latest.mission_id ?? base.missionId,
-          target,
-          updatedAt: Date.now(),
-        };
-      });
     }
   }, [bridgeData.flightCommandLog, appendLog]);
 
@@ -1666,20 +1584,6 @@ export const FlyToPanel: React.FC = () => {
       }
     }
 
-    setPreviewPath((prev) => {
-      const base = prev ?? {
-        id: `status-${Date.now()}`,
-        start: prev?.start,
-        target: prev?.target,
-        updatedAt: Date.now(),
-      };
-      return {
-        ...base,
-        backend: waypointStatus.backend ?? base.backend,
-        missionId: waypointStatus.mission_id ?? base.missionId,
-        updatedAt: Date.now(),
-      };
-    });
   }, [waypointStatus]);
 
   React.useEffect(() => {
@@ -1751,20 +1655,6 @@ export const FlyToPanel: React.FC = () => {
     });
   }, [waypointStatus?.timeline, appendLog]);
 
-  React.useEffect(() => {
-    if (!telemetry?.location) return;
-    setPreviewPath((prev) => {
-      if (!prev || prev.start) return prev;
-      return {
-        ...prev,
-        start: {
-          latitude: telemetry.location.latitude,
-          longitude: telemetry.location.longitude,
-        },
-      };
-    });
-  }, [telemetry?.location?.latitude, telemetry?.location?.longitude]);
-
   const handleFlyToTarget = async () => {
     const telemetrySnapshot = ensureTelemetry();
     if (!telemetrySnapshot) return;
@@ -1815,17 +1705,39 @@ export const FlyToPanel: React.FC = () => {
       return telemetrySnapshot.location?.altitude ?? telemetrySnapshot.altitude ?? null;
     })();
 
+    let finishAction: string = 'none';
     const planPayload: MissionPlanCommandEntry[] = missionPlan
       .map((entry) => {
-        if (typeof entry.latitude !== 'number' || typeof entry.longitude !== 'number') {
+        let latitude = entry.latitude;
+        let longitude = entry.longitude;
+
+        if ((entry.kind === 'return_home' || entry.kind === 'land') && homeLocation && Number.isFinite(homeLocation.latitude) && Number.isFinite(homeLocation.longitude)) {
+          latitude = clampLat(homeLocation.latitude);
+          longitude = clampLon(homeLocation.longitude);
+        }
+
+        if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
           return null;
         }
-        const altitudeAsl = typeof entry.altitude === 'number'
+
+        if (entry.kind === 'return_home') {
+          finishAction = 'return_home';
+        }
+        if (entry.kind === 'land') {
+          finishAction = 'land';
+        }
+
+        let altitudeAsl = typeof entry.altitude === 'number'
           ? entry.altitude
           : defaultAltitudeAsl;
+
+        if (entry.kind === 'land') {
+          altitudeAsl = takeoffAltitudeAsl ?? defaultAltitudeAsl ?? altitudeAsl ?? 0;
+        }
+
         const payload: MissionPlanCommandEntry = {
-          latitude: entry.latitude,
-          longitude: entry.longitude,
+          latitude,
+          longitude,
           altitude: typeof altitudeAsl === 'number' ? altitudeAsl : null,
           kind: entry.kind,
         };
@@ -1880,6 +1792,17 @@ export const FlyToPanel: React.FC = () => {
 
     if (typeof targetAltitudeAsl === 'number') {
       commandPayload.target_altitude_asl = targetAltitudeAsl;
+    }
+
+    switch (finishAction) {
+      case 'return_home':
+        commandPayload.finish_action = 'go_home';
+        break;
+      case 'land':
+        commandPayload.finish_action = 'land';
+        break;
+      default:
+        break;
     }
 
     appendLog('Mission plan execute', commandPayload, 'command');
@@ -1942,19 +1865,8 @@ export const FlyToPanel: React.FC = () => {
         </div>
 
         <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
-          <div className="text-gray-400 uppercase text-[11px] mb-2">Relative Move</div>
+          <div className="text-gray-400 uppercase text-[11px] mb-2">Mission Defaults</div>
           <div className="grid grid-cols-2 gap-2 mb-2">
-            <label className="flex flex-col gap-1 text-[11px]">
-              <span>Distance (m)</span>
-              <input
-                type="number"
-                value={distanceMeters}
-                min={1}
-                max={200}
-                onChange={(event) => setDistanceMeters(Number(event.target.value) || 0)}
-                className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-right"
-              />
-            </label>
             <label className="flex flex-col gap-1 text-[11px]">
               <span>Max Speed (m/s)</span>
               <input
@@ -1977,9 +1889,7 @@ export const FlyToPanel: React.FC = () => {
                 className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-right"
               />
             </label>
-          </div>
-          <div className="grid grid-cols-2 gap-2 mb-2 text-[11px]">
-            <label className="flex flex-col gap-1">
+            <label className="flex flex-col gap-1 text-[11px]">
               <span>Fly-To Mode</span>
               <select
                 value={flyToMode}
@@ -1993,24 +1903,57 @@ export const FlyToPanel: React.FC = () => {
                 ))}
               </select>
             </label>
-            {flyToMode === 'set_height' && (
-              <label className="flex flex-col gap-1">
-                <span>Target Height (m AGL)</span>
-                <input
-                  type="number"
-                  value={flyToHeight}
-                  min={Math.max(1, Math.floor(heightRangeMin))}
-                  max={Math.max(Math.ceil(heightRangeMax), Math.floor(heightRangeMin) + 1)}
-                  onChange={(event) => setFlyToHeight(Number(event.target.value) || 0)}
-                  className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-right"
-                />
-                {heightRange && (
-                  <span className="text-[10px] text-gray-500">
-                    Capability range {heightRange.min ?? '—'} – {heightRange.max ?? '—'} m
-                  </span>
-                )}
-              </label>
-            )}
+            <label className="flex flex-col gap-1 text-[11px]">
+              <span>Default Target Height (m AGL)</span>
+              <input
+                type="number"
+                value={flyToMode === 'set_height' ? flyToHeight : securityTakeoffHeight}
+                min={Math.max(1, Math.floor(heightRangeMin))}
+                max={Math.max(Math.ceil(heightRangeMax), Math.floor(heightRangeMin) + 1)}
+                onChange={(event) => {
+                  const value = Number(event.target.value) || 0;
+                  if (flyToMode === 'set_height') {
+                    setFlyToHeight(value);
+                  } else {
+                    setSecurityTakeoffHeight(value);
+                  }
+                }}
+                className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-right"
+              />
+              {heightRange && (
+                <span className="text-[10px] text-gray-500">
+                  Capability range {heightRange.min ?? '—'} – {heightRange.max ?? '—'} m
+                </span>
+              )}
+            </label>
+          </div>
+          <div className="text-[10px] text-gray-500 mb-3">
+            Default AMSL target: {defaultTargetAltitudePreview != null ? defaultTargetAltitudePreview.toFixed(1) : '—'} m
+          </div>
+          <div className="text-gray-400 uppercase text-[11px] mb-2">Manual Move Presets</div>
+          <div className="grid grid-cols-2 gap-2 mb-2">
+            <label className="flex flex-col gap-1 text-[11px]">
+              <span>Distance (m)</span>
+              <input
+                type="number"
+                value={distanceMeters}
+                min={1}
+                max={200}
+                onChange={(event) => setDistanceMeters(Number(event.target.value) || 0)}
+                className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-right"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-[11px]">
+              <span>Δ Altitude (m)</span>
+              <input
+                type="number"
+                value={verticalMeters}
+                min={1}
+                max={200}
+                onChange={(event) => setVerticalMeters(Number(event.target.value) || 0)}
+                className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-right"
+              />
+            </label>
           </div>
           <div className="grid grid-cols-2 gap-2">
             <button className="px-2 py-1 rounded bg-gray-800/80 border border-gray-700" onClick={() => handleRelativeMove('forward')}>
@@ -2132,7 +2075,7 @@ export const FlyToPanel: React.FC = () => {
               className={`px-2 py-1 rounded border ${placingTarget ? 'border-amber-400 text-amber-200 bg-amber-500/10' : 'border-gray-700 text-gray-200 bg-gray-800/60 hover:bg-gray-700/60'}`}
               onClick={() => setPlacingTarget((prev) => !prev)}
             >
-              {placingTarget ? 'Click map to finish' : 'Place via map'}
+              {placingTarget ? 'Ctrl+click main map' : 'Enable map placement'}
             </button>
             <button
               type="button"
@@ -2174,21 +2117,14 @@ export const FlyToPanel: React.FC = () => {
               )}
             </div>
           )}
-          <div className="grid grid-cols-2 gap-2 mb-2">
-            <button
-              type="button"
-              className="px-2 py-1 rounded bg-gray-800/70 border border-gray-600 text-gray-100 hover:bg-gray-700/70"
-              onClick={handleSimulateMission}
-            >
-              Simulate Mission
-            </button>
+          <div className="grid grid-cols-1 gap-2 mb-2">
             <button
               type="button"
               className="px-2 py-1 rounded bg-dji-blue text-white hover:bg-dji-blue/80 disabled:bg-gray-700 disabled:text-gray-400"
               onClick={handleFlyToTarget}
               disabled={!activeTarget || activeTarget.latitude == null || activeTarget.longitude == null}
             >
-              Fly to Target
+              Fly to Staged Target
             </button>
           </div>
           {simPreview && (
@@ -2230,7 +2166,7 @@ export const FlyToPanel: React.FC = () => {
 
         <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
           <div className="flex items-center justify-between mb-2">
-            <div className="text-gray-400 uppercase text-[11px]">Load KMZ Mission</div>
+            <div className="text-gray-400 uppercase text-[11px]">KMZ Missions</div>
             {lastLoadedKmz && (
               <div className="text-[10px] text-gray-400 truncate">
                 Last: <span className="text-gray-200">{lastLoadedKmz.name}</span>
@@ -2247,7 +2183,14 @@ export const FlyToPanel: React.FC = () => {
               className="px-2 py-1 rounded bg-dji-blue text-white hover:bg-dji-blue/80"
               onClick={handleLoadKmzMission}
             >
-              Select & Execute KMZ
+              Load KMZ into Plan
+            </button>
+            <button
+              type="button"
+              className="px-2 py-1 rounded border border-gray-700 text-gray-200 bg-gray-800/50 hover:bg-gray-700/60"
+              onClick={handleSaveKmzMission}
+            >
+              Export Plan as KMZ
             </button>
             {lastLoadedKmz?.path && (
               <button
@@ -2260,7 +2203,7 @@ export const FlyToPanel: React.FC = () => {
             )}
           </div>
           <div className="mt-2 text-[10px] text-gray-500">
-            Uploads a DJI Waypoint KMZ package to the bridge and executes it via the waypoint backend. Use this to replay missions created in Pilot or field recordings.
+            Imports a DJI Waypoint KMZ into the mission planner for review and simulation. Execute manually once satisfied with the plan.
           </div>
         </section>
 
@@ -2277,16 +2220,34 @@ export const FlyToPanel: React.FC = () => {
               </button>
             )}
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2 text-[11px]">
-            <button
-              type="button"
-              className="rounded border border-status-good/50 bg-status-good/20 text-status-good px-2 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
-              onClick={addWaypointToPlan}
-              disabled={!activeTarget || activeTarget.latitude == null || activeTarget.longitude == null}
-            >
-              Add Target as Waypoint
-            </button>
-            <div className="flex items-center gap-1 text-[10px] text-gray-300">
+          <div className="space-y-2 text-[11px]">
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="rounded border border-status-good/50 bg-status-good/20 text-status-good px-2 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                onClick={addWaypointToPlan}
+                disabled={!activeTarget || activeTarget.latitude == null || activeTarget.longitude == null}
+              >
+                Add Staged Target
+              </button>
+              <button
+                type="button"
+                className="rounded border border-emerald-500/60 bg-emerald-500/15 text-emerald-200 px-2 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                onClick={addReturnHomeToPlan}
+                disabled={!hasHomeLocation}
+              >
+                Add Return Home
+              </button>
+              <button
+                type="button"
+                className="rounded border border-rose-500/60 bg-rose-500/15 text-rose-200 px-2 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                onClick={addLandToPlan}
+                disabled={!hasLandingCoordinate}
+              >
+                Add Land
+              </button>
+            </div>
+            <div className="flex flex-wrap items-center gap-1 text-[10px] text-gray-300">
               <label className="flex items-center gap-1">
                 Radius (m)
                 <input
@@ -2325,38 +2286,77 @@ export const FlyToPanel: React.FC = () => {
             </div>
           ) : (
             <div className="space-y-1.5 max-h-32 overflow-y-auto text-[10px] text-gray-300">
-              {missionPlan.map((entry, index) => (
-                <div
-                  key={entry.id}
-                  className="flex items-start justify-between gap-2 border border-gray-700/60 rounded px-2 py-1 bg-black/30"
-                >
-                  <div>
-                    <div className="font-semibold text-gray-200">
-                      {entry.kind === 'orbit' ? `Orbit ${index + 1}` : `Waypoint ${index + 1}`}
-                    </div>
-                    <div className="text-gray-400">
-                      {entry.latitude.toFixed(6)}, {entry.longitude.toFixed(6)}
-                      {typeof entry.altitude === 'number' && ` · alt ${entry.altitude.toFixed(1)} m`}
-                    </div>
-                    {entry.kind === 'orbit' && entry.radius && (
-                      <div className="text-purple-200">
-                        Radius {entry.radius} m · {entry.turns ?? 1} turn{(entry.turns ?? 1) === 1 ? '' : 's'}
-                      </div>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    className="text-status-error text-[10px] border border-status-error/60 rounded px-1 py-0.5 hover:bg-status-error/10"
-                    onClick={() => removePlanEntry(entry.id)}
+              {missionPlan.map((entry, index) => {
+                const entryLabel = entry.kind === 'orbit'
+                  ? `Orbit ${index + 1}`
+                  : entry.kind === 'return_home'
+                    ? 'Return Home'
+                    : entry.kind === 'land'
+                      ? 'Land'
+                      : `Waypoint ${index + 1}`;
+                const altitudeValue = entry.altitude ?? '';
+                return (
+                  <div
+                    key={entry.id}
+                    className="flex items-start justify-between gap-2 border border-gray-700/60 rounded px-2 py-1 bg-black/30"
                   >
-                    Remove
-                  </button>
-                </div>
-              ))}
+                    <div className="space-y-1">
+                      <div className="font-semibold text-gray-200">{entryLabel}</div>
+                      <div className="text-gray-400">
+                        {entry.latitude.toFixed(6)}, {entry.longitude.toFixed(6)}
+                      </div>
+                      <div className="flex items-center gap-2 text-[10px] text-gray-300">
+                        <span>Altitude (AMSL)</span>
+                        <input
+                          type="number"
+                          value={altitudeValue}
+                          onChange={(event) => {
+                            const raw = event.target.value;
+                            if (raw === '') {
+                              updatePlanEntryAltitude(entry.id, null);
+                              return;
+                            }
+                            const numeric = Number(raw);
+                            if (Number.isFinite(numeric)) {
+                              updatePlanEntryAltitude(entry.id, numeric);
+                            }
+                          }}
+                          className="w-24 bg-black/40 border border-gray-700/70 rounded px-1 py-0.5 text-right"
+                        />
+                      </div>
+                      {entry.kind === 'orbit' && entry.radius && (
+                        <div className="text-purple-200">
+                          Radius {entry.radius} m · {entry.turns ?? 1} turn{(entry.turns ?? 1) === 1 ? '' : 's'}
+                        </div>
+                      )}
+                      {entry.kind === 'return_home' && (
+                        <div className="text-emerald-200 text-[10px]">Will trigger Return-to-Home at mission end.</div>
+                      )}
+                      {entry.kind === 'land' && (
+                        <div className="text-rose-200 text-[10px]">Will descend to the landing coordinate.</div>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      className="text-status-error text-[10px] border border-status-error/60 rounded px-1 py-0.5 hover:bg-status-error/10"
+                      onClick={() => removePlanEntry(entry.id)}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           )}
           {missionPlan.length > 0 && (
             <div className="mt-2 flex flex-col gap-1 text-[10px]">
+              <button
+                type="button"
+                className="px-2 py-1 rounded bg-gray-800/60 border border-gray-600 text-gray-200 hover:bg-gray-700/70"
+                onClick={handleSimulateMission}
+              >
+                Simulate Mission Plan
+              </button>
               <button
                 type="button"
                 className="px-2 py-1 rounded bg-dji-blue text-white hover:bg-dji-blue/80 disabled:bg-gray-700 disabled:text-gray-400"
@@ -2373,98 +2373,16 @@ export const FlyToPanel: React.FC = () => {
         </section>
 
         <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
-          <div className="text-gray-400 uppercase text-[11px] mb-1">Return to Home</div>
-          <div className="grid grid-cols-2 gap-2">
-            <button className="px-2 py-1 rounded bg-status-good/20 border border-status-good/50 text-status-good" onClick={() => handleReturnHome('return_home_start')}>
-              Start RTH
-            </button>
-            <button className="px-2 py-1 rounded bg-status-error/20 border border-status-error/60 text-status-error" onClick={() => handleReturnHome('return_home_stop')}>
-              Stop RTH
-            </button>
-          </div>
-        </section>
-
-        <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
-          <div className="flex items-center justify-between mb-1">
-            <div className="text-gray-400 uppercase text-[11px]">Waypoint Preview</div>
-            <div className={`text-[11px] font-semibold ${missionStateClassName(missionStateRaw)}`}>
-              {missionStateLabel}
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-gray-400 uppercase text-[11px]">Mission Execution</div>
+            <div className="flex items-center gap-2 text-[10px] text-gray-500">
+              <span>State</span>
+              <span className={`px-2 py-0.5 rounded border ${missionStateClassName(missionStateRaw)}`}>
+                {missionStateLabel}
+              </span>
             </div>
           </div>
-          <WaypointMapPreview
-            path={previewPath}
-            interactive={placingTarget}
-            onSelectTarget={handleMapTargetSelect}
-            aircraftLocation={telemetry?.location ?? null}
-            homeLocation={telemetry?.home_location ?? null}
-            targetLocation={activeTarget && activeTarget.latitude != null && activeTarget.longitude != null
-              ? { latitude: activeTarget.latitude, longitude: activeTarget.longitude }
-              : null}
-            planPath={plannedPathCoordinates}
-            planMarkers={plannedMarkers}
-          />
-          <div className="mt-2 text-[11px] text-gray-300 space-y-0.5">
-            <div>
-              Backend: <span className="text-gray-200">{missionBackend ?? '—'}</span>
-            </div>
-            <div>
-              Mission ID: <span className="text-gray-200">{missionId ?? '—'}</span>
-            </div>
-            <div>
-              Updated: <span className="text-gray-200">{missionTimestampLabel}</span>
-            </div>
-            {missionInterrupt?.description && (
-              <div className="text-status-error">
-                Interrupt: {missionInterrupt.description}
-                {missionInterrupt.code && (
-                  <span className="text-gray-400"> ({missionInterrupt.code})</span>
-                )}
-              </div>
-            )}
-            {missionId && missionBackend && (
-              <div className="text-[10px] text-gray-400 leading-tight">
-                Backend origin: <span className="text-gray-300">{missionBackend}</span>
-              </div>
-            )}
-            {waypointStatus?.mission_path && (
-              <div className="text-[10px] text-gray-400 leading-tight flex items-center gap-2">
-                <span className="truncate" title={waypointStatus.mission_path}>
-                  KMZ: <span className="text-gray-300">{waypointStatus.mission_path}</span>
-                </span>
-                <button
-                  type="button"
-                  className="px-1 py-0.5 border border-gray-700 rounded text-gray-300 hover:text-white hover:border-gray-500"
-                  onClick={() => handleCopyMissionPath(waypointStatus.mission_path!)}
-                >
-                  Copy
-                </button>
-              </div>
-            )}
-          </div>
-          {missionTimelineDisplay.length > 0 && (
-            <div className="mt-2 border-t border-gray-800 pt-2 space-y-1.5 text-[10px] text-gray-400 max-h-28 overflow-y-auto">
-              {missionTimelineDisplay.map((entry, idx) => {
-                const fallbackLabel = entry.type === 'state'
-                  ? formatMissionStateLabel(entry.state)
-                  : entry.type === 'executing' && entry.execute_state
-                    ? entry.execute_state.replace(/_/g, ' ').toUpperCase()
-                    : entry.type.toUpperCase();
-                const entryLabel = entry.label ?? fallbackLabel;
-                const entryTime = entry.timestamp ? `${formatRelativeTime(entry.timestamp)} ago` : '–';
-                return (
-                  <div
-                    key={`${entry.type}-${idx}`}
-                    className="flex items-center justify-between gap-2"
-                    title={missionTimelineTooltip(entry, entryLabel)}
-                  >
-                    <span className="text-gray-200">{entryLabel}</span>
-                    <span className="text-gray-500">{entryTime}</span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-          <div className="mt-2 flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <button
               type="button"
               className="px-2 py-1 rounded bg-gray-800/60 border border-gray-600 text-gray-200 hover:bg-gray-700/70 disabled:opacity-40 disabled:cursor-not-allowed"
@@ -2490,68 +2408,6 @@ export const FlyToPanel: React.FC = () => {
               Stop
             </button>
           </div>
-          <div className="mt-2 text-[10px] text-gray-500">
-            {placingTarget ? 'Click the preview map to capture a manual waypoint.' : 'Toggle “Place via map” above to drop a waypoint directly on the preview.'}
-          </div>
-        </section>
-
-        <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
-          <div className="flex items-center justify-between mb-2">
-            <div className="text-gray-400 uppercase text-[11px]">Mission Timeline</div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                className="px-2 py-1 rounded border border-gray-700 text-gray-300 bg-gray-800/40 disabled:opacity-40 disabled:cursor-not-allowed"
-                onClick={handleClearMissionLog}
-                disabled={!logEntries.length}
-              >
-                Clear
-              </button>
-              <button
-                type="button"
-                className="px-2 py-1 rounded border border-gray-700 text-gray-300 bg-gray-800/40 disabled:opacity-40 disabled:cursor-not-allowed"
-                onClick={handleExportMissionLog}
-                disabled={!logEntries.length}
-              >
-                Export JSON
-              </button>
-            </div>
-          </div>
-          {logEntries.length === 0 ? (
-            <div className="text-[11px] text-gray-500">No mission entries recorded yet.</div>
-          ) : (
-            <div className="flex flex-col gap-2 max-h-48 overflow-y-auto">
-              {logEntries.map((entry) => (
-                <div key={entry.id} className="border border-gray-700/60 rounded px-2 py-1 bg-black/30">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`text-[10px] px-1.5 py-0.5 rounded-full ${entry.kind === 'command'
-                          ? 'bg-gray-700/80 text-gray-200'
-                          : entry.kind === 'telemetry'
-                            ? 'bg-blue-700/40 text-blue-100'
-                            : entry.kind === 'simulation'
-                              ? 'bg-purple-700/40 text-purple-100'
-                              : entry.kind === 'laser'
-                                ? 'bg-amber-600/40 text-amber-100'
-                                : entry.kind === 'kmz'
-                                  ? 'bg-indigo-700/40 text-indigo-100'
-                                  : 'bg-emerald-700/40 text-emerald-100'
-                          }`}
-                      >
-                        {entry.kind.toUpperCase()}
-                      </span>
-                      <span className="text-[11px] text-gray-200">{entry.label}</span>
-                    </div>
-                    <span className="text-[10px] text-gray-500">{new Date(entry.timestamp).toLocaleTimeString()}</span>
-                  </div>
-                  <pre className="text-[10px] text-gray-500 whitespace-pre-wrap break-all mt-1">
-{JSON.stringify(entry.payload, null, 2)}
-                  </pre>
-                </div>
-              ))}
-            </div>
-          )}
         </section>
       </div>
     </Panel>

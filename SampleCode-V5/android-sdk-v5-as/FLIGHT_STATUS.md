@@ -7,13 +7,15 @@ Use only standard ascii characters here - don't use ✅  or similar
 > **Transcript logging** - Append the user's instructions and your thought process (with ISO 8601 timestamps) to transcript.txt after every working session so we can reconstruct decision history later.
 ---
 
-## TL;DR (Sep 28 2025 20:58 - workspace, HEAD a9dac908f66c7a5533ebadd768efcb85aac58a97)
+## TL;DR (Sep 29 2025 02:28 - workspace, HEAD a9dac908f66c7a5533ebadd768efcb85aac58a97)
 
 - **Document discipline** - Update this file after every bridge/desktop change. Status, safety checklists, operator notes, and backlog items must always reflect the running code. Never mark a feature complete without field verification.
 - **Transcript discipline** - Keep transcript.txt current: append the latest user instructions and your thought process with ISO 8601 timestamps whenever you touch the project.
 - **Mission planner** - The shared mission planner store feeds the main map, Fly-To panel, Orientation, and HSI; map clicks (stage/waypoint/orbit) auto-populate targets, default altitudes come from set-height or the safety floor, and multi-waypoint plans now execute through the waypoint fallback backend with logging.
-- **Manual mission tooling** - Desktop Fly-To panel still supports map clicks, laser fixes, manual lat/lon entry, mission simulation, and timeline export; validate on hardware before relying on it in the field.
-- **External KMZ playback** - Fly-To panel can ingest DJI Pilot-generated KMZ files, forward them to the bridge, and auto-execute the uploaded mission with logged metadata (name, path, size). Use bench tests/simulator first, then capture field evidence before routine use.
+- **Fly-To refactor** - Fly-To now fronts the mission planner (defaults, target staging, KMZ import/export). Multi-waypoint runs with RTH/Land finish actions were validated; orbit execution/export still needs work.
+- **Map controls** - Map auto-center now has a manual toggle beside auto-rotate; ctrl+click stages targets while preserving drag-to-pan.
+- **Manual mission tooling** - Desktop Fly-To panel supports map clicks, laser fixes, manual lat/lon entry, mission-wide simulation, and timeline export; validate on hardware before relying on it in the field.
+- **KMZ workflow** - Fly-To loads DJI Pilot-generated KMZ files into the planner for review and export; execution is manual once the plan is inspected.
 - **Field validation focus** - Collect hardware evidence for the 16 Hz keyboard/mouse stream, mission-plan execution (including altitude hold versus security floor), `waypoint_v2` fallback (mission id + KMZ logs), external KMZ execution, auto-mode gating, FlySafe toasts, the new mission simulation workflow, and session exports. Capture CSV/JSON logs, telemetry screenshots, and note any NFZ height bubbles blocking movement.
 - **Recent changes (latest first)**
   1. 2025-09-28 - Multi-waypoint mission plans now run end-to-end (planner → bridge → waypoint fallback), security take-off height clamps plan legs, default altitudes follow set-height or the safety floor, Orientation/HSI render home + next-waypoint arrows, and `KeyK` fires the motor start/shutdown stick macro.
@@ -30,11 +32,11 @@ Use only standard ascii characters here - don't use ✅  or similar
 
   Next
 
-  1. Field-validate the mission planner pipeline (multi-waypoint + orbit mix) on hardware: confirm altitude never dips below the configured security floor and timeline logs show pause/resume/break-point data.
-  2. Exercise the refreshed Map panel interactions (stage target, Shift+Click waypoint, Option+Click orbit) in simulator and hardware; capture telemetry/screenshots showing mission overlays, Orientation arrows, and HSI guidance.
-  3. Run bench + field tests of the external KMZ loader (log selection metadata, mission ack, timeline entries, and flight behaviour); document any DJI error codes.
+  1. Field-validate the mission planner pipeline (multi-waypoint + Return Home/Land finish) on hardware; capture telemetry/logs and verify orbit behaviour once backend support lands.
+  2. Exercise the refreshed map interactions (drag pan, ctrl+click stage, Shift/Option add) in simulator and hardware; capture telemetry/screenshots showing mission overlays, Orientation arrows, and HSI guidance.
+  3. Profile desktop performance (map update throttling, video gating, worker offload, GPU/OffscreenCanvas settings) to address the slowdowns observed in long sessions; ensure H20N stays disabled in simulator mode.
   4. Capture bench evidence for the new simulator toggle (enable/disable, telemetry snapshot, command ack) and confirm Fly-To behaviours stay in sync while simulated.
-  5. Define orbit/curved-waypoint parameterisation (radius, dwell, camera heading) for planner entries before enabling more advanced POI/orbit execution in production.
+  5. Define orbit/curved-waypoint parameterisation (radius, dwell, camera heading) for planner entries before enabling production orbit execution/export.
 
 ---
 
@@ -262,10 +264,10 @@ Keep this list groomed; link each item to task tracking where applicable.
 ### 7.1 Navigation primitives (immediate, in progress)
 - Validate existing relative fly-to UI (forward/back/left/right/up/down, optional speed) and RTH start/stop buttons in the field; log any FlySafe/NFZ rejections with `fly_to_context` snapshots.
 - Extend Fly-To logging with raw DJI error codes, target altitude, and FlySafe warning height so pilots can diagnose failures quickly (confirm coverage with `waypoint_v2` extras).
-- Waypoint fallback + mission planner execution path is live; next step is on-aircraft validation (security-height hold, pause/resume, break-point recovery) with full timeline/export logs.
+- Waypoint fallback + mission planner execution path is live; next step is on-aircraft validation (security-height hold, pause/resume, break-point recovery, KMZ import/export) with full timeline/export logs.
 - Modularise the bridge further so intelligent and waypoint backends share a common telemetry/logging layer and the desktop can annotate which path executed.
-- Extend mission authoring toward advanced workflows (orbit radius/dwell tuning, curved segments/POI encoding, “record manual flight” replay).
-- Validate the simulation preview against flight telemetry and expose additional configuration (wind assumptions, speed caps, loiter duration).
+- Extend mission authoring toward advanced workflows (orbit radius/dwell tuning, curved segments/POI encoding, “record manual flight” replay). Orbit execution/export still pending—document DJI curved-wayline requirements.
+- Validate the mission-wide simulation preview against flight telemetry and expose additional configuration (wind assumptions, speed caps, loiter duration).
 - Determine if DJI simulator can be used to debug mission planning/execution (see docs/SIMULATOR.md) once waypoint telemetry is exposed.
 
 ### 7.2 Controller insight & FlySafe
@@ -280,6 +282,7 @@ Keep this list groomed; link each item to task tracking where applicable.
 - HUD speed/altitude units toggle (m/s ↔︎ mph, meters ↔︎ feet).
 - Battery widget parity with DJI Pilot (dual packs, warnings).
 - Extend manual session exports with full telemetry (altitude, speed, attitude) per frame.
+- Gate FPV/H20N overlays and decode loops when streams are hidden or simulator mode is active; confirm H20N stays idle in simulator sessions.
 
 ### 7.4 Simulator enablement
 - Simulator controls (enable/disable with location & satellite presets) ship in the Flight Commands panel; gather bench evidence that telemetry/video gating behaves and capture ack/error logs.
@@ -297,6 +300,12 @@ Keep this list groomed; link each item to task tracking where applicable.
 - Scriptable smoke test (takeoff → manual session → kill → land) driven via CLI.
 - Simulator mission regression (upload, start, pause/resume, stop, break-point).
 
+### 7.7 Performance & Profiling
+- Throttle high-frequency map updates (5–10 Hz) or memoize derived props to reduce `easeTo` churn; pause map animations when auto-center is disabled.
+- Move heavy computation (mission preview math, large KMZ parsing) off the renderer main thread via Web Workers/worker_threads.
+- Audit BrowserWindow hardware acceleration/offscreen settings; ensure OffscreenCanvas/WebCodecs are actually engaged when available.
+- Use Chrome DevTools (Performance/Web Vitals, `about:tracing`) to isolate GPU vs CPU bottlenecks and compare frame times with single vs dual video streams.
+
 ---
 
 ## 8. Field Test Prep Template
@@ -312,4 +321,4 @@ During the test, annotate each significant event (command, toast, diagnostic) wi
 
 ---
 Keep conversation history updated in transcript.txt. Read-friendly formatting. Use verbose/full transcript
-_Last updated: Sep 28 2025 - multi-waypoint mission planner executes through waypoint fallback; transcript logging policy captured._
+_Last updated: Sep 29 2025 - Fly-To panel refactored with mission planner integration, KMZ import/export, and map auto-center toggle; performance profiling queued._

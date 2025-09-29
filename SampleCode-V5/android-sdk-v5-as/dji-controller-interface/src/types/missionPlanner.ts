@@ -1,4 +1,4 @@
-export type MissionEntryKind = 'waypoint' | 'orbit';
+export type MissionEntryKind = 'waypoint' | 'orbit' | 'return_home' | 'land';
 
 export interface PlannedMissionEntry {
   id: string;
