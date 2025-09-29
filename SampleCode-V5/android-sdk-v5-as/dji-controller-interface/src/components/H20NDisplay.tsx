@@ -22,6 +22,7 @@ import {
 } from "../agent/cameraProjectionClient";
 import { normalizeAngleDeg, shortestAngleDiffDeg } from "../utils/angleUtils";
 import { projectionModeStore } from "../state/projectionMode";
+import { spawnVideoRendererWorker } from "../utils/videoRendererWorker";
 import { telemetryShallowEqual } from "../utils/telemetryCompare";
 import { usePanelVisibility } from "../hooks/usePanelVisibility";
 import { h20nCameraPanelControls } from "./CameraPanel";
@@ -108,6 +109,8 @@ const H20NDisplayComponent = (
     const frameIntervalRef = useRef<number>(16);
     const shouldThrottle = simulatorActive || !panelVisible;
     frameIntervalRef.current = shouldThrottle ? 200 : 16;
+    const rendererWorkerRef = useRef<Worker | null>(null);
+    const workerReadyRef = useRef<boolean>(false);
     const [clickIndicators, setClickIndicators] = useState<ClickIndicator[]>(
       [],
     );
@@ -164,6 +167,49 @@ const H20NDisplayComponent = (
         unsubscribe();
       };
     }, [panelVisible, simulatorActive]);
+
+    useEffect(() => {
+      const canvas = canvasRef.current;
+      if (!canvas) {
+        return;
+      }
+      const anyCanvas = canvas as HTMLCanvasElement & { transferControlToOffscreen?: () => OffscreenCanvas };
+      if (
+        typeof OffscreenCanvas === "undefined" ||
+        typeof Worker === "undefined" ||
+        typeof anyCanvas.transferControlToOffscreen !== "function"
+      ) {
+        workerReadyRef.current = false;
+        return;
+      }
+      const offscreen = anyCanvas.transferControlToOffscreen();
+      const worker = spawnVideoRendererWorker();
+      if (!worker) {
+        workerReadyRef.current = false;
+        return;
+      }
+      worker.postMessage(
+        {
+          type: "init",
+          canvas: offscreen,
+          devicePixelRatio: typeof window !== "undefined" ? window.devicePixelRatio ?? 1 : 1,
+        },
+        [offscreen],
+      );
+      rendererWorkerRef.current = worker;
+      workerReadyRef.current = true;
+
+      return () => {
+        try {
+          worker.postMessage({ type: "dispose" });
+        } catch (error) {
+          console.warn("H20N worker dispose error", error);
+        }
+        worker.terminate();
+        rendererWorkerRef.current = null;
+        workerReadyRef.current = false;
+      };
+    }, []);
 
     // Clear vision boxes when camera moves (any gimbal command updates) - handled by parent App component now
 
@@ -1090,14 +1136,17 @@ const H20NDisplayComponent = (
         destroyDecoder();
         window.electronAPI.removeAllListeners("secondary-video-frame");
         lastRenderTimeRef.current = 0;
+        rendererWorkerRef.current?.postMessage({ type: "clear" });
       };
 
       if (!panelVisible) {
         teardownAll();
         const canvas = canvasRef.current;
-        const ctx = canvas?.getContext("2d");
-        if (canvas && ctx) {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (rendererWorkerRef.current) {
+          rendererWorkerRef.current.postMessage({ type: "clear" });
+        } else if (canvas) {
+          const ctx = canvas.getContext("2d");
+          ctx?.clearRect(0, 0, canvas.width, canvas.height);
         }
         setVideoStatus("waiting");
         setFrameStats({ frames: 0, totalBytes: 0, lastFrame: 0, decodedFrames: 0 });
@@ -1111,9 +1160,11 @@ const H20NDisplayComponent = (
         setFrameStats({ frames: 0, totalBytes: 0, lastFrame: 0, decodedFrames: 0 });
         setVideoStatus("simulator");
         const canvas = canvasRef.current;
-        const ctx = canvas?.getContext("2d");
-        if (canvas && ctx) {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (rendererWorkerRef.current) {
+          rendererWorkerRef.current.postMessage({ type: "clear" });
+        } else if (canvas) {
+          const ctx = canvas.getContext("2d");
+          ctx?.clearRect(0, 0, canvas.width, canvas.height);
         }
         return () => {
           teardownAll();
@@ -1181,18 +1232,27 @@ const H20NDisplayComponent = (
 
         try {
           const canvas = canvasRef.current;
-          const ctx = canvas.getContext("2d");
-
-          if (!ctx) {
-            throw new Error("Failed to get canvas context");
+          if (!canvas) {
+            throw new Error("H20N canvas unavailable");
           }
 
-          // Create offscreen canvas for double buffering
-          offscreenCanvasRef.current = new OffscreenCanvas(1920, 1080);
-          offscreenCtxRef.current = offscreenCanvasRef.current.getContext("2d");
+          const useWorkerRenderer = workerReadyRef.current && Boolean(rendererWorkerRef.current);
+          let ctx: CanvasRenderingContext2D | null = null;
 
-          if (!offscreenCtxRef.current) {
-            throw new Error("Failed to get offscreen canvas context");
+          if (!useWorkerRenderer) {
+            ctx = canvas.getContext("2d");
+            if (!ctx) {
+              throw new Error("Failed to get canvas context");
+            }
+            offscreenCanvasRef.current = new OffscreenCanvas(1920, 1080);
+            offscreenCtxRef.current = offscreenCanvasRef.current.getContext("2d");
+
+            if (!offscreenCtxRef.current) {
+              throw new Error("Failed to get offscreen canvas context");
+            }
+          } else {
+            offscreenCanvasRef.current = null;
+            offscreenCtxRef.current = null;
           }
 
           // Create the decoder (but don't configure until we have SPS/PPS)
@@ -1207,61 +1267,58 @@ const H20NDisplayComponent = (
                 }
                 lastRenderTimeRef.current = now;
 
-                // Update video dimensions if changed
-                if (
-                  videoDimensions.width !== frame.codedWidth ||
-                  videoDimensions.height !== frame.codedHeight
-                ) {
+                const codedWidth = frame.codedWidth;
+                const codedHeight = frame.codedHeight;
+
+                const dimensionsChanged =
+                  videoDimensions.width !== codedWidth ||
+                  videoDimensions.height !== codedHeight;
+
+                if (dimensionsChanged) {
                   setVideoDimensions({
-                    width: frame.codedWidth,
-                    height: frame.codedHeight,
+                    width: codedWidth,
+                    height: codedHeight,
                   });
                 }
 
-                // Resize offscreen canvas if needed
-                const offscreenCanvas = offscreenCanvasRef.current;
-                const offscreenCtx = offscreenCtxRef.current;
+                if (!useWorkerRenderer && (canvas.width !== codedWidth || canvas.height !== codedHeight)) {
+                  canvas.width = codedWidth;
+                  canvas.height = codedHeight;
+                }
 
-                if (!offscreenCanvas || !offscreenCtx) {
+                if (useWorkerRenderer && rendererWorkerRef.current) {
+                  const worker = rendererWorkerRef.current;
+                  if (dimensionsChanged) {
+                    worker.postMessage({ type: "resize", width: codedWidth, height: codedHeight });
+                  }
+                  worker.postMessage(
+                    { type: "frame", frame, width: codedWidth, height: codedHeight },
+                    [frame],
+                  );
+                } else {
+                  const offscreenCanvas = offscreenCanvasRef.current;
+                  const offscreenCtx = offscreenCtxRef.current;
+
+                  if (!offscreenCanvas || !offscreenCtx || !ctx) {
+                    frame.close();
+                    return;
+                  }
+
+                  if (offscreenCanvas.width !== codedWidth || offscreenCanvas.height !== codedHeight) {
+                    offscreenCanvas.width = codedWidth;
+                    offscreenCanvas.height = codedHeight;
+                  }
+
+                  offscreenCtx.clearRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+                  offscreenCtx.drawImage(frame, 0, 0);
+
+                  ctx.drawImage(offscreenCanvas, 0, 0, codedWidth, codedHeight);
+
                   frame.close();
-                  return;
                 }
 
-                if (
-                  offscreenCanvas.width !== frame.codedWidth ||
-                  offscreenCanvas.height !== frame.codedHeight
-                ) {
-                  offscreenCanvas.width = frame.codedWidth;
-                  offscreenCanvas.height = frame.codedHeight;
-                }
-
-                // Draw frame to offscreen canvas (back buffer)
-                offscreenCtx.clearRect(
-                  0,
-                  0,
-                  offscreenCanvas.width,
-                  offscreenCanvas.height,
-                );
-                offscreenCtx.drawImage(frame, 0, 0);
-
-                // Now atomically copy the complete frame to the visible canvas (front buffer)
-                if (
-                  canvas.width !== frame.codedWidth ||
-                  canvas.height !== frame.codedHeight
-                ) {
-                  canvas.width = frame.codedWidth;
-                  canvas.height = frame.codedHeight;
-                }
-
-                // This is atomic - no flicker
-                ctx.drawImage(offscreenCanvas, 0, 0);
-
-                frame.close();
-
-                // Update stats and immediately set to playing state
                 setFrameStats((prev) => {
                   const newFrameCount = prev.decodedFrames + 1;
-                  // Change to playing state immediately on first decoded frame
                   if (newFrameCount === 1) {
                     setVideoStatus("playing");
                   }
@@ -1272,7 +1329,9 @@ const H20NDisplayComponent = (
                 });
               } catch (error) {
                 console.error("Error drawing video frame in H20N:", error);
-                frame.close();
+                try {
+                  frame.close();
+                } catch {}
               }
             },
             error: (error: Error) => {
