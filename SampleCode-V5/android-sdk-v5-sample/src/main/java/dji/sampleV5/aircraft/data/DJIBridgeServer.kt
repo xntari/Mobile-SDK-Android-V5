@@ -24,6 +24,8 @@ import dji.sdk.keyvalue.value.rtkmobilestation.RTKTakeoffAltitudeInfo
 import dji.sdk.keyvalue.value.flightcontroller.GPSSignalLevel
 import dji.sdk.keyvalue.key.FlightControllerKey
 import dji.sdk.keyvalue.key.BatteryKey
+import dji.sdk.keyvalue.key.RemoteControllerKey
+import dji.sdk.keyvalue.key.DJIKeyInfo
 import dji.sdk.keyvalue.key.KeyTools
 import dji.v5.manager.KeyManager
 import dji.v5.manager.datacenter.MediaDataCenter
@@ -149,6 +151,62 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         flyToBridgeModel.start()
         waypointBridgeModel.start()
         simulatorBridgeModel.start()
+    }
+
+    private fun resolveKey(keyClass: Class<*>, fieldName: String): DJIKeyInfo<*>? {
+        return runCatching {
+            val field = keyClass.getDeclaredField(fieldName)
+            field.isAccessible = true
+            field.get(null) as? DJIKeyInfo<*>
+        }.getOrNull()
+    }
+
+    private fun extractRcBatteryPercent(info: Any?): Int? {
+        if (info == null) return null
+
+        val methodNames = listOf(
+            "getChargeRemainingPercent",
+            "getChargeRemainingInPercent",
+            "getChargeRemaining",
+            "getBatteryPercent"
+        )
+
+        methodNames.forEach { name ->
+            val method = runCatching {
+                info.javaClass.methods.firstOrNull { it.name.equals(name, ignoreCase = true) && it.parameterCount == 0 }
+            }.getOrNull()
+            if (method != null) {
+                val value = runCatching { method.invoke(info) as? Number }.getOrNull()
+                if (value != null) return value.toInt().coerceIn(0, 100)
+            }
+        }
+
+        val fieldNames = listOf(
+            "chargeRemainingPercent",
+            "chargeRemainingInPercent",
+            "chargeRemaining",
+            "batteryPercent"
+        )
+
+        fieldNames.forEach { name ->
+            val field = runCatching {
+                info.javaClass.getDeclaredField(name).apply { isAccessible = true }
+            }.getOrNull()
+            if (field != null) {
+                val value = runCatching { field.get(info) as? Number }.getOrNull()
+                if (value != null) return value.toInt().coerceIn(0, 100)
+            }
+        }
+
+        if (info is Map<*, *>) {
+            val candidates = listOf("charge_remaining_percent", "chargeRemainingPercent", "percentage")
+            candidates.forEach { key ->
+                val value = info[key] as? Number
+                if (value != null) return value.toInt().coerceIn(0, 100)
+            }
+        }
+
+        return null
     }
 
     // Retry helper for camera stream registration
@@ -2632,6 +2690,15 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             )
         }
         
+        val keyManager = runCatching { KeyManager.getInstance() }.getOrNull()
+        val rcBatteryPercent = if (keyManager != null) {
+            resolveKey(RemoteControllerKey::class.java, "KeyBatteryInfo")?.let { keyInfo ->
+                val key = KeyTools.createKey(keyInfo)
+                val info = runCatching { keyManager.getValue(key) }.getOrNull()
+                extractRcBatteryPercent(info)
+            }
+        } else null
+
         val virtualStickState = latestVirtualStickState
         val authorityOwner = virtualStickState?.currentFlightControlAuthorityOwner ?: FlightControlAuthority.UNKNOWN
         val authorityName = authorityOwner.name
@@ -2641,7 +2708,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             authorityName.isBlank() -> false
             else -> true
         }
-        val controllerData = mapOf(
+        val controllerData = mutableMapOf<String, Any?>(
             "joystick" to mapOf(
                 "left_horizontal" to (stickValues["leftHorizontal"] ?: 0),
                 "left_vertical" to (stickValues["leftVertical"] ?: 0),
@@ -2664,7 +2731,9 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 "change_reason" to latestVirtualStickReason.name
             )
         )
-        
+
+        rcBatteryPercent?.let { controllerData["battery_percent"] = it }
+
         val message = createMessage(MessageType.CONTROLLER_DATA, controllerData, Priority.HIGH)
         
         // Debug log for non-zero values

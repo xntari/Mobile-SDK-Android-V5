@@ -290,6 +290,44 @@ export interface PreflightStatus extends BridgeMessage {
   type: 'preflight_status';
   diagnostics: TelemetryDiagnosticEntry[];
   device_status?: DeviceStatusInfo | null;
+  fly_safe?: any;
+  flight_settings?: PreflightFlightSettings | null;
+  power?: PreflightPowerStatus | null;
+  controller_settings?: PreflightControllerSettings | null;
+}
+
+export interface PreflightObstacleAvoidanceSettings {
+  collision_avoidance?: boolean;
+  vision_positioning?: boolean;
+  landing_protection?: string;
+}
+
+export interface PreflightFlightSettings {
+  return_home_altitude?: number;
+  max_altitude?: number;
+  max_distance?: number;
+  max_distance_enabled?: boolean;
+  signal_lost_action?: string;
+  obstacle_avoidance?: PreflightObstacleAvoidanceSettings;
+}
+
+export interface PreflightPowerStatus {
+  aircraft_percent?: number;
+  controller_percent?: number;
+  low_warning_threshold?: number;
+  critical_warning_threshold?: number;
+}
+
+export interface PreflightVirtualStickSettings {
+  enabled?: boolean;
+  authority_owner?: string;
+  manual_override?: boolean;
+}
+
+export interface PreflightControllerSettings {
+  stick_mode?: string;
+  rc_mode?: string;
+  virtual_stick?: PreflightVirtualStickSettings;
 }
 
 export interface ControllerData extends BridgeMessage {
@@ -315,6 +353,7 @@ export interface ControllerData extends BridgeMessage {
     manual_override?: boolean;
     change_reason?: string;
   };
+  battery_percent?: number;
 }
 
 export interface TelemetryData extends BridgeMessage {
@@ -470,6 +509,8 @@ export interface TopBarProps {
   batteryData: BatteryData | null;
   telemetryData: TelemetryData | null;
   connectionStatus: ConnectionStatus;
+  controllerData?: ControllerData | null;
+  preflightStatus?: PreflightStatus | null;
 }
 
 export interface FPVDisplayProps {

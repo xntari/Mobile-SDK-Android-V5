@@ -1,10 +1,13 @@
 import React from 'react';
 import { Panel } from './Panel';
-import { PreflightStatus, FlightCommandAck, TelemetryDiagnosticEntry } from '../types';
+import { PreflightStatus, FlightCommandAck, TelemetryDiagnosticEntry, TelemetryData, BatteryData, ControllerData } from '../types';
 
 interface PreflightPanelProps {
   preflight: PreflightStatus | null;
   history: FlightCommandAck[];
+  telemetry: TelemetryData | null;
+  battery: BatteryData | null;
+  controller: ControllerData | null;
 }
 
 const levelClass = (level?: string | null) => {
@@ -33,13 +36,60 @@ const formatRelativeTime = (timestamp?: number) => {
   return `${Math.floor(delta / 3_600_000)}h ago`;
 };
 
-export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, history }) => {
+const formatMeters = (value?: number | null) => (typeof value === 'number' && !Number.isNaN(value) ? `${value.toFixed(1)} m` : '—');
+const formatMetersNoDecimal = (value?: number | null) => (typeof value === 'number' && !Number.isNaN(value) ? `${Math.round(value)} m` : '—');
+const formatPercent = (value?: number | null) => {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '—';
+  return `${Math.round(value)}%`;
+};
+const formatActionLabel = (value?: string) => {
+  if (!value) return '—';
+  return value
+    .toString()
+    .trim()
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .toUpperCase();
+};
+
+const InfoRow: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
+  <div className="flex items-center justify-between text-[11px]">
+    <span className="text-gray-400">{label}</span>
+    <span className="text-gray-200 font-medium">{value}</span>
+  </div>
+);
+
+export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, history, telemetry, battery, controller }) => {
   const latestLandingMonitor = React.useMemo(() => {
     return [...history].reverse().find((ack) => ack.action === 'land_monitor');
   }, [history]);
 
   const diagnostics = preflight?.diagnostics ?? [];
   const deviceStatus = preflight?.device_status;
+  const flightSettings = preflight?.flight_settings;
+  const flightLimits = {
+    rth: flightSettings?.return_home_altitude ?? telemetry?.go_home_height,
+    maxAltitude: flightSettings?.max_altitude ?? telemetry?.max_flight_height,
+    maxDistance: flightSettings?.max_distance ?? telemetry?.max_flight_distance,
+    maxDistanceEnabled: flightSettings?.max_distance_enabled ?? telemetry?.max_flight_distance_enabled,
+    signalLost: flightSettings?.signal_lost_action,
+  };
+  const obstacleSettings = flightSettings?.obstacle_avoidance;
+  const telemetryObstacle = telemetry?.obstacle_avoidance;
+
+  const powerStatus = preflight?.power;
+  const aircraftBatteryPercent = React.useMemo(() => {
+    if (typeof powerStatus?.aircraft_percent === 'number') return powerStatus.aircraft_percent;
+    const value = battery?.battery?.percentage;
+    return typeof value === 'number' ? value : undefined;
+  }, [powerStatus?.aircraft_percent, battery?.battery?.percentage]);
+
+  const controllerBatteryPercent = React.useMemo(() => {
+    if (typeof powerStatus?.controller_percent === 'number') return powerStatus.controller_percent;
+    if (typeof controller?.battery_percent === 'number') return controller.battery_percent;
+    return undefined;
+  }, [powerStatus?.controller_percent, controller?.battery_percent]);
+  const controllerSettings = preflight?.controller_settings;
 
   return (
     <Panel
@@ -96,6 +146,100 @@ export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, histo
               ))}
             </div>
           )}
+        </section>
+
+        <section className="glass-panel border border-gray-700/70 rounded-md px-3 py-2">
+          <div className="text-gray-400 uppercase text-[11px] mb-1">Flight Limits &amp; Failsafe</div>
+          <div className="flex flex-col gap-1.5">
+            <InfoRow label="RTH Altitude" value={formatMeters(flightLimits.rth)} />
+            <InfoRow label="Max Altitude" value={formatMeters(flightLimits.maxAltitude)} />
+            <InfoRow label="Max Distance" value={formatMetersNoDecimal(flightLimits.maxDistance)} />
+            <InfoRow
+              label="Distance Limit"
+              value={
+                flightLimits.maxDistanceEnabled === undefined
+                  ? '—'
+                  : flightLimits.maxDistanceEnabled
+                  ? 'ENABLED'
+                  : 'DISABLED'
+              }
+            />
+            <InfoRow label="Signal Lost" value={formatActionLabel(flightLimits.signalLost)} />
+          </div>
+        </section>
+
+        <section className="glass-panel border border-gray-700/70 rounded-md px-3 py-2">
+          <div className="text-gray-400 uppercase text-[11px] mb-1">Obstacle Avoidance</div>
+          <div className="flex flex-col gap-1.5">
+            <InfoRow
+              label="Collision Avoidance"
+              value={
+                obstacleSettings?.collision_avoidance ?? telemetryObstacle?.enabled
+                  ? 'ENABLED'
+                  : obstacleSettings?.collision_avoidance === false
+                  ? 'DISABLED'
+                  : telemetryObstacle?.enabled === false
+                  ? 'DISABLED'
+                  : '—'
+              }
+            />
+            <InfoRow
+              label="Vision Positioning"
+              value={
+                obstacleSettings?.vision_positioning === undefined
+                  ? '—'
+                  : obstacleSettings.vision_positioning
+                  ? 'ENABLED'
+                  : 'DISABLED'
+              }
+            />
+            <InfoRow
+              label="Landing Protection"
+              value={formatActionLabel(obstacleSettings?.landing_protection)}
+            />
+          </div>
+        </section>
+
+        <section className="glass-panel border border-gray-700/70 rounded-md px-3 py-2">
+          <div className="text-gray-400 uppercase text-[11px] mb-1">Power &amp; Battery</div>
+          <div className="flex flex-col gap-1.5">
+            <InfoRow label="Aircraft" value={formatPercent(aircraftBatteryPercent)} />
+            <InfoRow label="Controller" value={formatPercent(controllerBatteryPercent)} />
+            <InfoRow label="Low Warning" value={formatPercent(powerStatus?.low_warning_threshold)} />
+            <InfoRow label="Critical" value={formatPercent(powerStatus?.critical_warning_threshold)} />
+          </div>
+        </section>
+
+        <section className="glass-panel border border-gray-700/70 rounded-md px-3 py-2">
+          <div className="text-gray-400 uppercase text-[11px] mb-1">Controller Setup</div>
+          <div className="flex flex-col gap-1.5">
+            <InfoRow label="Stick Mode" value={controllerSettings?.stick_mode ?? '—'} />
+            <InfoRow label="RC Mode" value={controllerSettings?.rc_mode ?? '—'} />
+            <InfoRow
+              label="Virtual Stick"
+              value={
+                controllerSettings?.virtual_stick?.enabled === undefined
+                  ? '—'
+                  : controllerSettings.virtual_stick.enabled
+                  ? 'ENABLED'
+                  : 'DISABLED'
+              }
+            />
+            <InfoRow
+              label="Authority Owner"
+              value={controllerSettings?.virtual_stick?.authority_owner ?? '—'}
+            />
+            <InfoRow
+              label="Manual Override"
+              value={
+                controllerSettings?.virtual_stick?.manual_override === undefined
+                  ? '—'
+                  : controllerSettings.virtual_stick.manual_override
+                  ? 'YES'
+                  : 'NO'
+              }
+            />
+          </div>
         </section>
 
         {latestLandingMonitor && (

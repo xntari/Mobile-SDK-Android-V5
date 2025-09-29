@@ -359,6 +359,8 @@ export const App: React.FC = () => {
             batteryData={bridgeData.battery}
             telemetryData={bridgeData.telemetry}
             connectionStatus={connectionStatus}
+            controllerData={bridgeData.controller}
+            preflightStatus={bridgeData.preflight}
           />
 
           {/* Main Content Area - Dark background for floating panels */}
@@ -532,6 +534,9 @@ export const App: React.FC = () => {
             <PreflightPanel
               preflight={bridgeData.preflight}
               history={bridgeData.flightCommandLog}
+              telemetry={bridgeData.telemetry}
+              battery={bridgeData.battery}
+              controller={bridgeData.controller}
             />
 
             <OrientationPanel

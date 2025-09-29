@@ -1,5 +1,5 @@
 // Global bridge state manager - survives React re-mounts
-import { BridgeDataState, ConnectionStatus, ControllerData, TelemetryData, BatteryData, FlightCommandAck, PreflightStatus, TelemetryDiagnosticEntry, DeviceStatusInfo, WaypointTimelineEntry, SimulatorTelemetry, SimulatorConfigurationSnapshot, SimulatorErrorSnapshot } from './types';
+import { BridgeDataState, ConnectionStatus, ControllerData, TelemetryData, BatteryData, FlightCommandAck, PreflightStatus, TelemetryDiagnosticEntry, DeviceStatusInfo, WaypointTimelineEntry, SimulatorTelemetry, SimulatorConfigurationSnapshot, SimulatorErrorSnapshot, PreflightFlightSettings, PreflightPowerStatus, PreflightControllerSettings } from './types';
 
 const hasWindow = typeof window !== 'undefined';
 const requestFrame: (callback: FrameRequestCallback) => number = hasWindow && typeof window.requestAnimationFrame === 'function'
@@ -8,6 +8,131 @@ const requestFrame: (callback: FrameRequestCallback) => number = hasWindow && ty
 const cancelFrame: (handle: number) => void = hasWindow && typeof window.cancelAnimationFrame === 'function'
   ? window.cancelAnimationFrame.bind(window)
   : (handle: number) => window.clearTimeout(handle);
+
+const sanitizeNumber = (value: any): number | undefined =>
+  typeof value === 'number' && !Number.isNaN(value) ? value : undefined;
+
+const sanitizeBoolean = (value: any): boolean | undefined =>
+  typeof value === 'boolean' ? value : undefined;
+
+const sanitizeObstacleSettings = (input: any): PreflightFlightSettings['obstacle_avoidance'] | undefined => {
+  if (!input || typeof input !== 'object') return undefined;
+  const collision = sanitizeBoolean(input.collision_avoidance);
+  const vision = sanitizeBoolean(input.vision_positioning);
+  const landing = typeof input.landing_protection === 'string' ? input.landing_protection : undefined;
+  if (collision === undefined && vision === undefined && landing === undefined) {
+    return undefined;
+  }
+  return {
+    collision_avoidance: collision,
+    vision_positioning: vision,
+    landing_protection: landing,
+  };
+};
+
+const sanitizeFlightSettings = (input: any): PreflightFlightSettings | null => {
+  if (!input || typeof input !== 'object') return null;
+  const settings: PreflightFlightSettings = {};
+  const rth = sanitizeNumber(input.return_home_altitude);
+  const maxAlt = sanitizeNumber(input.max_altitude);
+  const maxDist = sanitizeNumber(input.max_distance);
+  const maxDistEnabled = sanitizeBoolean(input.max_distance_enabled);
+  const signalLost = typeof input.signal_lost_action === 'string' ? input.signal_lost_action : undefined;
+  const avoidance = sanitizeObstacleSettings(input.obstacle_avoidance);
+
+  if (rth !== undefined) settings.return_home_altitude = rth;
+  if (maxAlt !== undefined) settings.max_altitude = maxAlt;
+  if (maxDist !== undefined) settings.max_distance = maxDist;
+  if (maxDistEnabled !== undefined) settings.max_distance_enabled = maxDistEnabled;
+  if (signalLost) settings.signal_lost_action = signalLost;
+  if (avoidance) settings.obstacle_avoidance = avoidance;
+
+  return Object.keys(settings).length ? settings : null;
+};
+
+const sanitizePowerStatus = (input: any): PreflightPowerStatus | null => {
+  if (!input || typeof input !== 'object') return null;
+  const aircraft = sanitizeNumber(input.aircraft_percent);
+  const controller = sanitizeNumber(input.controller_percent);
+  const low = sanitizeNumber(input.low_warning_threshold);
+  const critical = sanitizeNumber(input.critical_warning_threshold);
+
+  if (aircraft === undefined && controller === undefined && low === undefined && critical === undefined) {
+    return null;
+  }
+
+  const status: PreflightPowerStatus = {};
+  if (aircraft !== undefined) status.aircraft_percent = aircraft;
+  if (controller !== undefined) status.controller_percent = controller;
+  if (low !== undefined) status.low_warning_threshold = low;
+  if (critical !== undefined) status.critical_warning_threshold = critical;
+  return status;
+};
+
+const sanitizeVirtualStickSettings = (input: any): PreflightControllerSettings['virtual_stick'] => {
+  if (!input || typeof input !== 'object') return undefined;
+  const enabled = sanitizeBoolean(input.enabled);
+  const owner = typeof input.authority_owner === 'string' ? input.authority_owner : undefined;
+  const manualOverride = sanitizeBoolean(input.manual_override);
+  if (enabled === undefined && owner === undefined && manualOverride === undefined) {
+    return undefined;
+  }
+  return {
+    enabled,
+    authority_owner: owner,
+    manual_override: manualOverride,
+  };
+};
+
+const sanitizeControllerSettings = (input: any): PreflightControllerSettings | null => {
+  if (!input || typeof input !== 'object') return null;
+  const stickMode = typeof input.stick_mode === 'string' ? input.stick_mode : undefined;
+  const rcMode = typeof input.rc_mode === 'string' ? input.rc_mode : undefined;
+  const virtualStick = sanitizeVirtualStickSettings(input.virtual_stick);
+  if (!stickMode && !rcMode && !virtualStick) return null;
+  const settings: PreflightControllerSettings = {};
+  if (stickMode) settings.stick_mode = stickMode;
+  if (rcMode) settings.rc_mode = rcMode;
+  if (virtualStick) settings.virtual_stick = virtualStick;
+  return settings;
+};
+
+const sanitizeControllerData = (data: any): ControllerData => {
+  const joystick = data?.joystick || {};
+  const flightParams = data?.flight_params || {};
+  const virtualStickRaw = data?.virtual_stick || {};
+
+  const virtualStick = {
+    enabled: Boolean(virtualStickRaw.enabled),
+    advanced_enabled: sanitizeBoolean(virtualStickRaw.advanced_enabled),
+    authority_owner: typeof virtualStickRaw.authority_owner === 'string' ? virtualStickRaw.authority_owner : undefined,
+    manual_override: sanitizeBoolean(virtualStickRaw.manual_override),
+    change_reason: typeof virtualStickRaw.change_reason === 'string' ? virtualStickRaw.change_reason : undefined,
+  };
+
+  return {
+    type: 'controller_data',
+    version: typeof data?.version === 'string' ? data.version : '1.0',
+    timestamp: typeof data?.timestamp === 'number' ? data.timestamp : Date.now(),
+    priority: typeof data?.priority === 'string' ? data.priority : 'normal',
+    joystick: {
+      left_horizontal: sanitizeNumber(joystick.left_horizontal) ?? 0,
+      left_vertical: sanitizeNumber(joystick.left_vertical) ?? 0,
+      right_horizontal: sanitizeNumber(joystick.right_horizontal) ?? 0,
+      right_vertical: sanitizeNumber(joystick.right_vertical) ?? 0,
+    },
+    flight_params: {
+      yaw: sanitizeNumber(flightParams.yaw) ?? 0,
+      throttle: sanitizeNumber(flightParams.throttle) ?? 0,
+      roll: sanitizeNumber(flightParams.roll) ?? 0,
+      pitch: sanitizeNumber(flightParams.pitch) ?? 0,
+    },
+    virtual_stick_enabled: Boolean(data?.virtual_stick_enabled),
+    authority_owner: typeof data?.authority_owner === 'string' ? data.authority_owner : undefined,
+    virtual_stick: virtualStick,
+    battery_percent: sanitizeNumber(data?.battery_percent),
+  };
+};
 
 class BridgeManager {
   private listeners: Set<() => void> = new Set();
@@ -50,7 +175,7 @@ class BridgeManager {
       case 'controller_data':
         this.bridgeData = {
           ...this.bridgeData,
-          controller: message as ControllerData,
+          controller: sanitizeControllerData(message),
           lastUpdated: { ...this.bridgeData.lastUpdated, controller: timestamp }
         };
         break;
@@ -364,6 +489,10 @@ class BridgeManager {
               .filter(Boolean) as TelemetryDiagnosticEntry[]
           : [];
         const deviceStatus = this.sanitizeDeviceStatus(message.device_status);
+        const flightSettings = sanitizeFlightSettings(message.flight_settings);
+        const powerStatus = sanitizePowerStatus(message.power);
+        const controllerSettings = sanitizeControllerSettings(message.controller_settings);
+        const flySafe = typeof message.fly_safe === 'object' ? message.fly_safe : undefined;
         const preflightSnapshot = {
           type: 'preflight_status',
           version: message.version || '1.0',
@@ -371,6 +500,10 @@ class BridgeManager {
           priority: message.priority || 'normal',
           diagnostics,
           device_status: deviceStatus ?? undefined,
+          fly_safe: flySafe,
+          flight_settings: flightSettings ?? undefined,
+          power: powerStatus ?? undefined,
+          controller_settings: controllerSettings ?? undefined,
         } as PreflightStatus;
 
         this.bridgeData = {

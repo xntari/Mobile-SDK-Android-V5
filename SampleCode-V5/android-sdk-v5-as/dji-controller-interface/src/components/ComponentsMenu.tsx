@@ -3,7 +3,7 @@ import { visionPanelControls } from './VisionPanel';
 import { visionRTPanelControls } from './VisionRealtimePanel';
 import { agentPanelControls } from './AgentPanel';
 import { fpvCameraPanelControls, h20nCameraPanelControls } from './CameraPanel';
-import { mapPanelControls, hsiPanelControls, controllerPanelControls, orientationPanelControls, projectionPanelControls, flightCommandsPanelControls, objectMemoryPanelControls, preflightPanelControls } from './panelControls';
+import { mapPanelControls, hsiPanelControls, controllerPanelControls, orientationPanelControls, projectionPanelControls, flightCommandsPanelControls, objectMemoryPanelControls, preflightPanelControls, missionControlPanelControls } from './panelControls';
 import {
   getSavedLayouts,
   saveLayout,
@@ -101,6 +101,12 @@ const panelControls: PanelControl[] = [
     title: 'Flight Commands',
     isVisible: flightCommandsPanelControls.isVisible,
     setVisible: flightCommandsPanelControls.setVisible
+  },
+  {
+    id: 'missionControl',
+    title: 'Mission Control',
+    isVisible: missionControlPanelControls.isVisible,
+    setVisible: missionControlPanelControls.setVisible
   }
 ];
 

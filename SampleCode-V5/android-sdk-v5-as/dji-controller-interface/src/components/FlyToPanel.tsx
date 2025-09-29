@@ -1824,7 +1824,7 @@ ${wpmlWaypoints}
 
   return (
     <Panel
-      title="Fly-To & RTH"
+      title="Mission Control"
       storageKey="flyto.panel"
       visibilityEventType="flyToPanelVisibilityChange"
       defaultPosition={{ x: 1040, y: 780 }}
