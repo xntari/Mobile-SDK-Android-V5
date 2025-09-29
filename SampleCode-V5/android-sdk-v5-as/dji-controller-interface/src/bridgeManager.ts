@@ -1,6 +1,14 @@
 // Global bridge state manager - survives React re-mounts
 import { BridgeDataState, ConnectionStatus, ControllerData, TelemetryData, BatteryData, FlightCommandAck, PreflightStatus, TelemetryDiagnosticEntry, DeviceStatusInfo, WaypointTimelineEntry, SimulatorTelemetry, SimulatorConfigurationSnapshot, SimulatorErrorSnapshot } from './types';
 
+const hasWindow = typeof window !== 'undefined';
+const requestFrame: (callback: FrameRequestCallback) => number = hasWindow && typeof window.requestAnimationFrame === 'function'
+  ? window.requestAnimationFrame.bind(window)
+  : (callback: FrameRequestCallback) => window.setTimeout(() => callback(Date.now()), 16);
+const cancelFrame: (handle: number) => void = hasWindow && typeof window.cancelAnimationFrame === 'function'
+  ? window.cancelAnimationFrame.bind(window)
+  : (handle: number) => window.clearTimeout(handle);
+
 class BridgeManager {
   private listeners: Set<() => void> = new Set();
   private bridgeData: BridgeDataState = {
@@ -14,6 +22,7 @@ class BridgeManager {
   };
   private connectionStatus: ConnectionStatus = 'disconnected';
   private initialized = false;
+  private frameRequest: number | null = null;
 
   // Initialize only once
   init() {
@@ -30,7 +39,7 @@ class BridgeManager {
 
     (window as any).electronAPI.onConnectionStatus((status: string) => {
       this.connectionStatus = status as ConnectionStatus;
-      this.notifyListeners();
+      this.notifyListeners(true);
     });
   }
 
@@ -407,10 +416,30 @@ class BridgeManager {
         break;
     }
 
-    this.notifyListeners();
+    this.notifyListeners(message.type !== 'telemetry_data');
   }
 
-  private notifyListeners() {
+  private notifyListeners(immediate = false) {
+    if (immediate) {
+      if (this.frameRequest !== null) {
+        cancelFrame(this.frameRequest);
+        this.frameRequest = null;
+      }
+      this.flushListeners();
+      return;
+    }
+
+    if (this.frameRequest !== null) {
+      return;
+    }
+
+    this.frameRequest = requestFrame(() => {
+      this.frameRequest = null;
+      this.flushListeners();
+    });
+  }
+
+  private flushListeners() {
     this.listeners.forEach(listener => listener());
   }
 

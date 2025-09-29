@@ -15,6 +15,15 @@ const clampLat = (value: number) => Math.max(-90, Math.min(90, value));
 const clampLon = (value: number) => Math.max(-180, Math.min(180, value));
 const MISSION_PLAN_SOURCE_ID = 'mission-plan';
 const MISSION_PLAN_LAYER_ID = 'mission-plan-layer';
+const CENTER_EPSILON_DEGREES = 5e-6;
+
+const needsCenterUpdate = (map: maplibregl.Map, lon: number, lat: number) => {
+  const current = map.getCenter();
+  return (
+    Math.abs(current.lat - lat) > CENTER_EPSILON_DEGREES ||
+    Math.abs(current.lng - lon) > CENTER_EPSILON_DEGREES
+  );
+};
 
 const ORBIT_COLORS = {
   text: '#7c2d12',
@@ -384,14 +393,22 @@ export const MapDisplay: React.FC<MapDisplayProps> = ({
     const compassHeading = telemetryData?.compass_heading || telemetryData?.heading || 0;
 
     // Center map on aircraft if available, otherwise on home
-    const centerLocation = aircraftLocation || homeLocation;
-    if (centerLocation) {
-      const targetCenter: [number, number] = [centerLocation.longitude, centerLocation.latitude];
+    let targetCenter: [number, number] | null = null;
+    if (!initialCenterAppliedRef.current) {
+      const initialLocation = aircraftLocation || homeLocation;
+      if (initialLocation && Number.isFinite(initialLocation.longitude) && Number.isFinite(initialLocation.latitude)) {
+        targetCenter = [initialLocation.longitude, initialLocation.latitude];
+      }
+    } else if (autoCenterEnabled && aircraftLocation && Number.isFinite(aircraftLocation.longitude) && Number.isFinite(aircraftLocation.latitude)) {
+      targetCenter = [aircraftLocation.longitude, aircraftLocation.latitude];
+    }
+
+    if (targetCenter) {
       if (!initialCenterAppliedRef.current) {
-        map.setCenter(targetCenter);
+        map.jumpTo({ center: targetCenter });
         initialCenterAppliedRef.current = true;
-      } else if (autoCenterEnabled) {
-        map.easeTo({ center: targetCenter, duration: 750, essential: true });
+      } else if (needsCenterUpdate(map, targetCenter[0], targetCenter[1])) {
+        map.jumpTo({ center: targetCenter });
       }
     }
 
