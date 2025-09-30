@@ -154,6 +154,15 @@ export const TopBar: React.FC<TopBarProps> = ({
 
   const vsActive = manualControl.state.active || manualControl.state.status === 'arming';
 
+  const setHomeDisabled = React.useMemo(() => {
+    const loc = telemetryData?.location;
+    if (!loc) return true;
+    const { latitude, longitude } = loc;
+    if (typeof latitude !== 'number' || Number.isNaN(latitude)) return true;
+    if (typeof longitude !== 'number' || Number.isNaN(longitude)) return true;
+    return false;
+  }, [telemetryData?.location]);
+
   const handleQuickCommand = React.useCallback(async (action: string, params?: Record<string, any>) => {
     if (busyAction) return;
     try {
@@ -176,6 +185,10 @@ export const TopBar: React.FC<TopBarProps> = ({
 
   const handleRth = React.useCallback(() => {
     handleQuickCommand('return_home_start');
+  }, [handleQuickCommand]);
+
+  const handleSetHome = React.useCallback(() => {
+    handleQuickCommand('set_home_current');
   }, [handleQuickCommand]);
 
   const handleToggleManualControl = React.useCallback(async () => {
@@ -220,6 +233,12 @@ export const TopBar: React.FC<TopBarProps> = ({
             handleRth();
           }
           break;
+        case 'KeyH':
+          if (!setHomeDisabled) {
+            event.preventDefault();
+            handleSetHome();
+          }
+          break;
         case 'KeyV':
           event.preventDefault();
           handleToggleManualControl();
@@ -229,7 +248,7 @@ export const TopBar: React.FC<TopBarProps> = ({
 
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [handleLand, handleRth, handleTakeoff, handleToggleManualControl, landDisabled, rthDisabled, takeoffDisabled]);
+  }, [handleLand, handleRth, handleSetHome, handleTakeoff, handleToggleManualControl, landDisabled, rthDisabled, setHomeDisabled, takeoffDisabled]);
 
   const QuickButton: React.FC<{
     label: string;
@@ -248,10 +267,28 @@ export const TopBar: React.FC<TopBarProps> = ({
     const baseClass = `px-3 py-1.5 rounded-lg transition-colors duration-150 text-xs font-semibold flex items-center justify-between min-w-[96px] ${toneClass}`;
     const stateClass = disabled || busy ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer';
 
+    const handleActivate = React.useCallback(
+      (event: React.SyntheticEvent<HTMLButtonElement>) => {
+        if (disabled || busy) {
+          event.preventDefault();
+          return;
+        }
+        onClick();
+      },
+      [busy, disabled, onClick]
+    );
+
     return (
       <button
         type="button"
-        onClick={onClick}
+        onClick={handleActivate}
+        onPointerUp={(event) => {
+          if (event.pointerType === 'mouse' && event.button !== 0) {
+            return;
+          }
+          event.preventDefault();
+          handleActivate(event);
+        }}
         disabled={disabled || busy}
         className={`${baseClass} ${stateClass}`}
       >
@@ -302,6 +339,14 @@ export const TopBar: React.FC<TopBarProps> = ({
             tone="primary"
             disabled={rthDisabled || !!busyAction}
             busy={busyAction === 'return_home_start'}
+          />
+          <QuickButton
+            label="Set Home"
+            hotkey="⇧H"
+            onClick={handleSetHome}
+            tone="primary"
+            disabled={setHomeDisabled || !!busyAction}
+            busy={busyAction === 'set_home_current'}
           />
           <QuickButton
             label={vsActive ? 'VS Off' : 'VS On'}

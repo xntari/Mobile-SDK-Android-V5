@@ -22,6 +22,8 @@ import android.util.Base64
 import dji.v5.manager.aircraft.simulator.InitializationSettings
 import dji.v5.manager.aircraft.simulator.SimulatorManager
 import dji.sdk.wpmz.value.mission.WaylineFinishedAction
+import dji.sdk.keyvalue.value.flightcontroller.FailsafeAction
+import dji.sampleV5.aircraft.models.FlySafeBridgeModel
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
@@ -48,7 +50,9 @@ class FlightCommandHandler(
     private val flySafeSnapshotProvider: (() -> Map<String, Any?>?)? = null,
     private val flyToStatusProvider: (() -> Map<String, Any?>?)? = null,
     private val waypointMissionExecutor: WaypointMissionExecutor? = null,
-    private val simulatorBridgeModel: SimulatorBridgeModel? = null
+    private val simulatorBridgeModel: SimulatorBridgeModel? = null,
+    private val flySafeBridgeModel: FlySafeBridgeModel? = null,
+    private val remoteIdBridgeModel: RemoteIDBridgeModel? = null
 ) {
 
     private fun respond(
@@ -85,6 +89,25 @@ class FlightCommandHandler(
         val map = extra?.toMutableMap() ?: mutableMapOf()
         map["simulator"] = snapshot
         return map
+    }
+
+    private fun locationToMap(location: LocationCoordinate2D?): Map<String, Any?>? {
+        if (location == null) return null
+        if (!GpsUtils.isValid(location.latitude, location.longitude)) return null
+        return mapOf(
+            "latitude" to location.latitude,
+            "longitude" to location.longitude
+        )
+    }
+
+    private fun locationToMap(location: LocationCoordinate3D?): Map<String, Any?>? {
+        if (location == null) return null
+        if (!GpsUtils.isValid(location.latitude, location.longitude)) return null
+        return mapOf(
+            "latitude" to location.latitude,
+            "longitude" to location.longitude,
+            "altitude" to location.altitude
+        )
     }
 
     fun handle(clientId: String, command: JSONObject) {
@@ -153,6 +176,8 @@ class FlightCommandHandler(
                 FlightControllerKey.KeyStopGoHome.create().action({ success(it) }, failure)
             }
 
+            "set_home_current" -> handleSetHomeCurrent(clientId, action)
+
             "force_land_start" -> performFlightControllerAction(clientId, action) { success, failure ->
                 FlightControllerKey.KeyConfirmLanding.create().action({ success(it) }, failure)
             }
@@ -172,6 +197,9 @@ class FlightCommandHandler(
             "waypoint_execute_plan" -> handleWaypointExecutePlan(clientId, action, params)
             "simulator_enable" -> handleSimulatorEnable(clientId, action, params)
             "simulator_disable" -> handleSimulatorDisable(clientId, action)
+            "flight_settings_update" -> handleFlightSettingsUpdate(clientId, action, params)
+            "remote_id_update" -> handleRemoteIdUpdate(clientId, action, params)
+            "flysafe_refresh" -> handleFlySafeRefresh(clientId, action)
 
             else -> {
                 Log.w(TAG, "Unsupported flight command action '$actionRaw' from $clientId")
@@ -194,6 +222,48 @@ class FlightCommandHandler(
             } catch (e: Exception) {
                 Log.e(TAG, "Flight action '$action' failed: ${e.message}", e)
                 respond(clientId, action, false, message = e.message ?: "exception")
+            }
+        }
+    }
+
+    private fun handleSetHomeCurrent(clientId: String, action: String) {
+        runOnUiThread {
+            val keyManager = runCatching { KeyManager.getInstance() }.getOrNull()
+            if (keyManager == null) {
+                respond(clientId, action, false, message = "KeyManager unavailable")
+                return@runOnUiThread
+            }
+
+            val previousHome = runCatching {
+                keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyHomeLocation)) as? LocationCoordinate2D
+            }.getOrNull()
+
+            val aircraftLocation = runCatching {
+                keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyAircraftLocation3D)) as? LocationCoordinate3D
+            }.getOrNull()
+
+            val extra = mutableMapOf<String, Any?>()
+            locationToMap(previousHome)?.let { extra["previous_home"] = it }
+            locationToMap(aircraftLocation)?.let { extra["aircraft_location"] = it }
+
+            try {
+                val actionKey = KeyTools.createKey(FlightControllerKey.KeyHomeLocationUsingCurrentAircraftLocation)
+                actionKey.action(
+                    onSuccess = { _: EmptyMsg? ->
+                        val newHome = runCatching {
+                            keyManager.getValue(KeyTools.createKey(FlightControllerKey.KeyHomeLocation)) as? LocationCoordinate2D
+                        }.getOrNull()
+                        locationToMap(newHome)?.let { extra["new_home"] = it }
+                        respond(clientId, action, true, extra = extra)
+                    },
+                    onFailure = { error: IDJIError ->
+                        respond(clientId, action, false, error = error, extra = extra)
+                    }
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "set_home_current failed: ${e.message}", e)
+                extra["error_type"] = e.javaClass.simpleName
+                respond(clientId, action, false, message = e.message ?: "exception", extra = extra)
             }
         }
     }
@@ -1064,6 +1134,278 @@ class FlightCommandHandler(
                 ))
                 respond(clientId, action, false, message = e.message ?: "Simulator disable failed")
             }
+        }
+    }
+
+    private fun handleFlightSettingsUpdate(clientId: String, action: String, params: JSONObject?) {
+        if (params == null) {
+            respond(clientId, action, false, message = "flight_settings_update requires params")
+            return
+        }
+
+        val keyManager = runCatching { KeyManager.getInstance() }.getOrElse {
+            respond(clientId, action, false, message = "KeyManager unavailable")
+            return
+        }
+
+        data class PendingSetting(
+            val label: String,
+            val executor: (success: () -> Unit, failure: (IDJIError) -> Unit) -> Unit
+        )
+
+        val requested = mutableMapOf<String, Any?>()
+        val operations = mutableListOf<PendingSetting>()
+
+        val goHomeAltitude = params.optDouble("return_home_altitude", Double.NaN)
+        if (!goHomeAltitude.isNaN()) {
+            val value = goHomeAltitude.roundToInt()
+            requested["return_home_altitude"] = value
+            operations += PendingSetting("return_home_altitude") { success, failure ->
+                keyManager.setValue(
+                    KeyTools.createKey(FlightControllerKey.KeyGoHomeHeight),
+                    value,
+                    object : CommonCallbacks.CompletionCallback {
+                        override fun onSuccess() = success()
+                        override fun onFailure(error: IDJIError) = failure(error)
+                    }
+                )
+            }
+        }
+
+        val heightLimit = params.optDouble("max_altitude", Double.NaN)
+        if (!heightLimit.isNaN()) {
+            val value = heightLimit.roundToInt()
+            requested["max_altitude"] = value
+            operations += PendingSetting("max_altitude") { success, failure ->
+                keyManager.setValue(
+                    KeyTools.createKey(FlightControllerKey.KeyHeightLimit),
+                    value,
+                    object : CommonCallbacks.CompletionCallback {
+                        override fun onSuccess() = success()
+                        override fun onFailure(error: IDJIError) = failure(error)
+                    }
+                )
+            }
+        }
+
+        val distanceLimit = params.optDouble("max_distance", Double.NaN)
+        if (!distanceLimit.isNaN()) {
+            val value = distanceLimit.roundToInt()
+            requested["max_distance"] = value
+            operations += PendingSetting("max_distance") { success, failure ->
+                keyManager.setValue(
+                    KeyTools.createKey(FlightControllerKey.KeyDistanceLimit),
+                    value,
+                    object : CommonCallbacks.CompletionCallback {
+                        override fun onSuccess() = success()
+                        override fun onFailure(error: IDJIError) = failure(error)
+                    }
+                )
+            }
+        }
+
+        if (params.has("max_distance_enabled")) {
+            val enabled = params.optBoolean("max_distance_enabled", false)
+            requested["max_distance_enabled"] = enabled
+            operations += PendingSetting("max_distance_enabled") { success, failure ->
+                keyManager.setValue(
+                    KeyTools.createKey(FlightControllerKey.KeyDistanceLimitEnabled),
+                    enabled,
+                    object : CommonCallbacks.CompletionCallback {
+                        override fun onSuccess() = success()
+                        override fun onFailure(error: IDJIError) = failure(error)
+                    }
+                )
+            }
+        }
+
+        if (params.has("signal_lost_action")) {
+            val rawAction = params.optString("signal_lost_action", "")
+            val failsafe = FailsafeAction.values().firstOrNull {
+                it.name.equals(rawAction, ignoreCase = true)
+            }
+            if (failsafe == null) {
+                respond(clientId, action, false, message = "Unknown failsafe action '$rawAction'")
+                return
+            }
+            requested["signal_lost_action"] = failsafe.name
+            operations += PendingSetting("signal_lost_action") { success, failure ->
+                keyManager.setValue(
+                    KeyTools.createKey(FlightControllerKey.KeyFailsafeAction),
+                    failsafe,
+                    object : CommonCallbacks.CompletionCallback {
+                        override fun onSuccess() = success()
+                        override fun onFailure(error: IDJIError) = failure(error)
+                    }
+                )
+            }
+        }
+
+        if (operations.isEmpty()) {
+            respond(clientId, action, false, message = "No flight settings to update", extra = mapOf("requested" to requested))
+            return
+        }
+
+        runOnUiThread {
+            val applied = mutableListOf<String>()
+            val failures = mutableListOf<Map<String, Any?>>()
+
+            fun execute(index: Int) {
+                if (index >= operations.size) {
+                    val extra = mutableMapOf<String, Any?>("requested" to requested)
+                    if (applied.isNotEmpty()) extra["applied"] = applied
+                    if (failures.isNotEmpty()) extra["errors"] = failures
+                    val success = failures.isEmpty()
+                    respond(
+                        clientId,
+                        action,
+                        success,
+                        message = if (success) "Flight settings updated" else "One or more settings failed",
+                        extra = extra
+                    )
+                    return
+                }
+
+                val pending = operations[index]
+                pending.executor.invoke(
+                    {
+                        applied.add(pending.label)
+                        execute(index + 1)
+                    },
+                    { error ->
+                        failures.add(
+                            mapOf(
+                                "operation" to pending.label,
+                                "error" to error.description()
+                            )
+                        )
+                        execute(index + 1)
+                    }
+                )
+            }
+
+            execute(0)
+        }
+    }
+
+    private fun handleRemoteIdUpdate(clientId: String, action: String, params: JSONObject?) {
+        val remoteModel = remoteIdBridgeModel
+        if (remoteModel == null) {
+            respond(clientId, action, false, message = "Remote ID bridge unavailable")
+            return
+        }
+
+        if (params == null) {
+            respond(clientId, action, false, message = "remote_id_update requires params")
+            return
+        }
+
+        data class RemoteOperation(
+            val label: String,
+            val executor: (success: () -> Unit, failure: (String) -> Unit) -> Unit
+        )
+
+        val requested = mutableMapOf<String, Any?>()
+        val operations = mutableListOf<RemoteOperation>()
+
+        if (params.has("area_strategy")) {
+            val strategyName = params.optString("area_strategy", "")
+            requested["area_strategy"] = strategyName
+            operations += RemoteOperation("area_strategy") { success, failure ->
+                remoteModel.setAreaStrategy(strategyName) { error ->
+                    if (error == null) success() else failure(error.description())
+                }
+            }
+        }
+
+        val registration = params.optString("operator_registration", "")
+        if (params.has("operator_registration")) {
+            requested["operator_registration"] = registration
+            operations += RemoteOperation("operator_registration") { success, failure ->
+                remoteModel.setOperatorRegistrationNumber(registration) { error ->
+                    if (error == null) success() else failure(error.description())
+                }
+            }
+        }
+
+        if (params.optBoolean("refresh_operator", false)) {
+            requested["refresh_operator"] = true
+            operations += RemoteOperation("refresh_operator") { success, failure ->
+                remoteModel.refreshOperatorRegistrationNumber { error ->
+                    if (error == null) success() else failure(error.description())
+                }
+            }
+        }
+
+        if (operations.isEmpty()) {
+            respond(clientId, action, false, message = "No Remote ID updates requested", extra = mapOf("requested" to requested))
+            return
+        }
+
+        runOnUiThread {
+            val applied = mutableListOf<String>()
+            val failures = mutableListOf<Map<String, Any?>>()
+
+            fun execute(index: Int) {
+                if (index >= operations.size) {
+                    val extra = mutableMapOf<String, Any?>("requested" to requested)
+                    remoteModel.toSnapshotMap()?.let { extra["remote_id"] = it }
+                    if (applied.isNotEmpty()) extra["applied"] = applied
+                    if (failures.isNotEmpty()) extra["errors"] = failures
+                    val success = failures.isEmpty()
+                    respond(
+                        clientId,
+                        action,
+                        success,
+                        message = if (success) "Remote ID updated" else "Remote ID update failed",
+                        extra = extra
+                    )
+                    return
+                }
+
+                val op = operations[index]
+                op.executor.invoke(
+                    {
+                        applied.add(op.label)
+                        execute(index + 1)
+                    },
+                    { errorMessage ->
+                        failures.add(mapOf("operation" to op.label, "error" to errorMessage))
+                        execute(index + 1)
+                    }
+                )
+            }
+
+            execute(0)
+        }
+    }
+
+    private fun handleFlySafeRefresh(clientId: String, action: String) {
+        val flySafeModel = flySafeBridgeModel
+        if (flySafeModel == null) {
+            respond(clientId, action, false, message = "FlySafe bridge unavailable")
+            return
+        }
+
+        runOnUiThread {
+            val keyManager = runCatching { KeyManager.getInstance() }.getOrNull()
+            val homeLocation = runCatching {
+                keyManager?.getValue(KeyTools.createKey(FlightControllerKey.KeyHomeLocation)) as? LocationCoordinate2D
+            }.getOrNull()
+
+            if (homeLocation == null) {
+                respond(clientId, action, false, message = "Home location unavailable")
+                return@runOnUiThread
+            }
+
+            flySafeModel.pullSurroundingZones(homeLocation)
+            val extra = mutableMapOf<String, Any?>()
+            extra["requested"] = mapOf(
+                "latitude" to homeLocation.latitude,
+                "longitude" to homeLocation.longitude
+            )
+            flySafeSnapshotProvider?.invoke()?.let { extra["fly_safe"] = it }
+            respond(clientId, action, true, message = "Fly Safe zones refresh requested", extra = extra)
         }
     }
 

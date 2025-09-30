@@ -1,6 +1,7 @@
 import React from 'react';
 import { Panel } from './Panel';
 import { PreflightStatus, FlightCommandAck, TelemetryDiagnosticEntry, TelemetryData, BatteryData, ControllerData } from '../types';
+import { useBridgeCommands } from '../hooks/useBridgeCommands';
 
 interface PreflightPanelProps {
   preflight: PreflightStatus | null;
@@ -59,6 +60,16 @@ const InfoRow: React.FC<{ label: string; value: React.ReactNode }> = ({ label, v
   </div>
 );
 
+const renderObject = (value: unknown): string => {
+  if (value == null) return '—';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch (error) {
+    return String(value);
+  }
+};
+
 export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, history, telemetry, battery, controller }) => {
   const latestLandingMonitor = React.useMemo(() => {
     return [...history].reverse().find((ack) => ack.action === 'land_monitor');
@@ -90,6 +101,176 @@ export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, histo
     return undefined;
   }, [powerStatus?.controller_percent, controller?.battery_percent]);
   const controllerSettings = preflight?.controller_settings;
+
+  const { sendFlightCommand } = useBridgeCommands();
+
+  const [rthAltitudeInput, setRthAltitudeInput] = React.useState<string>('');
+  const [maxAltitudeInput, setMaxAltitudeInput] = React.useState<string>('');
+  const [maxDistanceInput, setMaxDistanceInput] = React.useState<string>('');
+  const [distanceLimitEnabledInput, setDistanceLimitEnabledInput] = React.useState<boolean>(false);
+  const [signalLostActionInput, setSignalLostActionInput] = React.useState<string>('GO_HOME');
+  const [settingsStatus, setSettingsStatus] = React.useState<string | null>(null);
+
+  const remoteIdSnapshot = preflight?.remote_id ?? null;
+  const [areaStrategyInput, setAreaStrategyInput] = React.useState<string>(remoteIdSnapshot?.areaStrategy ?? 'US_STRATEGY');
+  const [operatorRegistrationInput, setOperatorRegistrationInput] = React.useState<string>(remoteIdSnapshot?.operatorRegistrationNumber ?? '');
+  const [remoteIdStatusMessage, setRemoteIdStatusMessage] = React.useState<string | null>(null);
+  const [flySafeStatusMessage, setFlySafeStatusMessage] = React.useState<string | null>(null);
+
+  const signalLostOptions = React.useMemo(() => ['GO_HOME', 'HOVER', 'LAND', 'GO_BACK', 'GO_CONTINUE'], []);
+  const areaStrategyOptions = React.useMemo(
+    () => ['US_STRATEGY', 'EUROPEAN_STRATEGY', 'CHINA_STRATEGY', 'JAPAN_STRATEGY', 'FRANCE_STRATEGY'],
+    []
+  );
+
+  const resetFlightInputs = React.useCallback(() => {
+    setRthAltitudeInput(
+      flightLimits.rth != null && Number.isFinite(flightLimits.rth)
+        ? Math.round(flightLimits.rth).toString()
+        : ''
+    );
+    setMaxAltitudeInput(
+      flightLimits.maxAltitude != null && Number.isFinite(flightLimits.maxAltitude)
+        ? Math.round(flightLimits.maxAltitude).toString()
+        : ''
+    );
+    setMaxDistanceInput(
+      flightLimits.maxDistance != null && Number.isFinite(flightLimits.maxDistance)
+        ? Math.round(flightLimits.maxDistance).toString()
+        : ''
+    );
+    setDistanceLimitEnabledInput(Boolean(flightLimits.maxDistanceEnabled));
+    if (flightLimits.signalLost) {
+      setSignalLostActionInput(String(flightLimits.signalLost).toUpperCase());
+    } else {
+      setSignalLostActionInput('GO_HOME');
+    }
+    setSettingsStatus(null);
+  }, [
+    flightLimits.rth,
+    flightLimits.maxAltitude,
+    flightLimits.maxDistance,
+    flightLimits.maxDistanceEnabled,
+    flightLimits.signalLost,
+  ]);
+
+  React.useEffect(() => {
+    resetFlightInputs();
+  }, [resetFlightInputs]);
+
+  React.useEffect(() => {
+    if (remoteIdSnapshot?.areaStrategy) {
+      setAreaStrategyInput(remoteIdSnapshot.areaStrategy);
+    }
+    if (remoteIdSnapshot?.operatorRegistrationNumber !== undefined) {
+      setOperatorRegistrationInput(remoteIdSnapshot.operatorRegistrationNumber ?? '');
+    }
+    setRemoteIdStatusMessage(null);
+  }, [remoteIdSnapshot?.areaStrategy, remoteIdSnapshot?.operatorRegistrationNumber]);
+
+  const parseNumberInput = React.useCallback((value: string, field: string): number | null => {
+    if (!value.trim()) {
+      return null;
+    }
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+      throw new Error(`Invalid numeric value for ${field}`);
+    }
+    return parsed;
+  }, []);
+
+  const handleApplyFlightSettings = React.useCallback(async () => {
+    const payload: Record<string, any> = {};
+
+    try {
+      const rthValue = parseNumberInput(rthAltitudeInput, 'RTH altitude');
+      if (rthValue != null) payload.return_home_altitude = rthValue;
+
+      const maxAltValue = parseNumberInput(maxAltitudeInput, 'max altitude');
+      if (maxAltValue != null) payload.max_altitude = maxAltValue;
+
+      const maxDistanceValue = parseNumberInput(maxDistanceInput, 'max distance');
+      if (maxDistanceValue != null) payload.max_distance = maxDistanceValue;
+
+      payload.max_distance_enabled = distanceLimitEnabledInput;
+      payload.signal_lost_action = signalLostActionInput;
+    } catch (error) {
+      setSettingsStatus(error instanceof Error ? error.message : 'Invalid flight setting');
+      return;
+    }
+
+    if (Object.keys(payload).length === 0) {
+      setSettingsStatus('No flight settings to update.');
+      return;
+    }
+
+    setSettingsStatus('Updating flight settings…');
+    try {
+      const result = await sendFlightCommand('flight_settings_update', payload);
+      if (result?.success) {
+        setSettingsStatus('Flight settings updated.');
+      } else {
+        setSettingsStatus(result?.error_message || result?.message || 'Flight settings update failed.');
+      }
+    } catch (error) {
+      setSettingsStatus(error instanceof Error ? error.message : 'Flight settings command failed.');
+    }
+  }, [
+    sendFlightCommand,
+    rthAltitudeInput,
+    maxAltitudeInput,
+    maxDistanceInput,
+    distanceLimitEnabledInput,
+    signalLostActionInput,
+    parseNumberInput,
+  ]);
+
+  const handleApplyRemoteId = React.useCallback(async () => {
+    const payload: Record<string, any> = { area_strategy: areaStrategyInput };
+    if (operatorRegistrationInput.trim()) {
+      payload.operator_registration = operatorRegistrationInput.trim();
+    }
+
+    setRemoteIdStatusMessage('Updating Remote ID…');
+    try {
+      const result = await sendFlightCommand('remote_id_update', payload);
+      if (result?.success) {
+        setRemoteIdStatusMessage('Remote ID updated.');
+      } else {
+        setRemoteIdStatusMessage(result?.error_message || result?.message || 'Remote ID update failed.');
+      }
+    } catch (error) {
+      setRemoteIdStatusMessage(error instanceof Error ? error.message : 'Remote ID command failed.');
+    }
+  }, [sendFlightCommand, areaStrategyInput, operatorRegistrationInput]);
+
+  const handleRefreshRemoteId = React.useCallback(async () => {
+    setRemoteIdStatusMessage('Refreshing Remote ID status…');
+    try {
+      const result = await sendFlightCommand('remote_id_update', { refresh_operator: true });
+      if (result?.success) {
+        setRemoteIdStatusMessage('Remote ID status refreshed.');
+      } else {
+        setRemoteIdStatusMessage(result?.error_message || result?.message || 'Remote ID refresh failed.');
+      }
+    } catch (error) {
+      setRemoteIdStatusMessage(error instanceof Error ? error.message : 'Remote ID refresh failed.');
+    }
+  }, [sendFlightCommand]);
+
+  const handleFlySafeRefresh = React.useCallback(async () => {
+    setFlySafeStatusMessage('Requesting Fly Safe refresh…');
+    try {
+      const result = await sendFlightCommand('flysafe_refresh');
+      if (result?.success) {
+        setFlySafeStatusMessage('Fly Safe surround updated.');
+      } else {
+        setFlySafeStatusMessage(result?.error_message || result?.message || 'Fly Safe refresh failed.');
+      }
+    } catch (error) {
+      setFlySafeStatusMessage(error instanceof Error ? error.message : 'Fly Safe refresh failed.');
+    }
+  }, [sendFlightCommand]);
 
   return (
     <Panel
@@ -146,6 +327,18 @@ export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, histo
               ))}
             </div>
           )}
+          <div className="mt-2">
+            <button
+              type="button"
+              className="px-2 py-1 text-[10px] rounded border border-gray-700 text-gray-200 hover:bg-gray-800/60"
+              onClick={handleFlySafeRefresh}
+            >
+              Refresh Fly Safe Zones
+            </button>
+            {flySafeStatusMessage && (
+              <div className="text-[10px] text-gray-400 mt-1">{flySafeStatusMessage}</div>
+            )}
+          </div>
         </section>
 
         <section className="glass-panel border border-gray-700/70 rounded-md px-3 py-2">
@@ -165,6 +358,83 @@ export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, histo
               }
             />
             <InfoRow label="Signal Lost" value={formatActionLabel(flightLimits.signalLost)} />
+          </div>
+          <div className="mt-2 border-t border-gray-700/60 pt-2 text-[11px] flex flex-col gap-2">
+            <div className="text-gray-300 font-semibold">Adjust Settings</div>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="flex flex-col gap-1">
+                <span>RTH Altitude (m)</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={rthAltitudeInput}
+                  onChange={(event) => setRthAltitudeInput(event.target.value)}
+                  className="bg-black/40 border border-gray-700/70 rounded px-2 py-1 text-right"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span>Max Altitude (m)</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={maxAltitudeInput}
+                  onChange={(event) => setMaxAltitudeInput(event.target.value)}
+                  className="bg-black/40 border border-gray-700/70 rounded px-2 py-1 text-right"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span>Max Distance (m)</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={maxDistanceInput}
+                  onChange={(event) => setMaxDistanceInput(event.target.value)}
+                  className="bg-black/40 border border-gray-700/70 rounded px-2 py-1 text-right"
+                />
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={distanceLimitEnabledInput}
+                  onChange={(event) => setDistanceLimitEnabledInput(event.target.checked)}
+                  className="accent-dji-blue"
+                />
+                <span>Distance Limit Enabled</span>
+              </div>
+            </div>
+            <label className="flex flex-col gap-1">
+              <span>Signal Lost Action</span>
+              <select
+                value={signalLostActionInput}
+                onChange={(event) => setSignalLostActionInput(event.target.value)}
+                className="bg-black/40 border border-gray-700/70 rounded px-2 py-1"
+              >
+                {signalLostOptions.map((option) => (
+                  <option key={option} value={option}>
+                    {option.replace(/_/g, ' ')}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="px-2 py-1 rounded bg-dji-blue text-white hover:bg-dji-blue/80"
+                onClick={handleApplyFlightSettings}
+              >
+                Apply
+              </button>
+              <button
+                type="button"
+                className="px-2 py-1 rounded border border-gray-700 text-gray-200 hover:bg-gray-800/60"
+                onClick={resetFlightInputs}
+              >
+                Reset
+              </button>
+            </div>
+            {settingsStatus && (
+              <div className="text-[10px] text-gray-400">{settingsStatus}</div>
+            )}
           </div>
         </section>
 
@@ -239,6 +509,70 @@ export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, histo
                   : 'NO'
               }
             />
+          </div>
+        </section>
+
+        <section className="glass-panel border border-gray-700/70 rounded-md px-3 py-2">
+          <div className="text-gray-400 uppercase text-[11px] mb-1">Remote ID</div>
+          <div className="flex flex-col gap-1.5">
+            <InfoRow label="Area Strategy" value={remoteIdSnapshot?.areaStrategy ?? '—'} />
+            <InfoRow label="Operator ID" value={remoteIdSnapshot?.operatorRegistrationNumber ?? '—'} />
+            <InfoRow label="Last Error" value={remoteIdSnapshot?.lastError ?? '—'} />
+          </div>
+          {remoteIdSnapshot?.status && (
+            <div className="mt-2 text-[10px] text-gray-400 whitespace-pre-wrap bg-black/20 border border-gray-800/60 rounded px-2 py-1">
+              {renderObject(remoteIdSnapshot.status)}
+            </div>
+          )}
+          {remoteIdSnapshot?.operatorStatus && (
+            <div className="mt-2 text-[10px] text-gray-400 whitespace-pre-wrap bg-black/20 border border-gray-800/60 rounded px-2 py-1">
+              {renderObject(remoteIdSnapshot.operatorStatus)}
+            </div>
+          )}
+          <div className="mt-2 border-t border-gray-700/60 pt-2 text-[11px] flex flex-col gap-2">
+            <div className="text-gray-300 font-semibold">Configure</div>
+            <label className="flex flex-col gap-1">
+              <span>Area Strategy</span>
+              <select
+                value={areaStrategyInput}
+                onChange={(event) => setAreaStrategyInput(event.target.value)}
+                className="bg-black/40 border border-gray-700/70 rounded px-2 py-1"
+              >
+                {areaStrategyOptions.map((option) => (
+                  <option key={option} value={option}>
+                    {option.replace(/_/g, ' ')}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1">
+              <span>Operator Registration</span>
+              <input
+                type="text"
+                value={operatorRegistrationInput}
+                onChange={(event) => setOperatorRegistrationInput(event.target.value)}
+                className="bg-black/40 border border-gray-700/70 rounded px-2 py-1"
+              />
+            </label>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="px-2 py-1 rounded bg-dji-blue text-white hover:bg-dji-blue/80"
+                onClick={handleApplyRemoteId}
+              >
+                Apply
+              </button>
+              <button
+                type="button"
+                className="px-2 py-1 rounded border border-gray-700 text-gray-200 hover:bg-gray-800/60"
+                onClick={handleRefreshRemoteId}
+              >
+                Refresh
+              </button>
+            </div>
+            {remoteIdStatusMessage && (
+              <div className="text-[10px] text-gray-400">{remoteIdStatusMessage}</div>
+            )}
           </div>
         </section>
 

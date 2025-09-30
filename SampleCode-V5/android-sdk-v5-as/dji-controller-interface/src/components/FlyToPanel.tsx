@@ -586,14 +586,74 @@ export const FlyToPanel: React.FC = () => {
     setStatusMessage('Return-to-home added to mission plan.');
   }, [telemetry?.home_location?.latitude, telemetry?.home_location?.longitude, telemetry?.takeoff_altitude, telemetry?.location?.altitude, appendLog, defaultTargetAltitudePreview]);
 
+  const addHomeWaypointToPlan = React.useCallback(() => {
+    const home = telemetry?.home_location;
+    if (!home || !Number.isFinite(home.latitude) || !Number.isFinite(home.longitude)) {
+      setStatusMessage('Home location unavailable; cannot add Home waypoint.');
+      return;
+    }
+
+    const altitudeCandidate = defaultTargetAltitudePreview
+      ?? telemetry?.takeoff_altitude
+      ?? telemetry?.location?.altitude
+      ?? null;
+
+    const entry: PlannedMissionEntry = {
+      id: `home-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      kind: 'waypoint',
+      latitude: clampLat(home.latitude),
+      longitude: clampLon(home.longitude),
+      altitude: altitudeCandidate,
+    };
+    setMissionPlan((prev) => [...prev, entry]);
+    appendLog('Plan home waypoint added', entry, 'manual');
+    setStatusMessage('Home waypoint added to mission plan.');
+  }, [telemetry?.home_location?.latitude, telemetry?.home_location?.longitude, telemetry?.takeoff_altitude, telemetry?.location?.altitude, appendLog, defaultTargetAltitudePreview]);
+
+  const addOriginWaypointToPlan = React.useCallback(() => {
+    const origin = missionPlan.find((entry) => Number.isFinite(entry.latitude) && Number.isFinite(entry.longitude));
+    if (!origin) {
+      setStatusMessage('Add at least one waypoint before adding Origin.');
+      return;
+    }
+
+    const altitudeCandidate = origin.altitude
+      ?? defaultTargetAltitudePreview
+      ?? telemetry?.location?.altitude
+      ?? telemetry?.altitude
+      ?? null;
+
+    const entry: PlannedMissionEntry = {
+      id: `origin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      kind: 'waypoint',
+      latitude: clampLat(origin.latitude),
+      longitude: clampLon(origin.longitude),
+      altitude: altitudeCandidate,
+    };
+    setMissionPlan((prev) => [...prev, entry]);
+    appendLog('Plan origin waypoint added', entry, 'manual');
+    setStatusMessage('Origin waypoint appended to mission plan.');
+  }, [missionPlan, telemetry?.location?.altitude, telemetry?.altitude, appendLog, defaultTargetAltitudePreview]);
+
   const addLandToPlan = React.useCallback(() => {
-    const landingCoordinate = telemetry?.home_location ?? telemetry?.location;
-    if (!landingCoordinate || !Number.isFinite(landingCoordinate.latitude) || !Number.isFinite(landingCoordinate.longitude)) {
+    const candidate = [...missionPlan].reverse().find((entry) =>
+      Number.isFinite(entry.latitude) && Number.isFinite(entry.longitude)
+    );
+
+    const landingLatitude = candidate?.latitude
+      ?? telemetry?.location?.latitude
+      ?? telemetry?.home_location?.latitude;
+    const landingLongitude = candidate?.longitude
+      ?? telemetry?.location?.longitude
+      ?? telemetry?.home_location?.longitude;
+
+    if (!Number.isFinite(landingLatitude) || !Number.isFinite(landingLongitude)) {
       setStatusMessage('Landing coordinate unavailable; cannot add Land waypoint.');
       return;
     }
 
     const landingAltitude = telemetry?.takeoff_altitude
+      ?? candidate?.altitude
       ?? telemetry?.location?.altitude
       ?? defaultTargetAltitudePreview
       ?? 0;
@@ -601,14 +661,14 @@ export const FlyToPanel: React.FC = () => {
     const entry: PlannedMissionEntry = {
       id: `land-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       kind: 'land',
-      latitude: clampLat(landingCoordinate.latitude),
-      longitude: clampLon(landingCoordinate.longitude),
+      latitude: clampLat(landingLatitude),
+      longitude: clampLon(landingLongitude),
       altitude: landingAltitude,
     };
     setMissionPlan((prev) => [...prev, entry]);
     appendLog('Plan land added', entry, 'manual');
     setStatusMessage('Landing step added to mission plan.');
-  }, [telemetry?.home_location?.latitude, telemetry?.home_location?.longitude, telemetry?.location?.latitude, telemetry?.location?.longitude, telemetry?.takeoff_altitude, telemetry?.location?.altitude, appendLog, defaultTargetAltitudePreview]);
+  }, [missionPlan, telemetry?.location?.latitude, telemetry?.location?.longitude, telemetry?.home_location?.latitude, telemetry?.home_location?.longitude, telemetry?.takeoff_altitude, appendLog, defaultTargetAltitudePreview]);
 
   const removePlanEntry = React.useCallback((id: string) => {
     setMissionPlan((prev) => prev.filter((entry) => entry.id !== id));
@@ -1188,7 +1248,7 @@ ${wpmlWaypoints}
       const kind = entry.kind ?? 'waypoint';
       let latitude = entry.latitude;
       let longitude = entry.longitude;
-      if ((kind === 'return_home' || kind === 'land') && homeLocation && Number.isFinite(homeLocation.latitude) && Number.isFinite(homeLocation.longitude)) {
+      if (kind === 'return_home' && homeLocation && Number.isFinite(homeLocation.latitude) && Number.isFinite(homeLocation.longitude)) {
         latitude = clampLat(homeLocation.latitude);
         longitude = clampLon(homeLocation.longitude);
       }
@@ -1705,26 +1765,28 @@ ${wpmlWaypoints}
       return telemetrySnapshot.location?.altitude ?? telemetrySnapshot.altitude ?? null;
     })();
 
-    let finishAction: string = 'none';
+    const terminalAction = [...missionPlan]
+      .reverse()
+      .find((entry) => entry.kind === 'land' || entry.kind === 'return_home');
+
+    const finishAction = terminalAction?.kind === 'land'
+      ? 'land'
+      : terminalAction?.kind === 'return_home'
+        ? 'return_home'
+        : 'none';
+
     const planPayload: MissionPlanCommandEntry[] = missionPlan
       .map((entry) => {
         let latitude = entry.latitude;
         let longitude = entry.longitude;
 
-        if ((entry.kind === 'return_home' || entry.kind === 'land') && homeLocation && Number.isFinite(homeLocation.latitude) && Number.isFinite(homeLocation.longitude)) {
+        if (entry.kind === 'return_home' && homeLocation && Number.isFinite(homeLocation.latitude) && Number.isFinite(homeLocation.longitude)) {
           latitude = clampLat(homeLocation.latitude);
           longitude = clampLon(homeLocation.longitude);
         }
 
         if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
           return null;
-        }
-
-        if (entry.kind === 'return_home') {
-          finishAction = 'return_home';
-        }
-        if (entry.kind === 'land') {
-          finishAction = 'land';
         }
 
         let altitudeAsl = typeof entry.altitude === 'number'
@@ -2242,9 +2304,25 @@ ${wpmlWaypoints}
                 type="button"
                 className="rounded border border-rose-500/60 bg-rose-500/15 text-rose-200 px-2 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
                 onClick={addLandToPlan}
-                disabled={!hasLandingCoordinate}
+                disabled={missionPlan.length === 0 && !hasLandingCoordinate}
               >
                 Add Land
+              </button>
+              <button
+                type="button"
+                className="rounded border border-sky-500/60 bg-sky-500/15 text-sky-200 px-2 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                onClick={addHomeWaypointToPlan}
+                disabled={!hasHomeLocation}
+              >
+                Add Home Waypoint
+              </button>
+              <button
+                type="button"
+                className="rounded border border-indigo-500/60 bg-indigo-500/15 text-indigo-200 px-2 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                onClick={addOriginWaypointToPlan}
+                disabled={missionPlan.length === 0}
+              >
+                Add Origin (W1)
               </button>
             </div>
             <div className="flex flex-wrap items-center gap-1 text-[10px] text-gray-300">

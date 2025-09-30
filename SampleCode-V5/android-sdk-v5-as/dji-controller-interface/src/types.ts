@@ -294,6 +294,7 @@ export interface PreflightStatus extends BridgeMessage {
   flight_settings?: PreflightFlightSettings | null;
   power?: PreflightPowerStatus | null;
   controller_settings?: PreflightControllerSettings | null;
+  remote_id?: RemoteIDSnapshot | null;
 }
 
 export interface PreflightObstacleAvoidanceSettings {
@@ -328,6 +329,14 @@ export interface PreflightControllerSettings {
   stick_mode?: string;
   rc_mode?: string;
   virtual_stick?: PreflightVirtualStickSettings;
+}
+
+export interface RemoteIDSnapshot {
+  areaStrategy?: string;
+  operatorRegistrationNumber?: string;
+  status?: Record<string, any> | null;
+  operatorStatus?: Record<string, any> | null;
+  lastError?: string | null;
 }
 
 export interface ControllerData extends BridgeMessage {

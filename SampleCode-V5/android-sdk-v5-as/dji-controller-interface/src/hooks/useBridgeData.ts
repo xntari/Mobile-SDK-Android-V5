@@ -17,7 +17,8 @@ import {
   SimulatorErrorSnapshot,
   PreflightFlightSettings,
   PreflightPowerStatus,
-  PreflightControllerSettings
+  PreflightControllerSettings,
+  RemoteIDSnapshot
 } from '../types';
 
 const sanitizeDiagnostic = (entry: any): TelemetryDiagnosticEntry | null => {
@@ -249,6 +250,22 @@ const sanitizeControllerSettings = (input: any): PreflightControllerSettings | n
   return settings;
 };
 
+const sanitizeRemoteId = (input: any): RemoteIDSnapshot | undefined => {
+  if (!input || typeof input !== 'object') return undefined;
+  const snapshot: RemoteIDSnapshot = {};
+  if (typeof input.area_strategy === 'string') snapshot.areaStrategy = input.area_strategy;
+  if (typeof input.operator_registration_number === 'string') {
+    snapshot.operatorRegistrationNumber = input.operator_registration_number;
+  }
+  if (typeof input.operator_registration === 'string') {
+    snapshot.operatorRegistrationNumber = input.operator_registration;
+  }
+  if (input.status && typeof input.status === 'object') snapshot.status = input.status;
+  if (input.operator_status && typeof input.operator_status === 'object') snapshot.operatorStatus = input.operator_status;
+  if (typeof input.last_error === 'string') snapshot.lastError = input.last_error;
+  return Object.keys(snapshot).length ? snapshot : undefined;
+};
+
 export const useBridgeData = () => {
   const [bridgeData, setBridgeData] = useState<BridgeDataState>({
     controller: null,
@@ -478,17 +495,31 @@ export const useBridgeData = () => {
 
       case 'battery_status':
         // Handle real bridge battery_status messages - map to our interface format
+        const batteryPayload = (message && typeof message.battery === 'object' ? message.battery : {}) || {};
+        const percentage = sanitizeNumber(batteryPayload.percentage)
+          ?? sanitizeNumber(batteryPayload.charge_remaining_percent)
+          ?? sanitizeNumber(message.charge_remaining_percent)
+          ?? sanitizeNumber(message.percentage);
+        const voltage = sanitizeNumber(batteryPayload.voltage) ?? sanitizeNumber(message.voltage);
+        const current = sanitizeNumber(batteryPayload.current) ?? sanitizeNumber(message.current);
+        const temperature = sanitizeNumber(batteryPayload.temperature) ?? sanitizeNumber(message.temperature);
+        const cellVoltages = Array.isArray(batteryPayload.cell_voltages)
+          ? batteryPayload.cell_voltages
+          : Array.isArray(message.cell_voltages)
+            ? message.cell_voltages
+            : [];
+
         const mappedBattery = {
           type: 'sensor_data',
           version: message.version || '1.0',
           timestamp: message.timestamp || timestamp,
           priority: message.priority || 'low',
           battery: {
-            percentage: message.battery?.charge_remaining_percent || message.charge_remaining_percent || 0,
-            voltage: message.battery?.voltage || message.voltage || 0,
-            current: message.battery?.current || message.current || 0,
-            temperature: message.battery?.temperature || message.temperature || 0,
-            cell_voltages: message.battery?.cell_voltages || message.cell_voltages || [],
+            percentage: typeof percentage === 'number' ? percentage : 0,
+            voltage: typeof voltage === 'number' ? voltage : 0,
+            current: typeof current === 'number' ? current : 0,
+            temperature: typeof temperature === 'number' ? temperature : 0,
+            cell_voltages: cellVoltages,
           },
           system_health: 'Good' // Default for compatibility
         } as BatteryData;
@@ -526,6 +557,7 @@ export const useBridgeData = () => {
           flight_settings: sanitizeFlightSettings(message.flight_settings) || undefined,
           power: sanitizePowerStatus(message.power) || undefined,
           controller_settings: sanitizeControllerSettings(message.controller_settings) || undefined,
+          remote_id: sanitizeRemoteId(message.remote_id) || undefined,
         } as PreflightStatus;
 
         setBridgeData(prev => ({
