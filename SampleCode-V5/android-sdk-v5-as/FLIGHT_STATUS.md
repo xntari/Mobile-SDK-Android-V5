@@ -12,6 +12,7 @@ Use only standard ascii characters here - don't use ✅  or similar
 - **Document discipline** - Update this file after every bridge/desktop change. Status, safety checklists, operator notes, and backlog items must always reflect the running code. Never mark a feature complete without field verification.
 - **Transcript discipline** - Keep transcript.txt current: append the latest user instructions and your thought process with ISO 8601 timestamps whenever you touch the project.
 - **Mission planner** - The shared mission planner store feeds the main map, Fly-To panel, Orientation, and HSI; map clicks (stage/waypoint/orbit) auto-populate targets, default altitudes come from set-height or the safety floor, and multi-waypoint plans now execute through the waypoint fallback backend with logging.
+- **Mission plan semantics** - Land steps now keep their mission coordinates, the Mission Control panel exposes “Add Home Waypoint” and “Add Origin (W1)” helpers, and finish actions only trigger when explicit return-home/land entries exist.
 - **Realtime map & video pacing** - Map telemetry now batches through a single requestAnimationFrame cycle (no more per-update `easeTo`), skips recentering while the operator drags, and keeps manual pan smooth; FPV/H20N decoders only throttle when the simulator is running or the panel is hidden so visible feeds stay at full speed.
 - **Panel visibility** - Orientation panel unsubscribes from mission/object stores when hidden, and the shared visibility bus now drives the camera throttles—closing a panel tears subscriptions down immediately.
 - **Fly-To refactor** - Fly-To now fronts the mission planner (defaults, target staging, KMZ import/export). Multi-waypoint runs with RTH/Land finish actions were validated; orbit execution/export still needs work.
@@ -20,42 +21,68 @@ Use only standard ascii characters here - don't use ✅  or similar
 - **KMZ workflow** - Fly-To loads DJI Pilot-generated KMZ files into the planner for review and export; execution is manual once the plan is inspected.
 - **Performance watch** - Map rAF batching and the camera throttles landed; FPV/H20N rendering now runs through an OffscreenCanvas worker so the renderer trace stays comfortably under frame budget (continue profiling long sessions for decoder spikes).
 - **Preflight visibility** - Preflight panel now surfaces return-to-home altitude, max height/distance, failsafe action, obstacle toggles, controller stick mode, and battery warning thresholds (with telemetry fallbacks) so pilots can cross-check DJI Pilot settings at a glance.
+- **Preflight configurables** - Flight limits, signal-lost behaviour, and Remote ID area/operator IDs can be edited directly from the Preflight panel; bridge commands mirror updates to the aircraft and return DJI error context.
+- **Regulatory gating** - Remote ID status reports via `UASRemoteIDManager` (area strategy defaults to US, missing operator IDs surface warnings but do not block bench flights). Fly Safe refresh triggers `getFlyZonesInSurroundingArea` so nearby restrictions are visible even in private airspace.
 - **Quick command strip** - Top bar shows Take-off/Land/RTH/Virtual Stick shortcuts with Shift+hotkeys, dual battery readouts (aircraft + RC placeholder), live mission status, and clickable altitude/speed tiles that open Flight Commands.
 - **Mission Control rename** - Fly-To & RTH panel is retitled “Mission Control,” exposed in Components menu/top-bar mission badge, and the Land quick action now commands an in-place landing while new `set_home_current` and keyboard shortcuts wire through the bridge.
 - **Power telemetry** - RC pack percentage streams with controller payloads and feeds both Preflight and the top bar; aircraft pack still derives from battery messages with preflight fallback.
 - **Field validation focus** - Collect hardware evidence for the 16 Hz keyboard/mouse stream, mission-plan execution (including altitude hold versus security floor), `waypoint_v2` fallback (mission id + KMZ logs), external KMZ execution, auto-mode gating, FlySafe toasts, the new mission simulation workflow, and session exports. Capture CSV/JSON logs, telemetry screenshots, and note any NFZ height bubbles blocking movement.
 - **Recent changes (latest first)**
-  1. 2025-09-29 - FPV/H20N video pipelines move draw calls to an OffscreenCanvas worker, and map animation reverted to the pre-smoothing behaviour after trace validation.
-  2. 2025-09-28 - Multi-waypoint mission plans now run end-to-end (planner → bridge → waypoint fallback), security take-off height clamps plan legs, default altitudes follow set-height or the safety floor, Orientation/HSI render home + next-waypoint arrows, and `KeyK` fires the motor start/shutdown stick macro.
-  3. 2025-09-27 - Flight Commands panel now exposes simulator enable/disable with location presets; bridge telemetry/command acks include simulator state and the Fly-To panel shows the active mode badge.
-  4. 2025-09-27 - Waypoint telemetry now captures pause/resume events, waypoint break-point info, and DJI error detail; Flight Commands and Fly-To panels add Pause/Resume controls that dispatch the bridge commands.
-  5. 2025-09-25 - Desktop Fly-To panel can pick DJI KMZ missions, push them to the bridge, and log selection metadata (name/path/size) alongside copy-to-clipboard controls.
-  6. 2025-09-25 - Waypoint execution state, waypoint index, and interrupt reasons now stream in `waypoint_status.timeline`; Flight Commands + Fly-To panels render the progress list, and fallback takeoff ASL now reuses the RTK home value (no ~6 m offset).
-  7. 2025-09-25 - Fly-To panel supports manual targets (map clicks, laser fixes, keyboard entry), mission simulation preview, waypoint stop control, and JSON timeline export.
-  8. 2025-09-25 - Intelligent Fly-To is now bypassed on platforms that advertise no supported modes; the bridge immediately generates a Waypoint V2 mission and reports its mission id/path.
-  9. 2025-09-25 - Auto-mode telemetry now gates Force Land / RTH Stop buttons; docs updated with gating behaviour.
-  10. 2025-09-24 - Fly-to context + FlySafe data stream to the desktop; Controller Insight limits card shows warning heights.
-  11. 2025-09-23 - Manual control presets, kill/override audio cues, and keyboard session exports landed.
-  12. 2025-09-08 - Simulator research documented (requires real aircraft, motors stay off, full API surface available for bench validation).
+  1. 2025-09-29 - Mission Control land-in-place semantics, Add Home/Origin helpers, and Preflight Remote ID & flight-limit editors shipped (`flight_settings_update`, `remote_id_update`, `flysafe_refresh`).
+  2. 2025-09-29 - FPV/H20N video pipelines move draw calls to an OffscreenCanvas worker, and map animation reverted to the pre-smoothing behaviour after trace validation.
+  3. 2025-09-28 - Multi-waypoint mission plans now run end-to-end (planner → bridge → waypoint fallback), security take-off height clamps plan legs, default altitudes follow set-height or the safety floor, Orientation/HSI render home + next-waypoint arrows, and `KeyK` fires the motor start/shutdown stick macro.
+  4. 2025-09-27 - Flight Commands panel now exposes simulator enable/disable with location presets; bridge telemetry/command acks include simulator state and the Fly-To panel shows the active mode badge.
+  5. 2025-09-27 - Waypoint telemetry now captures pause/resume events, waypoint break-point info, and DJI error detail; Flight Commands and Fly-To panels add Pause/Resume controls that dispatch the bridge commands.
+  6. 2025-09-25 - Desktop Fly-To panel can pick DJI KMZ missions, push them to the bridge, and log selection metadata (name/path/size) alongside copy-to-clipboard controls.
+  7. 2025-09-25 - Waypoint execution state, waypoint index, and interrupt reasons now stream in `waypoint_status.timeline`; Flight Commands + Fly-To panels render the progress list, and fallback takeoff ASL now reuses the RTK home value (no ~6 m offset).
+  8. 2025-09-25 - Fly-To panel supports manual targets (map clicks, laser fixes, keyboard entry), mission simulation preview, waypoint stop control, and JSON timeline export.
+  9. 2025-09-25 - Intelligent Fly-To is now bypassed on platforms that advertise no supported modes; the bridge immediately generates a Waypoint V2 mission and reports its mission id/path.
+  10. 2025-09-25 - Auto-mode telemetry now gates Force Land / RTH Stop buttons; docs updated with gating behaviour.
+  11. 2025-09-24 - Fly-to context + FlySafe data stream to the desktop; Controller Insight limits card shows warning heights.
+  12. 2025-09-23 - Manual control presets, kill/override audio cues, and keyboard session exports landed.
+  13. 2025-09-08 - Simulator research documented (requires real aircraft, motors stay off, full API surface available for bench validation).
 
   Next
 
-  1. **Battery telemetry parity** – Verify aircraft/RC readings against SDK reference widgets and correct the remote-controller battery feed if it deviates.
-  2. **Set-home quick action** – Add a dedicated “Set Home” control (UI + bridge command) alongside other mission shortcuts.
-  3. **Landing semantics** – Keep top-bar “Land” aligned with the standard land command, and update Mission Control so waypoint plans land in place. add an “add W1” helper for return-to-waypoint1 (first waypoint added) and 'add home' which flies to home coordinates, but does not land. keep RTH as is.
-  4. **Preflight configurables** – Surface editable flight/avoidance/FlySafe/Remote ID settings per the SDK manager docs (Perception, UAS Remote ID, Fly Zone, etc.).
-  5. **Mission Control (advanced planning)** – Layer in Waypoint flight-path mode selection (straight vs curved), orbit authoring, gimbal/POI cue support, and a catalog of available waypoint actions so Mission Control reaches feature parity with DJI Pilot.
-  6. **3D mapping** – Introduce a 3D planning view (layers for street/satellite/topo) for waypoint editing and mission visualization; evaluate MapLibre plugins vs alternative basemaps.
+  1. **Mission Control (advanced planning)** – Altitude defaults now use the SDK takeoff ASL and the top bar exposes Mission Start/Pause/Resume/Stop hotkeys. Path-mode selection (straight vs curved) and per-waypoint gimbal pitch scaffolding landed alongside an actions catalog. Still TODO:
+     - Field-verify that the refreshed curved-path encoding (`useStraightLine=0`, interior legs use `toPointAndPassWithContinuityCurvature`, damping 10 m) uploads cleanly—`UPLOAD_MISSION_WAYPOINT_TYPE_INVALID` should no longer appear, but adjust damping/turn mode if the aircraft still pauses.
+     - Confirm the new gimbal pitch injection takes effect in-flight; extend the action catalog with POI/yaw cues and emit real gimbal action groups once pitch validation passes (UI currently captures pitch only and we still default to a simple gimbalRotate placeholder).
+     - Expand orbit authoring so curved/POI plans export the right KMZ semantics and survive field validation.
+  2. **3D mapping** – Introduce a 3D planning view (layers for street/satellite/topo) for waypoint editing and mission visualization; evaluate MapLibre plugins vs alternative basemaps.
+  3. Identify why the app crashes sometimes:
 
+```
+ - sysctlbyname for kern.hv_vmm_present failed with status -1[33455:0929/164428.308724:ERROR:tile_manager.cc(835)] WARNING: tile memory limits exceeded, some content may 
+not draw                                                                           
+[33455:0929/164428.310136:ERROR:tile_manager.cc(835)] WARNING: tile memory limits exceeded, some content may not draw                                                  
+[33455:0929/164428.310772:ERROR:tile_manager.cc(835)] WARNING: tile memory limits exceeded, some content may not draw
+```
 ## Completed backlog items
 
 - Components menu once again exposes Object Memory and Preflight, and clicking the SYSTEM badge in the top bar opens the Preflight checklist.
 - FPV/H20N canvases stop rendering when panels are hidden or simulator mode is active, and drawing now occurs inside an OffscreenCanvas worker to keep the renderer responsive.
 - Preflight panel shows RTH/max altitude & distance, obstacle toggles, stick mode, and battery thresholds with telemetry fallbacks; power stats now stream alongside existing diagnostics.
-- Top bar status strip adds hotkeys for Take-off/Land/RTH/Virtual Stick, dual battery readouts (aircraft + RC via `RemoteControllerKey.KeyBatteryInfo`), mission status shortcut, and clickable altitude/speed tiles that jump to Flight Commands.
+- Top bar status strip adds hotkeys for Take-off/Land/RTH/Set Home/Virtual Stick, dual battery readouts (aircraft + RC via `RemoteControllerKey.KeyBatteryInfo`), mission status shortcut, and clickable altitude/speed tiles that jump to Flight Commands.
 - Top bar layout locked to a single-row strip; quick commands now stay on one line (scrollable when needed) so telemetry tiles remain aligned.
+- Battery telemetry parity restored: bridge emits aggregated pack data (`battery.percentage`, voltage, current, temp, cell voltages) plus RC charge via `KeyBatteryInfo`, and the UI normalizes both `battery_status` shapes so top-bar/Preflight readings match SDK widgets.
+- “Set Home” quick action lives alongside other mission shortcuts; Shift+H triggers the new `set_home_current` bridge command, and acknowledgements include previous/new home coordinates plus aircraft position context.
+- Mission Control landing semantics updated: land steps now keep their mission coordinates, “Add Home Waypoint” and “Add Origin (W1)” helpers append map/home points, and mission plans surface finish actions without forcing a return-to-home detour.
+- Mission Control altitude defaults now rely on the SDK-provided takeoff ASL; mission plan previews/exports keep that reference so smart-height vs set-height matches DJI sample logic.
+- Mission planner exposes straight vs curved path selection and per-waypoint gimbal pitch editing (beta). `path_mode` is forwarded to the waypoint executor, the mission builder now sets `useStraightLine=0`, curved turn mode, and damping in both Kotlin and exported KMZs, gimbal pitch nodes are written even when missing, and the top bar adds Mission Start/Pause/Resume/Stop hotkeys (Shift+M/P/O/E) wired into mission control + waypoint pause/resume/stop commands.
+- Reference KMZs (`tmp_missions/generated_tests/test-curved.kmz`, `tmp_missions/generated_tests/test-straight.kmz`) capture the updated encoding for QA—curved turn mode, damping, and gimbal pitch fields can be inspected without rerunning the planner.
+- Curved missions now align with DJI WPML: patch logic writes `toPointAndPassWithContinuityCurvature` for interior legs, zeroes damping at endpoints, and clamps simulator ASL throughout sim runs; exported KMZs mirror the same structure (start/finish stop, middle pass, damping 10 m).
+- Simulator enable now carries the requested altitude end-to-end: the desktop prefills altitude from the current takeoff ASL, the bridge records it, and telemetry reuses the configured value throughout simulator runs (including during mission execution) so home/aircraft ASL stay stable in bench tests.
+- Preflight panel now exposes editable flight limits (RTH altitude, max altitude/distance, failsafe action) and Remote ID configuration; updates flow through new bridge commands (`flight_settings_update`, `remote_id_update`) with real-time telemetry snapshots.
+- Remote ID snapshot stream surfaces area strategy, operator registration state, and status payloads from `UASRemoteIDManager`. Quick actions send area changes, operator IDs, or refreshes while logging DJI error feedback.
+- Fly Safe refresh command invokes `getFlyZonesInSurroundingArea`, and Preflight warnings panel now offers a manual refresh shortcut for NFZ diagnostics.
 - Fly-To panel is now branded “Mission Control,” reachable via Components menu and top-bar mission badge; land-in-place quick action rides along with the renaming (path-mode/orbit/gimbal actions still pending).
 - Controller payloads include RC battery percentage (via `RemoteControllerKey.KeyBatteryInfo` reflection), wiring power telemetry through to Preflight and the top bar.
+
+### Remote ID & Fly Safe Notes
+- Area strategy defaults to `US_STRATEGY`; switch to the appropriate region (EUROPEAN/JAPAN/FRANCE/CHINA) before live flights to match local regulations and clear Remote ID warnings.
+- Operator registration numbers are optional for bench testing—the aircraft still arms, but `UASRemoteIDStatus` reports the missing identifier until populated. Capture status snapshots before/after updates for compliance evidence.
+- Fly Safe refresh triggers `getFlyZonesInSurroundingArea` so nearby NFZs are visible; missions outside DJI polygons continue to arm, but height-limited zones still return DJI warning codes in command acknowledgements.
+
   4. Camera pipelines: implement full pacing logic—feeds run at 60 FPS when visible, drop frames (rather than render late) under burst load, and only throttle/stop when the sim is active or the panel is hidden. Goal: eliminate the intermittent “System” (drawImage) spikes without sacrificing real-flight frame rate.
   5. After the UI stays responsive in long bench sessions, move back to field validation (multi-waypoint + Return Home/Land, orbit behaviour) and capture logs/screens once the mission pipeline is exercised on-aircraft.
 

@@ -11,6 +11,7 @@ import type {
   ManualTargetState,
   MissionEntryKind,
   MissionWaypointTarget,
+  WaypointAction,
 } from '../types/missionPlanner';
 import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
 import { missionPlannerStore } from '../state/missionPlanner';
@@ -32,6 +33,7 @@ interface MissionPlanCommandEntry {
   kind?: string;
   radius?: number;
   turns?: number;
+  actions?: WaypointAction[];
 }
 
 const MAX_LOG_ENTRIES = 40;
@@ -78,6 +80,9 @@ const EARTH_RADIUS_M = 6371000;
 const DEFAULT_VERTICAL_SPEED_MS = 1.5;
 const MIN_HORIZONTAL_DISTANCE_M = 1.0;
 const MIN_VERTICAL_DISTANCE_M = 0.5;
+const GIMBAL_PITCH_MIN = -90;
+const GIMBAL_PITCH_MAX = 30;
+const CURVED_TURN_DAMPING_DISTANCE = 10;
 
 const haversineMeters = (a: { latitude: number; longitude: number }, b: { latitude: number; longitude: number }) => {
   const lat1 = (a.latitude * Math.PI) / 180;
@@ -112,6 +117,19 @@ const formatBytes = (bytes?: number) => {
   return `${gb.toFixed(2)} GB`;
 };
 
+const WAYPOINT_ACTION_CATALOG: Array<{ id: string; label: string; description: string }> = [
+  {
+    id: 'gimbal_pitch',
+    label: 'Gimbal Pitch',
+    description: 'Adjust camera pitch before entering the waypoint.',
+  },
+  {
+    id: 'poi',
+    label: 'Point of Interest',
+    description: 'Orient the gimbal toward a latitude/longitude reference (coming soon).',
+  },
+];
+
 interface SimulationSegment {
   label: string;
   distance: number;
@@ -131,12 +149,101 @@ export const FlyToPanel: React.FC = () => {
   const { sendFlightCommand } = useBridgeCommands();
   const { bridgeData } = useStableBridgeData();
   const telemetry = bridgeData.telemetry;
+  const takeoffAltitudeAsl = React.useMemo(() => {
+    const latestContextAltitude = (() => {
+      const log = bridgeData.flightCommandLog;
+      for (let index = log.length - 1; index >= 0; index -= 1) {
+        const entry = log[index];
+        const derived = entry?.fly_to_context?.takeoff_altitude_asl;
+        if (typeof derived === 'number' && Number.isFinite(derived)) {
+          return derived;
+        }
+      }
+      return null;
+    })();
+
+    if (typeof latestContextAltitude === 'number') {
+      return latestContextAltitude;
+    }
+
+    const telemetryTakeoff = telemetry?.takeoff_altitude;
+    if (typeof telemetryTakeoff === 'number' && Number.isFinite(telemetryTakeoff)) {
+      return telemetryTakeoff;
+    }
+
+    const homeAltitude = telemetry?.home_location?.altitude;
+    if (typeof homeAltitude === 'number' && Number.isFinite(homeAltitude)) {
+      return homeAltitude;
+    }
+
+    if (
+      typeof telemetry?.location?.altitude === 'number' &&
+      Number.isFinite(telemetry.location.altitude) &&
+      typeof telemetry?.altitude_above_takeoff === 'number' &&
+      Number.isFinite(telemetry.altitude_above_takeoff)
+    ) {
+      const derived = telemetry.location.altitude - telemetry.altitude_above_takeoff;
+      if (Number.isFinite(derived)) {
+        return derived;
+      }
+    }
+
+    const locationAltitude = telemetry?.location?.altitude;
+    if (typeof locationAltitude === 'number' && Number.isFinite(locationAltitude)) {
+      return locationAltitude;
+    }
+
+    return null;
+  }, [bridgeData.flightCommandLog, telemetry]);
+
+  const resolveTakeoffAltitude = React.useCallback(
+    (snapshot?: TelemetryData | null): number | null => {
+      const source = snapshot ?? telemetry;
+      if (source) {
+        const explicit = source.takeoff_altitude;
+        if (typeof explicit === 'number' && Number.isFinite(explicit)) {
+          return explicit;
+        }
+
+        const homeAltitude = source.home_location?.altitude;
+        if (typeof homeAltitude === 'number' && Number.isFinite(homeAltitude)) {
+          return homeAltitude;
+        }
+
+        if (
+          typeof source.location?.altitude === 'number' &&
+          Number.isFinite(source.location.altitude) &&
+          typeof source.altitude_above_takeoff === 'number' &&
+          Number.isFinite(source.altitude_above_takeoff)
+        ) {
+          const derived = source.location.altitude - source.altitude_above_takeoff;
+          if (Number.isFinite(derived)) {
+            return derived;
+          }
+        }
+
+        const locationAltitude = source.location?.altitude;
+        if (typeof locationAltitude === 'number' && Number.isFinite(locationAltitude)) {
+          return locationAltitude;
+        }
+      }
+
+      if (typeof takeoffAltitudeAsl === 'number' && Number.isFinite(takeoffAltitudeAsl)) {
+        return takeoffAltitudeAsl;
+      }
+
+      return null;
+    },
+    [takeoffAltitudeAsl, telemetry],
+  );
+
   const [distanceMeters, setDistanceMeters] = React.useState<number>(5);
   const [verticalMeters, setVerticalMeters] = React.useState<number>(2);
   const [maxSpeed, setMaxSpeed] = React.useState<number>(10);
   const [securityTakeoffHeight, setSecurityTakeoffHeight] = React.useState<number>(20);
   const [flyToMode, setFlyToMode] = React.useState<'smart_height' | 'set_height'>('set_height');
   const [flyToHeight, setFlyToHeight] = React.useState<number>(20);
+  const [flightPathMode, setFlightPathMode] = React.useState<'straight' | 'curved'>('straight');
   const [logEntries, setLogEntries] = React.useState<MissionLogEntry[]>([]);
   const [manualTarget, setManualTarget] = React.useState<ManualTargetState>({ latitude: null, longitude: null, altitude: null });
   const [placingTarget, setPlacingTarget] = React.useState<boolean>(false);
@@ -216,30 +323,35 @@ export const FlyToPanel: React.FC = () => {
   };
 
   const computeDefaultTargetAltitude = React.useCallback((): number | null => {
-    const takeoffAltitudeAsl = telemetry?.takeoff_altitude
-      ?? telemetry?.home_location?.altitude
-      ?? telemetry?.location?.altitude
-      ?? telemetry?.altitude
-      ?? null;
+    const takeoffAsl = resolveTakeoffAltitude();
 
     if (flyToMode === 'set_height' && Number.isFinite(flyToHeight)) {
-      if (takeoffAltitudeAsl != null) {
-        return takeoffAltitudeAsl + flyToHeight;
+      if (takeoffAsl != null) {
+        return takeoffAsl + flyToHeight;
       }
-      const baseAlt = telemetry?.location?.altitude ?? telemetry?.altitude;
-      return typeof baseAlt === 'number' ? baseAlt + flyToHeight : null;
+      const baseAlt = telemetry?.location?.altitude;
+      return typeof baseAlt === 'number' && Number.isFinite(baseAlt)
+        ? baseAlt + flyToHeight
+        : null;
     }
 
     if (Number.isFinite(securityTakeoffHeight)) {
-      if (takeoffAltitudeAsl != null) {
-        return takeoffAltitudeAsl + securityTakeoffHeight;
+      if (takeoffAsl != null) {
+        return takeoffAsl + securityTakeoffHeight;
       }
-      const baseAlt = telemetry?.location?.altitude ?? telemetry?.altitude;
-      return typeof baseAlt === 'number' ? baseAlt + securityTakeoffHeight : null;
+      const baseAlt = telemetry?.location?.altitude;
+      if (typeof baseAlt === 'number' && Number.isFinite(baseAlt)) {
+        return baseAlt + securityTakeoffHeight;
+      }
     }
 
-    return telemetry?.location?.altitude ?? telemetry?.altitude ?? null;
-  }, [flyToHeight, flyToMode, securityTakeoffHeight, telemetry?.altitude, telemetry?.location?.altitude, telemetry?.home_location?.altitude, telemetry?.takeoff_altitude]);
+    if (takeoffAsl != null) {
+      return takeoffAsl;
+    }
+
+    const fallbackAlt = telemetry?.location?.altitude ?? telemetry?.altitude ?? null;
+    return typeof fallbackAlt === 'number' && Number.isFinite(fallbackAlt) ? fallbackAlt : null;
+  }, [flyToHeight, flyToMode, resolveTakeoffAltitude, securityTakeoffHeight, telemetry?.altitude, telemetry?.location?.altitude]);
 
   const handleCopyMissionPath = React.useCallback(async (path: string) => {
     try {
@@ -579,12 +691,15 @@ export const FlyToPanel: React.FC = () => {
       kind: 'return_home',
       latitude: clampLat(home.latitude),
       longitude: clampLon(home.longitude),
-      altitude: defaultTargetAltitudePreview ?? telemetry?.takeoff_altitude ?? telemetry?.location?.altitude ?? null,
+      altitude: defaultTargetAltitudePreview
+        ?? takeoffAltitudeAsl
+        ?? telemetry?.location?.altitude
+        ?? null,
     };
     setMissionPlan((prev) => [...prev, entry]);
     appendLog('Plan return-to-home added', entry, 'manual');
     setStatusMessage('Return-to-home added to mission plan.');
-  }, [telemetry?.home_location?.latitude, telemetry?.home_location?.longitude, telemetry?.takeoff_altitude, telemetry?.location?.altitude, appendLog, defaultTargetAltitudePreview]);
+  }, [telemetry?.home_location?.latitude, telemetry?.home_location?.longitude, telemetry?.location?.altitude, appendLog, defaultTargetAltitudePreview, takeoffAltitudeAsl]);
 
   const addHomeWaypointToPlan = React.useCallback(() => {
     const home = telemetry?.home_location;
@@ -594,7 +709,7 @@ export const FlyToPanel: React.FC = () => {
     }
 
     const altitudeCandidate = defaultTargetAltitudePreview
-      ?? telemetry?.takeoff_altitude
+      ?? takeoffAltitudeAsl
       ?? telemetry?.location?.altitude
       ?? null;
 
@@ -608,7 +723,7 @@ export const FlyToPanel: React.FC = () => {
     setMissionPlan((prev) => [...prev, entry]);
     appendLog('Plan home waypoint added', entry, 'manual');
     setStatusMessage('Home waypoint added to mission plan.');
-  }, [telemetry?.home_location?.latitude, telemetry?.home_location?.longitude, telemetry?.takeoff_altitude, telemetry?.location?.altitude, appendLog, defaultTargetAltitudePreview]);
+  }, [telemetry?.home_location?.latitude, telemetry?.home_location?.longitude, telemetry?.location?.altitude, appendLog, defaultTargetAltitudePreview, takeoffAltitudeAsl]);
 
   const addOriginWaypointToPlan = React.useCallback(() => {
     const origin = missionPlan.find((entry) => Number.isFinite(entry.latitude) && Number.isFinite(entry.longitude));
@@ -652,7 +767,7 @@ export const FlyToPanel: React.FC = () => {
       return;
     }
 
-    const landingAltitude = telemetry?.takeoff_altitude
+    const landingAltitude = resolveTakeoffAltitude()
       ?? candidate?.altitude
       ?? telemetry?.location?.altitude
       ?? defaultTargetAltitudePreview
@@ -668,7 +783,7 @@ export const FlyToPanel: React.FC = () => {
     setMissionPlan((prev) => [...prev, entry]);
     appendLog('Plan land added', entry, 'manual');
     setStatusMessage('Landing step added to mission plan.');
-  }, [missionPlan, telemetry?.location?.latitude, telemetry?.location?.longitude, telemetry?.home_location?.latitude, telemetry?.home_location?.longitude, telemetry?.takeoff_altitude, appendLog, defaultTargetAltitudePreview]);
+  }, [missionPlan, telemetry?.location?.latitude, telemetry?.location?.longitude, telemetry?.home_location?.latitude, telemetry?.home_location?.longitude, appendLog, defaultTargetAltitudePreview, resolveTakeoffAltitude]);
 
   const removePlanEntry = React.useCallback((id: string) => {
     setMissionPlan((prev) => prev.filter((entry) => entry.id !== id));
@@ -685,6 +800,21 @@ export const FlyToPanel: React.FC = () => {
         ? { ...entry, altitude }
         : entry
     )));
+  }, []);
+
+  const updatePlanEntryGimbalPitch = React.useCallback((id: string, pitch: number | null) => {
+    setMissionPlan((prev) => prev.map((entry) => {
+      if (entry.id !== id) {
+        return entry;
+      }
+      const withoutGimbal = (entry.actions ?? []).filter((action) => action.type !== 'gimbal_pitch');
+      if (pitch == null || Number.isNaN(pitch)) {
+        return withoutGimbal.length ? { ...entry, actions: withoutGimbal } : { ...entry, actions: undefined };
+      }
+      const clampedPitch = Math.max(GIMBAL_PITCH_MIN, Math.min(GIMBAL_PITCH_MAX, pitch));
+      const nextActions: WaypointAction[] = [...withoutGimbal, { type: 'gimbal_pitch', pitch: clampedPitch, timing: 'before' }];
+      return { ...entry, actions: nextActions };
+    }));
   }, []);
 
   const stageManualTarget = React.useCallback((next: ManualTargetState, context: Record<string, any>, message: string) => {
@@ -874,8 +1004,7 @@ export const FlyToPanel: React.FC = () => {
         return;
       }
 
-      const baseAltitude = telemetry?.takeoff_altitude
-        ?? telemetry?.home_location?.altitude
+      const baseAltitude = resolveTakeoffAltitude()
         ?? telemetry?.location?.altitude
         ?? telemetry?.altitude
         ?? 0;
@@ -913,7 +1042,7 @@ export const FlyToPanel: React.FC = () => {
           kind: 'land',
           latitude: clampLat(landingLat),
           longitude: clampLon(landingLon),
-          altitude: telemetry?.takeoff_altitude ?? baseAltitude,
+          altitude: resolveTakeoffAltitude() ?? baseAltitude,
         });
       }
 
@@ -942,7 +1071,7 @@ export const FlyToPanel: React.FC = () => {
       console.error('KMZ load failed', error);
       setStatusMessage(error instanceof Error ? error.message : 'Failed to load KMZ');
     }
-  }, [appendLog, telemetry?.home_location?.latitude, telemetry?.home_location?.longitude, telemetry?.location?.latitude, telemetry?.location?.longitude, telemetry?.takeoff_altitude, telemetry?.location?.altitude, telemetry?.altitude, defaultTargetAltitudePreview]);
+  }, [appendLog, defaultTargetAltitudePreview, resolveTakeoffAltitude, telemetry?.altitude, telemetry?.home_location?.latitude, telemetry?.home_location?.longitude, telemetry?.location?.altitude, telemetry?.location?.latitude, telemetry?.location?.longitude]);
 
   const handleSaveKmzMission = React.useCallback(async () => {
     if (!missionPlan.length) {
@@ -956,8 +1085,7 @@ export const FlyToPanel: React.FC = () => {
       return;
     }
 
-    const baseAltitude = telemetry?.takeoff_altitude
-      ?? telemetry?.home_location?.altitude
+    const baseAltitude = resolveTakeoffAltitude()
       ?? telemetry?.location?.altitude
       ?? telemetry?.altitude
       ?? 0;
@@ -971,11 +1099,28 @@ export const FlyToPanel: React.FC = () => {
     const globalSpeed = Math.max(1, Math.round(Number.isFinite(maxSpeed) ? maxSpeed : 5));
     const securityHeight = Math.max(0, Math.round(Number.isFinite(securityTakeoffHeight) ? securityTakeoffHeight : 20));
 
+    const curvedPath = flightPathMode === 'curved';
+    const useStraightLineValue = curvedPath ? '0' : '1';
+
     const wpmlWaypoints = primaryWaypoints.map((entry, index) => {
       const latitude = clampLat(entry.latitude);
       const longitude = clampLon(entry.longitude);
       const altitude = typeof entry.altitude === 'number' ? entry.altitude : (defaultTargetAltitudePreview ?? baseAltitude);
       const relativeHeight = (altitude ?? baseAltitude) - baseAltitude;
+      const isFirst = index === 0;
+      const isLast = index === primaryWaypoints.length - 1;
+      const curvedTurnMode = (!curvedPath || primaryWaypoints.length <= 1)
+        ? 'toPointAndStopWithDiscontinuityCurvature'
+        : (isFirst || isLast)
+          ? 'toPointAndStopWithDiscontinuityCurvature'
+          : 'toPointAndPassWithContinuityCurvature';
+      const dampingValue = (!curvedPath || primaryWaypoints.length <= 1 || isFirst || isLast)
+        ? '0.0'
+        : CURVED_TURN_DAMPING_DISTANCE.toFixed(1);
+      const gimbalAction = entry.actions?.find((action): action is Extract<WaypointAction, { type: 'gimbal_pitch' }> => action.type === 'gimbal_pitch');
+      const gimbalPitch = gimbalAction && typeof gimbalAction.pitch === 'number'
+        ? Math.max(GIMBAL_PITCH_MIN, Math.min(GIMBAL_PITCH_MAX, gimbalAction.pitch))
+        : 0;
       return `      <Placemark>
         <Point>
           <coordinates>
@@ -985,6 +1130,22 @@ export const FlyToPanel: React.FC = () => {
         <wpml:index>${index}</wpml:index>
         <wpml:executeHeight>${relativeHeight.toFixed(3)}</wpml:executeHeight>
         <wpml:waypointSpeed>${globalSpeed}</wpml:waypointSpeed>
+        <wpml:useStraightLine>${useStraightLineValue}</wpml:useStraightLine>
+        <wpml:waypointTurnParam>
+          <wpml:waypointTurnMode>${curvedTurnMode}</wpml:waypointTurnMode>
+          <wpml:waypointTurnDampingDist>${dampingValue}</wpml:waypointTurnDampingDist>
+        </wpml:waypointTurnParam>
+        <wpml:waypointHeadingParam>
+          <wpml:waypointHeadingMode>followWayline</wpml:waypointHeadingMode>
+          <wpml:waypointHeadingAngle>0</wpml:waypointHeadingAngle>
+          <wpml:waypointHeadingAngleEnable>0</wpml:waypointHeadingAngleEnable>
+          <wpml:waypointHeadingPoiIndex>0</wpml:waypointHeadingPoiIndex>
+        </wpml:waypointHeadingParam>
+        <wpml:waypointGimbalHeadingParam>
+          <wpml:waypointGimbalHeadingMode>followWayline</wpml:waypointGimbalHeadingMode>
+          <wpml:waypointGimbalPitchAngle>${gimbalPitch.toFixed(2)}</wpml:waypointGimbalPitchAngle>
+          <wpml:waypointGimbalYawAngle>0</wpml:waypointGimbalYawAngle>
+        </wpml:waypointGimbalHeadingParam>
       </Placemark>`;
     }).join('\n');
 
@@ -1024,8 +1185,9 @@ ${wpmlWaypoints}
 </kml>`;
 
     const zip = new JSZip();
-    zip.file('waylines.wpml', wpml);
-    zip.file('template.kml', templateKml);
+    const wpmzFolder = zip.folder('wpmz');
+    (wpmzFolder ?? zip).file('waylines.wpml', wpml);
+    (wpmzFolder ?? zip).file('template.kml', templateKml);
 
     const blob = await zip.generateAsync({ type: 'blob' });
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -1052,7 +1214,7 @@ ${wpmlWaypoints}
       finish_action: finishAction,
     }, 'kmz');
     setStatusMessage(`Mission plan exported to ${fileName}.`);
-  }, [missionPlan, telemetry?.takeoff_altitude, telemetry?.home_location?.altitude, telemetry?.location?.altitude, telemetry?.altitude, maxSpeed, securityTakeoffHeight, appendLog, defaultTargetAltitudePreview]);
+  }, [appendLog, defaultTargetAltitudePreview, maxSpeed, missionPlan, resolveTakeoffAltitude, securityTakeoffHeight, telemetry?.altitude, telemetry?.location?.altitude]);
 
   React.useEffect(() => {
     const api = (window as any).electronAPI;
@@ -1226,9 +1388,7 @@ ${wpmlWaypoints}
       return;
     }
 
-    const takeoffAsl = telemetrySnapshot.takeoff_altitude ?? (
-      (telemetrySnapshot.location.altitude ?? 0) - (telemetrySnapshot.altitude_above_takeoff ?? 0)
-    );
+    const takeoffAsl = resolveTakeoffAltitude(telemetrySnapshot);
     const currentAsl = telemetrySnapshot.location.altitude ?? (
       (takeoffAsl ?? 0) + (telemetrySnapshot.altitude_above_takeoff ?? 0)
     );
@@ -1366,7 +1526,7 @@ ${wpmlWaypoints}
       })),
     }, 'simulation');
     setStatusMessage('Simulation ready — review the mission summary below.');
-  }, [telemetry, missionPlan, activeTarget, securityTakeoffHeight, maxSpeed, appendLog, defaultTargetAltitudePreview]);
+  }, [telemetry, missionPlan, activeTarget, securityTakeoffHeight, maxSpeed, appendLog, defaultTargetAltitudePreview, resolveTakeoffAltitude]);
 
   const handleSimulateMission = React.useCallback(() => {
     simulateMissionPlan();
@@ -1381,10 +1541,7 @@ ${wpmlWaypoints}
 
     const baseLocation = telemetrySnapshot.location;
     const baseAltitude = baseLocation.altitude ?? telemetrySnapshot.altitude ?? 0;
-    const takeoffAltitude = telemetrySnapshot.takeoff_altitude
-      ?? (typeof baseAltitude === 'number' && typeof telemetrySnapshot.altitude_above_takeoff === 'number'
-        ? baseAltitude - telemetrySnapshot.altitude_above_takeoff
-        : undefined);
+    const takeoffAltitude = resolveTakeoffAltitude(telemetrySnapshot);
     let resolvedAltitude = altitude ?? baseAltitude;
 
     const horizontalDistance = baseLocation
@@ -1735,7 +1892,7 @@ ${wpmlWaypoints}
     await sendFlyTo(activeTarget.latitude, activeTarget.longitude, altitude, label);
   };
 
-  const handleExecuteMissionPlan = async () => {
+  const handleExecuteMissionPlan = React.useCallback(async (triggerSource?: string) => {
     if (!missionPlan.length) {
       setStatusMessage('Add at least one waypoint to the mission plan before executing.');
       return;
@@ -1746,24 +1903,25 @@ ${wpmlWaypoints}
       return;
     }
 
-    const takeoffAltitudeAsl = telemetrySnapshot.takeoff_altitude
-      ?? telemetrySnapshot.home_location?.altitude
-      ?? telemetrySnapshot.location?.altitude
-      ?? telemetrySnapshot.altitude
-      ?? null;
+    setSimPreview(null);
+
+    const snapshotTakeoffAsl = resolveTakeoffAltitude(telemetrySnapshot);
+    const requestSource = triggerSource ?? 'mission_control';
 
     const defaultAltitudeAsl = (() => {
       if (typeof manualTarget.altitude === 'number') {
         return manualTarget.altitude;
       }
-      if (takeoffAltitudeAsl != null && Number.isFinite(securityTakeoffHeight)) {
-        return takeoffAltitudeAsl + securityTakeoffHeight;
+      if (snapshotTakeoffAsl != null && Number.isFinite(securityTakeoffHeight)) {
+        return snapshotTakeoffAsl + securityTakeoffHeight;
       }
       if (typeof telemetrySnapshot.location?.altitude === 'number' && Number.isFinite(securityTakeoffHeight)) {
         return telemetrySnapshot.location.altitude + securityTakeoffHeight;
       }
       return telemetrySnapshot.location?.altitude ?? telemetrySnapshot.altitude ?? null;
     })();
+
+    const snapshotHome = telemetrySnapshot.home_location ?? homeLocation;
 
     const terminalAction = [...missionPlan]
       .reverse()
@@ -1780,9 +1938,9 @@ ${wpmlWaypoints}
         let latitude = entry.latitude;
         let longitude = entry.longitude;
 
-        if (entry.kind === 'return_home' && homeLocation && Number.isFinite(homeLocation.latitude) && Number.isFinite(homeLocation.longitude)) {
-          latitude = clampLat(homeLocation.latitude);
-          longitude = clampLon(homeLocation.longitude);
+        if (entry.kind === 'return_home' && snapshotHome && Number.isFinite(snapshotHome.latitude) && Number.isFinite(snapshotHome.longitude)) {
+          latitude = clampLat(snapshotHome.latitude);
+          longitude = clampLon(snapshotHome.longitude);
         }
 
         if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
@@ -1794,7 +1952,7 @@ ${wpmlWaypoints}
           : defaultAltitudeAsl;
 
         if (entry.kind === 'land') {
-          altitudeAsl = takeoffAltitudeAsl ?? defaultAltitudeAsl ?? altitudeAsl ?? 0;
+          altitudeAsl = snapshotTakeoffAsl ?? defaultAltitudeAsl ?? altitudeAsl ?? 0;
         }
 
         const payload: MissionPlanCommandEntry = {
@@ -1809,6 +1967,14 @@ ${wpmlWaypoints}
         if (typeof entry.turns === 'number') {
           payload.turns = entry.turns;
         }
+        if (entry.actions && entry.actions.length) {
+          payload.actions = entry.actions.map((action) => ({ ...action }));
+          const gimbalAction = entry.actions.find((action): action is Extract<WaypointAction, { type: 'gimbal_pitch' }> => action.type === 'gimbal_pitch');
+          if (gimbalAction && typeof gimbalAction.pitch === 'number') {
+            const clampedPitch = Math.max(GIMBAL_PITCH_MIN, Math.min(GIMBAL_PITCH_MAX, gimbalAction.pitch));
+            (payload as any).gimbal_pitch = clampedPitch;
+          }
+        }
         return payload;
       })
       .filter((entry): entry is MissionPlanCommandEntry => Boolean(entry));
@@ -1821,9 +1987,9 @@ ${wpmlWaypoints}
     const finalTarget = planPayload[planPayload.length - 1];
     const maxSpeedValue = Number.isFinite(maxSpeed) ? maxSpeed : undefined;
     const targetAltitudeAsl = finalTarget.altitude
-      ?? (takeoffAltitudeAsl != null && Number.isFinite(securityTakeoffHeight)
-        ? takeoffAltitudeAsl + securityTakeoffHeight
-        : takeoffAltitudeAsl);
+      ?? (snapshotTakeoffAsl != null && Number.isFinite(securityTakeoffHeight)
+        ? snapshotTakeoffAsl + securityTakeoffHeight
+        : snapshotTakeoffAsl);
 
     const commandPayload: Record<string, any> = {
       plan: planPayload.map((point) => ({
@@ -1833,9 +1999,11 @@ ${wpmlWaypoints}
         kind: point.kind,
         ...(typeof point.radius === 'number' ? { radius: point.radius } : {}),
         ...(typeof point.turns === 'number' ? { turns: point.turns } : {}),
+        ...(point.actions && point.actions.length ? { actions: point.actions } : {}),
       })),
       mode: flyToMode,
       security_takeoff_height: securityTakeoffHeight,
+      path_mode: flightPathMode,
       reason: 'mission_plan',
       target_location: {
         latitude: finalTarget.latitude,
@@ -1843,6 +2011,10 @@ ${wpmlWaypoints}
         altitude: targetAltitudeAsl ?? null,
       },
     };
+
+    if (requestSource) {
+      commandPayload.trigger_source = requestSource;
+    }
 
     if (typeof maxSpeedValue === 'number') {
       commandPayload.max_speed = maxSpeedValue;
@@ -1874,12 +2046,39 @@ ${wpmlWaypoints}
       if (result?.success === false) {
         setStatusMessage(result.error || result.error_message || 'waypoint_execute_plan rejected');
       } else {
-        setStatusMessage(`Mission plan (${planPayload.length} waypoint${planPayload.length === 1 ? '' : 's'}) dispatched.`);
+        const sourceLabel = requestSource && requestSource !== 'mission_control'
+          ? ` via ${requestSource.replace(/_/g, ' ')}`
+          : '';
+        setStatusMessage(`Mission plan (${planPayload.length} waypoint${planPayload.length === 1 ? '' : 's'}) dispatched${sourceLabel}.`);
       }
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : 'waypoint_execute_plan failed');
     }
-  };
+  }, [
+    appendLog,
+    defaultTargetAltitudePreview,
+    ensureTelemetry,
+    flyToHeight,
+    flyToMode,
+    homeLocation?.latitude,
+    homeLocation?.longitude,
+    manualTarget.altitude,
+    maxSpeed,
+    missionPlan,
+    flightPathMode,
+    resolveTakeoffAltitude,
+    securityTakeoffHeight,
+    sendFlightCommand,
+    setSimPreview,
+    setStatusMessage,
+  ]);
+
+  React.useEffect(() => {
+    const unsubscribe = missionPlannerStore.onExecutePlanRequest((context) => {
+      handleExecuteMissionPlan(context?.source);
+    });
+    return unsubscribe;
+  }, [handleExecuteMissionPlan]);
 
   const simulatorBadge = React.useMemo(() => getSimulatorModeBadge(telemetry?.simulator), [telemetry?.simulator]);
   const simulatorStatus = telemetry?.simulator;
@@ -1963,6 +2162,17 @@ ${wpmlWaypoints}
                     {mode === 'smart_height' ? 'Smart height' : 'Set height'}
                   </option>
                 ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-[11px]">
+              <span>Waypoint Path Mode</span>
+              <select
+                value={flightPathMode}
+                onChange={(event) => setFlightPathMode(event.target.value as 'straight' | 'curved')}
+                className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200"
+              >
+                <option value="straight">Straight (stop at waypoint)</option>
+                <option value="curved">Curved (fly-through)</option>
               </select>
             </label>
             <label className="flex flex-col gap-1 text-[11px]">
@@ -2373,6 +2583,9 @@ ${wpmlWaypoints}
                       ? 'Land'
                       : `Waypoint ${index + 1}`;
                 const altitudeValue = entry.altitude ?? '';
+                const gimbalAction = entry.actions?.find((action) => action.type === 'gimbal_pitch') as
+                  | { type: 'gimbal_pitch'; pitch: number; timing?: 'before' | 'after' }
+                  | undefined;
                 return (
                   <div
                     key={entry.id}
@@ -2402,6 +2615,36 @@ ${wpmlWaypoints}
                           className="w-24 bg-black/40 border border-gray-700/70 rounded px-1 py-0.5 text-right"
                         />
                       </div>
+                      <div className="flex items-center gap-2 text-[10px] text-gray-300">
+                        <span>Gimbal pitch (°)</span>
+                        <input
+                          type="number"
+                          value={gimbalAction ? gimbalAction.pitch : ''}
+                          min={-90}
+                          max={30}
+                          onChange={(event) => {
+                            const raw = event.target.value;
+                            if (raw === '') {
+                              updatePlanEntryGimbalPitch(entry.id, null);
+                              return;
+                            }
+                            const numeric = Number(raw);
+                            if (Number.isFinite(numeric)) {
+                              updatePlanEntryGimbalPitch(entry.id, numeric);
+                            }
+                          }}
+                          className="w-20 bg-black/40 border border-gray-700/70 rounded px-1 py-0.5 text-right"
+                        />
+                        {gimbalAction && (
+                          <button
+                            type="button"
+                            className="text-[10px] text-gray-400 hover:text-gray-200"
+                            onClick={() => updatePlanEntryGimbalPitch(entry.id, null)}
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
                       {entry.kind === 'orbit' && entry.radius && (
                         <div className="text-purple-200">
                           Radius {entry.radius} m · {entry.turns ?? 1} turn{(entry.turns ?? 1) === 1 ? '' : 's'}
@@ -2426,6 +2669,20 @@ ${wpmlWaypoints}
               })}
             </div>
           )}
+          <div className="mt-3">
+            <div className="text-gray-400 uppercase text-[11px] mb-1">Waypoint Actions Catalog</div>
+            <ul className="text-[10px] text-gray-300 space-y-1 border border-gray-700/60 rounded px-2 py-1 bg-black/30">
+              {WAYPOINT_ACTION_CATALOG.map((action) => (
+                <li key={action.id}>
+                  <span className="text-gray-100 font-semibold">{action.label}</span>
+                  <span className="ml-2 text-gray-400">{action.description}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="text-[10px] text-gray-500 mt-1">
+              Assign per-waypoint gimbal pitch today; POI and advanced cues will follow after backend support lands.
+            </div>
+          </div>
           {missionPlan.length > 0 && (
             <div className="mt-2 flex flex-col gap-1 text-[10px]">
               <button
@@ -2438,7 +2695,7 @@ ${wpmlWaypoints}
               <button
                 type="button"
                 className="px-2 py-1 rounded bg-dji-blue text-white hover:bg-dji-blue/80 disabled:bg-gray-700 disabled:text-gray-400"
-                onClick={handleExecuteMissionPlan}
+                onClick={() => handleExecuteMissionPlan()}
                 disabled={!telemetry?.location}
               >
                 Execute Mission Plan ({missionPlan.length} waypoint{missionPlan.length === 1 ? '' : 's'})

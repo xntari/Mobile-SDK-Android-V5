@@ -1,5 +1,18 @@
 export type MissionEntryKind = 'waypoint' | 'orbit' | 'return_home' | 'land';
 
+export type WaypointAction =
+  | {
+      type: 'gimbal_pitch';
+      pitch: number;
+      timing?: 'before' | 'after';
+    }
+  | {
+      type: 'poi';
+      latitude: number;
+      longitude: number;
+      altitude?: number | null;
+    };
+
 export interface PlannedMissionEntry {
   id: string;
   kind: MissionEntryKind;
@@ -8,6 +21,7 @@ export interface PlannedMissionEntry {
   altitude: number | null;
   radius?: number;
   turns?: number;
+  actions?: WaypointAction[];
 }
 
 export interface ManualTargetState {

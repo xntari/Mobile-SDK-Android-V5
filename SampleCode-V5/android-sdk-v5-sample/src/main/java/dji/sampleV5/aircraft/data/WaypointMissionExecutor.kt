@@ -40,8 +40,10 @@ import dji.sdk.wpmz.value.mission.WaylineWaypointTurnParam
 import dji.sdk.wpmz.value.mission.WaylineWaypointYawMode
 import dji.sdk.wpmz.value.mission.WaylineWaypointYawParam
 import dji.sdk.wpmz.value.mission.WaylineWaypointYawPathMode
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -51,6 +53,15 @@ import java.util.concurrent.atomic.AtomicReference
 import dji.v5.manager.aircraft.waypoint3.model.WaylineExecutingInfo
 import kotlin.math.abs
 import kotlin.math.max
+import javax.xml.parsers.DocumentBuilderFactory
+import javax.xml.transform.OutputKeys
+import javax.xml.transform.TransformerFactory
+import javax.xml.transform.dom.DOMSource
+import javax.xml.transform.stream.StreamResult
+import org.w3c.dom.Element
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
 
 /**
  * Builds and executes minimal Waypoint V2 missions to mimic Fly-To when Intelligent Fly-To
@@ -72,6 +83,11 @@ class WaypointMissionExecutor(
         val waypoints: List<Map<String, Any?>> = emptyList()
     )
 
+    enum class PathMode {
+        STRAIGHT,
+        CURVED
+    }
+
     data class Request(
         val targetLocation: LocationCoordinate3D,
         val targetAltitudeAsl: Double?,
@@ -81,14 +97,16 @@ class WaypointMissionExecutor(
         val securityTakeoffHeight: Double?,
         val reason: String,
         val plan: List<PlanPoint> = emptyList(),
-        val finishAction: WaylineFinishedAction = WaylineFinishedAction.NO_ACTION
+        val finishAction: WaylineFinishedAction = WaylineFinishedAction.NO_ACTION,
+        val pathMode: PathMode? = null
     )
 
     data class PlanPoint(
         val latitude: Double,
         val longitude: Double,
         val altitude: Double?,
-        val kind: String? = null
+        val kind: String? = null,
+        val gimbalPitch: Double? = null
     )
 
     private data class PlanPointResolved(
@@ -96,7 +114,8 @@ class WaypointMissionExecutor(
         val longitude: Double,
         val executeHeight: Double,
         val kind: String? = null,
-        val altitudeAsl: Double? = null
+        val altitudeAsl: Double? = null,
+        val gimbalPitch: Double? = null
     )
 
     sealed class Result {
@@ -337,7 +356,8 @@ class WaypointMissionExecutor(
                         longitude = lon,
                         executeHeight = executeHeight,
                         kind = point.kind,
-                        altitudeAsl = altitudeAsl
+                        altitudeAsl = altitudeAsl,
+                        gimbalPitch = point.gimbalPitch
                     )
                 )
             }
@@ -411,7 +431,14 @@ class WaypointMissionExecutor(
                 droneInfoResult = droneInfoResult,
                 manualHeightOverride = manualHeightOverride,
                 plan = planResolved,
-                finishAction = request.finishAction
+                finishAction = request.finishAction,
+                pathMode = request.pathMode
+            )
+            patchWaylineMissionFile(
+                missionFile = missionFile,
+                plan = planResolved,
+                hasStartWaypoint = currentLocation != null,
+                curvedFlight = request.pathMode == PathMode.CURVED
             )
         }
 
@@ -506,6 +533,157 @@ class WaypointMissionExecutor(
             }.onFailure {
                 Log.e(TAG, "Failed to initialize WPMZManager: ${it.message}", it)
             }
+        }
+    }
+
+    private fun patchWaylineMissionFile(
+        missionFile: File,
+        plan: List<PlanPointResolved>,
+        hasStartWaypoint: Boolean,
+        curvedFlight: Boolean
+    ) {
+        val needsGimbal = plan.any { it.gimbalPitch != null }
+        if (!curvedFlight && !needsGimbal) {
+            return
+        }
+
+        runCatching {
+            val tempFile = File.createTempFile("mission_patch", ".kmz")
+            ZipFile(missionFile).use { zipFile ->
+                ZipOutputStream(FileOutputStream(tempFile)).use { zipOut ->
+                    val entries = zipFile.entries()
+                    while (entries.hasMoreElements()) {
+                        val entry = entries.nextElement()
+                        val originalBytes = zipFile.getInputStream(entry).readBytes()
+                        val bytes = if (entry.name == WAYLINES_WPML_PATH) {
+                            runCatching {
+                                patchWaylinesXml(originalBytes, plan, hasStartWaypoint, curvedFlight)
+                            }.getOrElse { throwable ->
+                                Log.w(TAG, "Failed to patch waylines.wpml: ${throwable.message}")
+                                originalBytes
+                            }
+                        } else {
+                            originalBytes
+                        }
+                        val patchedEntry = ZipEntry(entry.name).apply { time = entry.time }
+                        zipOut.putNextEntry(patchedEntry)
+                        zipOut.write(bytes)
+                        zipOut.closeEntry()
+                    }
+                }
+            }
+
+            if (!missionFile.delete()) {
+                Log.w(TAG, "Unable to remove original mission file before applying patch; overwriting")
+            }
+            if (!tempFile.renameTo(missionFile)) {
+                tempFile.copyTo(missionFile, overwrite = true)
+                tempFile.delete()
+            }
+        }.onFailure {
+            Log.w(TAG, "Mission patch step failed: ${it.message}")
+        }
+    }
+
+    private fun patchWaylinesXml(
+        data: ByteArray,
+        plan: List<PlanPointResolved>,
+        hasStartWaypoint: Boolean,
+        curvedFlight: Boolean
+    ): ByteArray {
+        val needsGimbal = plan.any { it.gimbalPitch != null }
+        if (!curvedFlight && !needsGimbal) {
+            return data
+        }
+
+        val factory = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
+        val documentBuilder = factory.newDocumentBuilder()
+        val document = documentBuilder.parse(ByteArrayInputStream(data))
+        val placemarks = document.getElementsByTagName("Placemark")
+        for (index in 0 until placemarks.length) {
+            val placemark = placemarks.item(index) as? Element ?: continue
+            val planIndex = if (hasStartWaypoint) index - 1 else index
+            val turnStyle = if (curvedFlight) {
+                resolveTurnStyleForPatch(planIndex, plan.size)
+            } else {
+                TurnStyle.NONE
+            }
+            if (curvedFlight) {
+                applyCurvedTurnMode(placemark, turnStyle)
+            }
+            if (planIndex in plan.indices) {
+                val pitch = plan[planIndex].gimbalPitch
+                if (pitch != null) {
+                    applyGimbalPitch(placemark, pitch)
+                }
+            }
+        }
+
+        val transformer = TransformerFactory.newInstance().newTransformer().apply {
+            setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "no")
+            setOutputProperty(OutputKeys.INDENT, "yes")
+        }
+        val output = ByteArrayOutputStream()
+        transformer.transform(DOMSource(document), StreamResult(output))
+        return output.toByteArray()
+    }
+
+    private fun applyCurvedTurnMode(placemark: Element, turnStyle: TurnStyle) {
+        placemark.ensureChild(WPML_NAMESPACE, "useStraightLine").textContent =
+            if (turnStyle == TurnStyle.NONE) "1" else "0"
+        val turnParam = placemark.ensureChild(WPML_NAMESPACE, "waypointTurnParam")
+        val (modeString, dampingValue) = when (turnStyle) {
+            TurnStyle.MIDDLE -> WPML_TURN_MODE_PASS_WITH_CONTINUITY to CURVED_TURN_DAMPING_DISTANCE
+            TurnStyle.START, TurnStyle.END -> WPML_TURN_MODE_STOP_WITH_DISCONTINUITY to 0.0
+            TurnStyle.NONE -> WPML_TURN_MODE_STOP_WITH_DISCONTINUITY to 0.0
+        }
+        turnParam.ensureChild(WPML_NAMESPACE, "waypointTurnMode").textContent = modeString
+        turnParam.ensureChild(WPML_NAMESPACE, "waypointTurnDampingDist").textContent =
+            String.format(Locale.US, "%.1f", dampingValue)
+    }
+
+    private fun applyGimbalPitch(placemark: Element, pitch: Double) {
+        val boundedPitch = pitch.coerceIn(-90.0, 30.0)
+        val gimbalParam = placemark.ensureChild(WPML_NAMESPACE, "waypointGimbalHeadingParam")
+        gimbalParam.ensureChild(WPML_NAMESPACE, "waypointGimbalHeadingMode").textContent = "followWayline"
+        gimbalParam.ensureChild(WPML_NAMESPACE, "waypointGimbalPitchAngle").textContent =
+            String.format(Locale.US, "%.2f", boundedPitch)
+        gimbalParam.ensureChild(WPML_NAMESPACE, "waypointGimbalYawAngle").textContent = "0"
+    }
+
+    private fun Element.getFirstChildElement(namespace: String, localName: String): Element? {
+        val nodes = getElementsByTagNameNS(namespace, localName)
+        for (i in 0 until nodes.length) {
+            val node = nodes.item(i)
+            if (node is Element) {
+                return node
+            }
+        }
+        return null
+    }
+
+    private fun Element.ensureChild(namespace: String, localName: String): Element {
+        val existing = getFirstChildElement(namespace, localName)
+        if (existing != null) {
+            return existing
+        }
+        val element = ownerDocument.createElementNS(namespace, "wpml:$localName")
+        appendChild(element)
+        return element
+    }
+
+    private fun resolveTurnStyleForPatch(planIndex: Int, planSize: Int): TurnStyle {
+        if (planSize <= 0) {
+            return TurnStyle.NONE
+        }
+        if (planSize == 1) {
+            return if (planIndex >= 0) TurnStyle.END else TurnStyle.START
+        }
+        return when {
+            planIndex < 0 -> TurnStyle.START
+            planIndex == 0 -> TurnStyle.START
+            planIndex >= planSize - 1 -> TurnStyle.END
+            else -> TurnStyle.MIDDLE
         }
     }
 
@@ -680,6 +858,13 @@ class WaypointMissionExecutor(
         return File(dir, fileName)
     }
 
+    private enum class TurnStyle {
+        NONE,
+        START,
+        MIDDLE,
+        END
+    }
+
     private fun buildMissionFiles(
         missionFile: File,
         currentLocation: LocationCoordinate3D?,
@@ -693,8 +878,10 @@ class WaypointMissionExecutor(
         droneInfoResult: DroneInfoResult?,
         manualHeightOverride: Boolean,
         plan: List<PlanPointResolved>,
-        finishAction: WaylineFinishedAction
+        finishAction: WaylineFinishedAction,
+        pathMode: PathMode?
     ) {
+        val curvedFlight = pathMode == PathMode.CURVED
         val securityFloor = securityTakeoffHeight
             ?.takeIf { !it.isNaN() && it > 0.0 }
             ?: DEFAULT_SECURITY_TAKEOFF_HEIGHT
@@ -731,13 +918,17 @@ class WaypointMissionExecutor(
         val waypointSummaries = mutableListOf<Map<String, Any?>>()
 
         if (currentLocation != null) {
+            val startTurnStyle = if (curvedFlight && plan.isNotEmpty()) TurnStyle.START else TurnStyle.NONE
             waypoints.add(
                 createWaypoint(
                     index = 0,
                     latitude = currentLocation.latitude,
                     longitude = currentLocation.longitude,
                     executeHeight = startHeight,
-                    speed = speed
+                    speed = speed,
+                    curvedFlight = curvedFlight,
+                    gimbalPitch = null,
+                    turnStyle = startTurnStyle
                 )
             )
             waypointSummaries.add(
@@ -752,14 +943,25 @@ class WaypointMissionExecutor(
         }
 
         if (usingPlan) {
-            plan.forEach { point ->
+            val planCount = plan.size
+            plan.forEachIndexed { planIndex, point ->
                 val waypointIndex = waypoints.size
+                val turnStyle = when {
+                    !curvedFlight -> TurnStyle.NONE
+                    planCount == 1 -> TurnStyle.END
+                    planIndex == 0 -> TurnStyle.START
+                    planIndex == planCount - 1 -> TurnStyle.END
+                    else -> TurnStyle.MIDDLE
+                }
                 val waypoint = createWaypoint(
                     index = waypointIndex,
                     latitude = point.latitude,
                     longitude = point.longitude,
                     executeHeight = point.executeHeight,
-                    speed = speed
+                    speed = speed,
+                    curvedFlight = curvedFlight,
+                    gimbalPitch = point.gimbalPitch,
+                    turnStyle = turnStyle
                 )
                 waypoints.add(waypoint)
                 waypointSummaries.add(
@@ -779,7 +981,10 @@ class WaypointMissionExecutor(
                 latitude = targetLocation.latitude,
                 longitude = targetLocation.longitude,
                 executeHeight = targetHeight,
-                speed = speed
+                speed = speed,
+                curvedFlight = curvedFlight,
+                gimbalPitch = plan.lastOrNull()?.gimbalPitch,
+                turnStyle = if (curvedFlight) TurnStyle.END else TurnStyle.NONE
             )
             waypoints.add(targetWaypoint)
             waypointSummaries.add(
@@ -853,7 +1058,10 @@ class WaypointMissionExecutor(
         latitude: Double,
         longitude: Double,
         executeHeight: Double,
-        speed: Double
+        speed: Double,
+        curvedFlight: Boolean,
+        gimbalPitch: Double?,
+        turnStyle: TurnStyle
     ): WaylineExecuteWaypoint {
         val yawParam = WaylineWaypointYawParam().apply {
             setYawMode(WaylineWaypointYawMode.FOLLOW_WAYLINE)
@@ -865,11 +1073,24 @@ class WaypointMissionExecutor(
         val gimbalParam = WaylineWaypointGimbalHeadingParam().apply {
             setHeadingMode(WaylineWaypointGimbalHeadingMode.FOLLOW_WAYLINE)
             setYawAngle(0.0)
-            setPitchAngle(0.0)
+            val pitch = gimbalPitch?.coerceIn(-90.0, 30.0) ?: 0.0
+            setPitchAngle(pitch)
         }
         val turnParam = WaylineWaypointTurnParam().apply {
-            setTurnMode(WaylineWaypointTurnMode.TO_POINT_AND_STOP_WITH_DISCONTINUITY_CURVATURE)
-            setTurnDampingDistance(0.0)
+            when {
+                !curvedFlight || turnStyle == TurnStyle.NONE -> {
+                    setTurnMode(WaylineWaypointTurnMode.TO_POINT_AND_STOP_WITH_DISCONTINUITY_CURVATURE)
+                    setTurnDampingDistance(0.0)
+                }
+                turnStyle == TurnStyle.MIDDLE -> {
+                    setTurnMode(WaylineWaypointTurnMode.TO_POINT_AND_PASS_WITH_CONTINUITY_CURVATURE)
+                    setTurnDampingDistance(CURVED_TURN_DAMPING_DISTANCE)
+                }
+                else -> {
+                    setTurnMode(WaylineWaypointTurnMode.TO_POINT_AND_STOP_WITH_DISCONTINUITY_CURVATURE)
+                    setTurnDampingDistance(0.0)
+                }
+            }
         }
         return WaylineExecuteWaypoint().apply {
             setWaypointIndex(index)
@@ -879,7 +1100,7 @@ class WaypointMissionExecutor(
             setGimbalHeadingParam(gimbalParam)
             setTurnParam(turnParam)
             setSpeed(max(MIN_SPEED, speed))
-            setUseStraightLine(true)
+            setUseStraightLine(turnStyle == TurnStyle.NONE)
             setIsRisky(false)
             setWaypointWorkType(0)
         }
@@ -1082,6 +1303,11 @@ class WaypointMissionExecutor(
         private const val MIN_VERTICAL_SPEED = 0.5
         private const val MIN_HEIGHT = 0.0
         private const val DEFAULT_SECURITY_TAKEOFF_HEIGHT = 20.0
+        private const val CURVED_TURN_DAMPING_DISTANCE = 10.0
+        private const val WAYLINES_WPML_PATH = "wpmz/waylines.wpml"
+        private const val WPML_NAMESPACE = "http://www.dji.com/wpmz/1.0.6"
+        private const val WPML_TURN_MODE_PASS_WITH_CONTINUITY = "toPointAndPassWithContinuityCurvature"
+        private const val WPML_TURN_MODE_STOP_WITH_DISCONTINUITY = "toPointAndStopWithDiscontinuityCurvature"
         private val DRONE_TYPE_OVERRIDES = mapOf(
             "MATRICE_350_RTK" to 89,
             "M350_RTK" to 89

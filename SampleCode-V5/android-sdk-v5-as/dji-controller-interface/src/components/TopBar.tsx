@@ -5,6 +5,7 @@ import { ComponentsMenu } from './ComponentsMenu';
 import { preflightPanelControls, flightCommandsPanelControls, missionControlPanelControls } from './panelControls';
 import { useBridgeCommands } from '../hooks/useBridgeCommands';
 import { useManualControl } from '../context/ManualControlContext';
+import { missionPlannerStore } from '../state/missionPlanner';
 
 const statusLevelClass = (level?: string | null) => {
   switch ((level || 'normal').toLowerCase()) {
@@ -85,6 +86,12 @@ export const TopBar: React.FC<TopBarProps> = ({
   const [settingsTab, setSettingsTab] = React.useState<'endpoints'|'models'>('endpoints');
   const [menuOpen, setMenuOpen] = React.useState(false);
 
+  const [missionPlanCount, setMissionPlanCount] = React.useState(() => missionPlannerStore.getSnapshot().plan.length);
+
+  React.useEffect(() => missionPlannerStore.subscribePlan((plan) => {
+    setMissionPlanCount(plan.length);
+  }), []);
+
   const { sendFlightCommand } = useBridgeCommands();
   const manualControl = useManualControl();
   const [busyAction, setBusyAction] = React.useState<string | null>(null);
@@ -134,6 +141,19 @@ export const TopBar: React.FC<TopBarProps> = ({
   const missionStateRaw = telemetryData?.waypoint_status?.state || 'idle';
   const missionLabel = formatStatusLabel(missionStateRaw);
   const missionId = telemetryData?.waypoint_status?.executing?.mission_id || telemetryData?.waypoint_status?.mission_id;
+  const missionStateNormalized = (missionStateRaw || '').toLowerCase();
+  const missionUploading = missionStateNormalized === 'uploading';
+  const missionExecuting = missionStateNormalized === 'enter_wayline' || missionStateNormalized === 'executing';
+  const missionPaused = missionStateNormalized === 'paused'
+    || missionStateNormalized === 'pause'
+    || missionStateNormalized === 'auto_paused'
+    || missionStateNormalized === 'auto_pause';
+  const missionActive = missionUploading || missionExecuting;
+  const missionPlanAvailable = missionPlanCount > 0;
+  const missionStartDisabled = !missionPlanAvailable || missionActive || missionPaused || !!busyAction;
+  const missionPauseDisabled = !missionActive || !!busyAction;
+  const missionResumeDisabled = !missionPaused || !!busyAction;
+  const missionStopDisabled = !(missionActive || missionPaused) || !!busyAction;
 
   const takeoffDisabled = React.useMemo(() => {
     const altitude = telemetryData?.altitude ?? telemetryData?.altitude_above_takeoff ?? 0;
@@ -180,7 +200,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   }, [handleQuickCommand]);
 
   const handleLand = React.useCallback(() => {
-    handleQuickCommand('land_in_place');
+    handleQuickCommand('land');
   }, [handleQuickCommand]);
 
   const handleRth = React.useCallback(() => {
@@ -189,6 +209,26 @@ export const TopBar: React.FC<TopBarProps> = ({
 
   const handleSetHome = React.useCallback(() => {
     handleQuickCommand('set_home_current');
+  }, [handleQuickCommand]);
+
+  const handleMissionStart = React.useCallback(() => {
+    missionControlPanelControls.setVisible(true);
+    if (!missionPlanAvailable) {
+      return;
+    }
+    missionPlannerStore.requestExecutePlan({ source: 'top_bar' });
+  }, [missionPlanAvailable]);
+
+  const handleMissionPause = React.useCallback(() => {
+    handleQuickCommand('waypoint_pause');
+  }, [handleQuickCommand]);
+
+  const handleMissionResume = React.useCallback(() => {
+    handleQuickCommand('waypoint_resume');
+  }, [handleQuickCommand]);
+
+  const handleMissionStop = React.useCallback(() => {
+    handleQuickCommand('waypoint_stop');
   }, [handleQuickCommand]);
 
   const handleToggleManualControl = React.useCallback(async () => {
@@ -239,6 +279,30 @@ export const TopBar: React.FC<TopBarProps> = ({
             handleSetHome();
           }
           break;
+        case 'KeyM':
+          if (!missionStartDisabled) {
+            event.preventDefault();
+            handleMissionStart();
+          }
+          break;
+        case 'KeyP':
+          if (!missionPauseDisabled) {
+            event.preventDefault();
+            handleMissionPause();
+          }
+          break;
+        case 'KeyO':
+          if (!missionResumeDisabled) {
+            event.preventDefault();
+            handleMissionResume();
+          }
+          break;
+        case 'KeyE':
+          if (!missionStopDisabled) {
+            event.preventDefault();
+            handleMissionStop();
+          }
+          break;
         case 'KeyV':
           event.preventDefault();
           handleToggleManualControl();
@@ -248,7 +312,25 @@ export const TopBar: React.FC<TopBarProps> = ({
 
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [handleLand, handleRth, handleSetHome, handleTakeoff, handleToggleManualControl, landDisabled, rthDisabled, setHomeDisabled, takeoffDisabled]);
+  }, [
+    handleLand,
+    handleMissionPause,
+    handleMissionResume,
+    handleMissionStart,
+    handleMissionStop,
+    handleRth,
+    handleSetHome,
+    handleTakeoff,
+    handleToggleManualControl,
+    landDisabled,
+    missionPauseDisabled,
+    missionResumeDisabled,
+    missionStartDisabled,
+    missionStopDisabled,
+    rthDisabled,
+    setHomeDisabled,
+    takeoffDisabled,
+  ]);
 
   const QuickButton: React.FC<{
     label: string;
@@ -308,14 +390,14 @@ export const TopBar: React.FC<TopBarProps> = ({
           onClick={() => preflightPanelControls.setVisible(true)}
         >
           <div className={`text-[11px] uppercase tracking-wide ${statusLevelClass(diagnosticsSeverity)} font-semibold`}>System</div>
-          <div className="text-sm text-gray-100 font-semibold leading-tight">{formatStatusLabel(systemStatus?.label)}</div>
-          <div className="text-[11px] text-gray-400 max-w-[220px] truncate">{systemDescription}</div>
+          <div className="text-[11px] text-gray-100 font-semibold leading-tight">{formatStatusLabel(systemStatus?.label)}</div>
+          <div className="text-[11px] text-gray-400 max-w-[120px] truncate">{systemDescription}</div>
         </button>
         <div className="flex flex-col min-w-[180px]">
           <div className="text-[11px] uppercase text-gray-400 tracking-wide">Flight Mode</div>
-          <div className="text-sm text-dji-blue font-semibold leading-tight">{flightMode}</div>
+          <div className="text-[11px] text-dji-blue font-semibold leading-tight">{flightMode}</div>
         </div>
-        <div className="flex items-center gap-2 whitespace-nowrap overflow-x-auto pr-1">
+        <div className="flex items-center gap-1 whitespace-nowrap overflow-x-auto pr-1">
           <QuickButton
             label="Takeoff"
             hotkey="⇧T"
@@ -330,7 +412,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             onClick={handleLand}
             tone="primary"
             disabled={landDisabled || !!busyAction}
-            busy={busyAction === 'land_in_place'}
+            busy={busyAction === 'land'}
           />
           <QuickButton
             label="RTH"
@@ -341,7 +423,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             busy={busyAction === 'return_home_start'}
           />
           <QuickButton
-            label="Set Home"
+            label="Home"
             hotkey="⇧H"
             onClick={handleSetHome}
             tone="primary"
@@ -355,6 +437,37 @@ export const TopBar: React.FC<TopBarProps> = ({
             tone={vsActive ? 'danger' : 'primary'}
             disabled={vsBusy}
             busy={vsBusy}
+          />
+          <QuickButton
+            label="M Start"
+            hotkey="⇧M"
+            onClick={handleMissionStart}
+            tone="success"
+            disabled={missionStartDisabled}
+          />
+          <QuickButton
+            label="Pause"
+            hotkey="⇧P"
+            onClick={handleMissionPause}
+            tone="primary"
+            disabled={missionPauseDisabled}
+            busy={busyAction === 'waypoint_pause'}
+          />
+          <QuickButton
+            label="Resume"
+            hotkey="⇧O"
+            onClick={handleMissionResume}
+            tone="primary"
+            disabled={missionResumeDisabled}
+            busy={busyAction === 'waypoint_resume'}
+          />
+          <QuickButton
+            label="Stop"
+            hotkey="⇧E"
+            onClick={handleMissionStop}
+            tone="danger"
+            disabled={missionStopDisabled}
+            busy={busyAction === 'waypoint_stop'}
           />
         </div>
       </div>
@@ -389,7 +502,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           <div className="text-[11px] uppercase text-gray-400 tracking-wide">Mission</div>
           <div className="text-sm text-gray-100 font-semibold leading-tight">{missionLabel}</div>
           {missionId && (
-            <div className="text-[11px] text-gray-500">ID {missionId}</div>
+            <div className="text-[11px] text-gray-500">{missionId}</div>
           )}
         </button>
 

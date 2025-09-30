@@ -28,12 +28,14 @@ type ManualTargetListener = (target: ManualTargetState | null) => void;
 type ActiveWaypointListener = (target: MissionWaypointTarget | null) => void;
 type AddWaypointRequestListener = (request: MissionPlannerAddWaypointRequest) => void;
 type StageTargetRequestListener = (request: MissionPlannerStageTargetRequest) => void;
+type ExecutePlanRequestListener = (context?: { source?: string }) => void;
 
 const planListeners = new Set<PlanListener>();
 const manualTargetListeners = new Set<ManualTargetListener>();
 const activeWaypointListeners = new Set<ActiveWaypointListener>();
 const addWaypointRequestListeners = new Set<AddWaypointRequestListener>();
 const stageTargetRequestListeners = new Set<StageTargetRequestListener>();
+const executePlanRequestListeners = new Set<ExecutePlanRequestListener>();
 
 let snapshot: MissionPlannerSnapshot = {
   plan: [],
@@ -41,7 +43,10 @@ let snapshot: MissionPlannerSnapshot = {
   activeWaypoint: null,
 };
 
-const clonePlan = (plan: PlannedMissionEntry[]): PlannedMissionEntry[] => plan.map((entry) => ({ ...entry }));
+const clonePlan = (plan: PlannedMissionEntry[]): PlannedMissionEntry[] => plan.map((entry) => ({
+  ...entry,
+  actions: entry.actions ? entry.actions.map((action) => ({ ...action })) : undefined,
+}));
 
 const isSameManualTarget = (a: ManualTargetState | null, b: ManualTargetState | null): boolean => {
   if (!a && !b) return true;
@@ -166,6 +171,16 @@ export const missionPlannerStore = {
   onStageTargetRequest(listener: StageTargetRequestListener): () => void {
     stageTargetRequestListeners.add(listener);
     return () => stageTargetRequestListeners.delete(listener);
+  },
+
+  requestExecutePlan(context?: { source?: string }): void {
+    const payload = context ? { ...context } : undefined;
+    executePlanRequestListeners.forEach((listener) => listener(payload));
+  },
+
+  onExecutePlanRequest(listener: ExecutePlanRequestListener): () => void {
+    executePlanRequestListeners.add(listener);
+    return () => executePlanRequestListeners.delete(listener);
   },
 
   reset(): void {

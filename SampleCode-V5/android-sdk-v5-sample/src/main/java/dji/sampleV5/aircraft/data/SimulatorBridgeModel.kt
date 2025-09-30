@@ -92,6 +92,8 @@ class SimulatorBridgeModel {
         lastError.set(null)
     }
 
+    fun lastConfiguredAltitude(): Double? = lastConfig.get()?.altitude
+
     fun toTelemetryMap(): Map<String, Any?>? {
         val enabled = isEnabled()
         val state = lastState

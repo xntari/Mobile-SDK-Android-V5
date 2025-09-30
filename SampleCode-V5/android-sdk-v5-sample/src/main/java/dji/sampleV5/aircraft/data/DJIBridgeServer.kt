@@ -2857,9 +2857,21 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             }
 
             // Derive takeoff altitude (ground level) in ASL by removing the relative altitude component
-            val takeoffASL = altitudeAsl - baroRelativeAltitude
+            val simulatorEnabled = simulatorBridgeModel.isEnabled()
+            val configuredSimAltitude = simulatorBridgeModel.lastConfiguredAltitude()
+            var takeoffASL = altitudeAsl - baroRelativeAltitude
+            if (configuredSimAltitude != null) {
+                if (simulatorEnabled || !takeoffASL.isFinite() || !areMotorsOn || kotlin.math.abs(takeoffASL) < 0.01) {
+                    takeoffASL = configuredSimAltitude
+                }
+            }
+            val altitudeAslAdjusted = when {
+                configuredSimAltitude != null && simulatorEnabled -> configuredSimAltitude + baroRelativeAltitude
+                configuredSimAltitude != null && !areMotorsOn -> configuredSimAltitude + baroRelativeAltitude
+                else -> altitudeAsl
+            }
 
-            Log.i(TAG, "Altitude Debug -> AGL=${baroRelativeAltitude}m, homePointEllipsoid=${homePointAltitude}m, takeoffASL=${takeoffASL}m, ASL=${altitudeAsl}m")
+            Log.i(TAG, "Altitude Debug -> AGL=${baroRelativeAltitude}m, homePointEllipsoid=${homePointAltitude}m, takeoffASL=${takeoffASL}m, ASL=${altitudeAslAdjusted}m")
 
             // Get ultrasonic height (more accurate for low altitudes, returned in decimeters)
             val ultrasonicHeightKey = KeyTools.createKey(FlightControllerKey.KeyUltrasonicHeight)
@@ -2997,8 +3009,8 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 "altitude" to baroRelativeAltitude,  // AGL - relative altitude from home
                 "altitude_above_takeoff" to baroRelativeAltitude,  // Same as AGL
                 "altitude_above_home" to baroRelativeAltitude,  // AGL - relative from home
-                "altitude_barometric" to altitudeAsl,  // AMSL - barometric altitude
-                "altitude_amsl" to altitudeAsl,  // ASL - for main display (PFD corrected)
+                "altitude_barometric" to altitudeAslAdjusted,  // AMSL - barometric altitude
+                "altitude_amsl" to altitudeAslAdjusted,  // ASL - for main display (PFD corrected)
                 "altitude_gps_relative" to gpsRelativeAltitude,  // GPS relative for reference
                 "altitude_ultrasonic" to ultrasonicHeight,  // Ultrasonic height (if available)
                 "takeoff_altitude" to takeoffASL,  // Takeoff location altitude in ASL
@@ -3018,7 +3030,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                     mapOf(
                         "latitude" to lat,
                         "longitude" to lon,
-                        "altitude" to altitudeAsl  // ASL altitude (what PFD shows)
+                        "altitude" to altitudeAslAdjusted  // ASL altitude (what PFD shows)
                     )
                 },
 

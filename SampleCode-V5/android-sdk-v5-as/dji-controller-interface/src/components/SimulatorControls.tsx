@@ -110,12 +110,18 @@ export const SimulatorControls: React.FC<SimulatorControlsProps> = ({
 
   React.useEffect(() => {
     if (altitudePresetRef.current) return;
-    const configAlt = simulator?.configuration?.altitude;
-    if (typeof configAlt === 'number' && Number.isFinite(configAlt)) {
-      setAltitude(configAlt.toFixed(1));
+    const sources = [
+      simulator?.configuration?.altitude,
+      telemetry?.takeoff_altitude,
+      telemetry?.home_location?.altitude,
+      telemetry?.location?.altitude,
+    ];
+    const altitudeSource = sources.find((value) => typeof value === 'number' && Number.isFinite(value));
+    if (typeof altitudeSource === 'number') {
+      setAltitude(altitudeSource.toFixed(1));
       altitudePresetRef.current = true;
     }
-  }, [simulator?.configuration?.altitude]);
+  }, [simulator?.configuration?.altitude, telemetry?.takeoff_altitude, telemetry?.home_location?.altitude, telemetry?.location?.altitude]);
 
   const pendingEnable = pendingActions.has('simulator_enable');
   const pendingDisable = pendingActions.has('simulator_disable');
@@ -132,6 +138,10 @@ export const SimulatorControls: React.FC<SimulatorControlsProps> = ({
     if (typeof home?.longitude === 'number' && Number.isFinite(home.longitude)) {
       setLng(home.longitude.toFixed(6));
     }
+    if (typeof home?.altitude === 'number' && Number.isFinite(home.altitude)) {
+      setAltitude(home.altitude.toFixed(1));
+      altitudePresetRef.current = true;
+    }
   };
 
   const applyAircraft = () => {
@@ -141,6 +151,10 @@ export const SimulatorControls: React.FC<SimulatorControlsProps> = ({
     }
     if (typeof aircraft?.longitude === 'number' && Number.isFinite(aircraft.longitude)) {
       setLng(aircraft.longitude.toFixed(6));
+    }
+    if (typeof aircraft?.altitude === 'number' && Number.isFinite(aircraft.altitude)) {
+      setAltitude(aircraft.altitude.toFixed(1));
+      altitudePresetRef.current = true;
     }
   };
 
@@ -159,6 +173,7 @@ export const SimulatorControls: React.FC<SimulatorControlsProps> = ({
     }
     if (typeof config.altitude === 'number' && Number.isFinite(config.altitude)) {
       setAltitude(config.altitude.toFixed(1));
+      altitudePresetRef.current = true;
     }
   };
 

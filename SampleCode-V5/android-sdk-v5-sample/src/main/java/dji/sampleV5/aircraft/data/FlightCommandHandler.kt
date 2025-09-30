@@ -933,12 +933,28 @@ class FlightCommandHandler(
             }
             val altitude = entry.optDouble("altitude", Double.NaN).takeIf { !it.isNaN() }
             val kind = entry.optString("kind", "").takeIf { it.isNotBlank() }
+            var gimbalPitch: Double? = entry.optDouble("gimbal_pitch", Double.NaN).takeIf { !it.isNaN() }
+            val actionsArray = entry.optJSONArray("actions")
+            if (actionsArray != null) {
+                for (j in 0 until actionsArray.length()) {
+                    val action = actionsArray.optJSONObject(j) ?: continue
+                    val type = action.optString("type", "")
+                    if (type.equals("gimbal_pitch", ignoreCase = true)) {
+                        val pitchValue = action.optDouble("pitch", Double.NaN)
+                        if (!pitchValue.isNaN()) {
+                            gimbalPitch = pitchValue
+                            break
+                        }
+                    }
+                }
+            }
             planPoints.add(
                 WaypointMissionExecutor.PlanPoint(
                     latitude = latitude,
                     longitude = longitude,
                     altitude = altitude,
-                    kind = kind
+                    kind = kind,
+                    gimbalPitch = gimbalPitch
                 )
             )
         }
@@ -978,6 +994,13 @@ class FlightCommandHandler(
             else -> WaylineFinishedAction.NO_ACTION
         }
 
+        val pathModeRaw = params.optString("path_mode", "").lowercase(Locale.ROOT)
+        val pathMode = when (pathModeRaw) {
+            "curved" -> WaypointMissionExecutor.PathMode.CURVED
+            "straight" -> WaypointMissionExecutor.PathMode.STRAIGHT
+            else -> null
+        }
+
         val baseExtra = buildFlyToExtra(
             targetLocation = targetLocation,
             targetAltitude = targetAltitudeAsl,
@@ -991,15 +1014,20 @@ class FlightCommandHandler(
             put(
                 "plan_waypoints",
                 planPoints.mapIndexed { index, point ->
-                    mapOf(
+                    mutableMapOf<String, Any?>(
                         "index" to index,
                         "latitude" to point.latitude,
                         "longitude" to point.longitude,
                         "altitude" to point.altitude,
                         "kind" to point.kind
-                    )
+                    ).apply {
+                        point.gimbalPitch?.let { put("gimbal_pitch", it) }
+                    }
                 }
             )
+            if (pathMode != null) {
+                put("path_mode", pathMode.name.lowercase(Locale.ROOT))
+            }
         }
 
         val request = WaypointMissionExecutor.Request(
@@ -1011,7 +1039,8 @@ class FlightCommandHandler(
             securityTakeoffHeight = securityTakeoffHeight,
             reason = reason,
             plan = planPoints,
-            finishAction = finishAction
+            finishAction = finishAction,
+            pathMode = pathMode
         )
 
         attemptWaypointFallback(
