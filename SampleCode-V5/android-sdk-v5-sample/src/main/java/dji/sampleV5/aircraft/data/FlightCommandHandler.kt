@@ -24,6 +24,7 @@ import dji.v5.manager.aircraft.simulator.SimulatorManager
 import dji.sdk.wpmz.value.mission.WaylineFinishedAction
 import dji.sdk.keyvalue.value.flightcontroller.FailsafeAction
 import dji.sampleV5.aircraft.models.FlySafeBridgeModel
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
@@ -925,38 +926,14 @@ class FlightCommandHandler(
         val planPoints = mutableListOf<WaypointMissionExecutor.PlanPoint>()
         for (i in 0 until planArray.length()) {
             val entry = planArray.optJSONObject(i) ?: continue
-            val latitude = entry.optDouble("latitude", Double.NaN)
-            val longitude = entry.optDouble("longitude", Double.NaN)
-            if (latitude.isNaN() || longitude.isNaN()) {
-                Log.w(TAG, "Skipping plan waypoint $i due to invalid coordinates: $latitude,$longitude")
+            val planPoint = parsePlanPoint(entry)
+            if (planPoint == null) {
+                val lat = entry.optDouble("latitude", Double.NaN)
+                val lon = entry.optDouble("longitude", Double.NaN)
+                Log.w(TAG, "Skipping plan waypoint $i due to invalid coordinates: $lat,$lon")
                 continue
             }
-            val altitude = entry.optDouble("altitude", Double.NaN).takeIf { !it.isNaN() }
-            val kind = entry.optString("kind", "").takeIf { it.isNotBlank() }
-            var gimbalPitch: Double? = entry.optDouble("gimbal_pitch", Double.NaN).takeIf { !it.isNaN() }
-            val actionsArray = entry.optJSONArray("actions")
-            if (actionsArray != null) {
-                for (j in 0 until actionsArray.length()) {
-                    val action = actionsArray.optJSONObject(j) ?: continue
-                    val type = action.optString("type", "")
-                    if (type.equals("gimbal_pitch", ignoreCase = true)) {
-                        val pitchValue = action.optDouble("pitch", Double.NaN)
-                        if (!pitchValue.isNaN()) {
-                            gimbalPitch = pitchValue
-                            break
-                        }
-                    }
-                }
-            }
-            planPoints.add(
-                WaypointMissionExecutor.PlanPoint(
-                    latitude = latitude,
-                    longitude = longitude,
-                    altitude = altitude,
-                    kind = kind,
-                    gimbalPitch = gimbalPitch
-                )
-            )
+            planPoints.add(planPoint)
         }
 
         if (planPoints.isEmpty()) {
@@ -1030,6 +1007,8 @@ class FlightCommandHandler(
             }
         }
 
+        val missionOverrides = params.optJSONObject("mission_config")?.let { parseMissionOverrides(it) }
+
         val request = WaypointMissionExecutor.Request(
             targetLocation = targetLocation,
             targetAltitudeAsl = targetAltitudeAsl,
@@ -1040,7 +1019,8 @@ class FlightCommandHandler(
             reason = reason,
             plan = planPoints,
             finishAction = finishAction,
-            pathMode = pathMode
+            pathMode = pathMode,
+            missionOverrides = missionOverrides
         )
 
         attemptWaypointFallback(
@@ -1050,6 +1030,220 @@ class FlightCommandHandler(
             baseExtra = baseExtra,
             message = "Executing mission plan (${planPoints.size} waypoints)"
         )
+    }
+
+    private fun parsePlanPoint(entry: JSONObject): WaypointMissionExecutor.PlanPoint? {
+        val latitude = entry.optDouble("latitude", Double.NaN)
+        val longitude = entry.optDouble("longitude", Double.NaN)
+        if (latitude.isNaN() || longitude.isNaN()) {
+            return null
+        }
+
+        val altitude = entry.optDoubleOrNull("altitude")
+        val kind = entry.optStringOrNull("kind")
+
+        var gimbalPitch = entry.optDoubleOrNull("gimbal_pitch")
+        val actionsArray = entry.optJSONArray("actions")
+        if (actionsArray != null) {
+            for (j in 0 until actionsArray.length()) {
+                val action = actionsArray.optJSONObject(j) ?: continue
+                val type = action.optString("type", "")
+                if (type.equals("gimbal_pitch", ignoreCase = true)) {
+                    val pitchValue = action.optDouble("pitch", Double.NaN)
+                    if (!pitchValue.isNaN()) {
+                        gimbalPitch = pitchValue
+                        break
+                    }
+                }
+            }
+        }
+
+        val turnObj = entry.optJSONObject("turn")
+        val turnMode = turnObj?.optStringOrNull("mode")
+        val turnDamping = turnObj?.optDoubleOrNull("damping")
+        val useStraightLine: Boolean? = when {
+            turnObj?.has("use_straight_line") == true -> turnObj.optBoolean("use_straight_line")
+            entry.has("use_straight_line") -> entry.optBoolean("use_straight_line")
+            else -> null
+        }
+
+        val heading = entry.optJSONObject("heading")?.let { parseHeadingConfig(it) }
+        val gimbalHeading = entry.optJSONObject("gimbal_heading")?.let { parseGimbalHeadingConfig(it) }
+        val poi = entry.optJSONObject("poi")?.let { parsePoiTarget(it) }
+        val gimbalStrategy = entry.optString("gimbal_strategy", "").takeUnless { it.isBlank() }
+        val actionGroups = entry.optJSONArray("action_groups")?.let { parseActionGroups(it) } ?: emptyList()
+
+        return WaypointMissionExecutor.PlanPoint(
+            latitude = latitude,
+            longitude = longitude,
+            altitude = altitude,
+            kind = kind,
+            gimbalPitch = gimbalPitch,
+            turnMode = turnMode,
+            turnDamping = turnDamping,
+            useStraightLine = useStraightLine,
+            heading = heading,
+            gimbalHeading = gimbalHeading,
+            actionGroups = actionGroups,
+            poi = poi,
+            gimbalStrategy = gimbalStrategy
+        )
+    }
+
+    private fun parseMissionOverrides(obj: JSONObject): WaypointMissionExecutor.MissionConfigOverrides {
+        val executeHeightMode = obj.optString("execute_height_mode", "").takeUnless { it.isBlank() }
+        val executeCoordinateMode = obj.optString("execute_coordinate_mode", "").takeUnless { it.isBlank() }
+
+        val droneInfo = obj.optJSONObject("drone_info")?.let { droneObj ->
+            WaypointMissionExecutor.DroneInfoOverride(
+                enumValue = droneObj.optIntOrNull("enum_value"),
+                subEnumValue = droneObj.optIntOrNull("sub_enum_value")
+            )
+        }
+
+        val payloadInfoList = mutableListOf<WaypointMissionExecutor.PayloadInfoOverride>()
+        val payloadInfoArray = obj.optJSONArray("payload_info")
+        if (payloadInfoArray != null) {
+            for (i in 0 until payloadInfoArray.length()) {
+                val payloadObj = payloadInfoArray.optJSONObject(i) ?: continue
+                payloadInfoList.add(
+                    WaypointMissionExecutor.PayloadInfoOverride(
+                        enumValue = payloadObj.optIntOrNull("enum_value"),
+                        subEnumValue = payloadObj.optIntOrNull("sub_enum_value"),
+                        positionIndex = payloadObj.optIntOrNull("position_index")
+                    )
+                )
+            }
+        } else {
+            obj.optJSONObject("payload_info")?.let { payloadObj ->
+                payloadInfoList.add(
+                    WaypointMissionExecutor.PayloadInfoOverride(
+                        enumValue = payloadObj.optIntOrNull("enum_value"),
+                        subEnumValue = payloadObj.optIntOrNull("sub_enum_value"),
+                        positionIndex = payloadObj.optIntOrNull("position_index")
+                    )
+                )
+            }
+        }
+
+        return WaypointMissionExecutor.MissionConfigOverrides(
+            executeHeightMode = executeHeightMode,
+            executeCoordinateMode = executeCoordinateMode,
+            droneInfo = droneInfo,
+            payloadInfo = payloadInfoList
+        )
+    }
+
+    private fun parseHeadingConfig(obj: JSONObject): WaypointMissionExecutor.HeadingConfig {
+        val mode = obj.optString("mode", "").takeUnless { it.isBlank() }
+        val angle = obj.optDoubleOrNull("angle")
+        val angleEnable = if (obj.has("angle_enable")) obj.optBoolean("angle_enable") else null
+        val poi = obj.optJSONObject("poi")?.let { parsePoiTarget(it) }
+        val poiIndex = obj.optIntOrNull("poi_index")
+        val yawPathMode = obj.optString("yaw_path_mode", "").takeUnless { it.isBlank() }
+        val yawBase = obj.optString("yaw_base", "").takeUnless { it.isBlank() }
+        return WaypointMissionExecutor.HeadingConfig(
+            mode = mode,
+            angle = angle,
+            angleEnable = angleEnable,
+            poi = poi,
+            poiIndex = poiIndex,
+            yawPathMode = yawPathMode,
+            yawBase = yawBase
+        )
+    }
+
+    private fun parseGimbalHeadingConfig(obj: JSONObject): WaypointMissionExecutor.GimbalHeadingConfig {
+        val mode = obj.optString("mode", "").takeUnless { it.isBlank() }
+        val pitch = obj.optDoubleOrNull("pitch")
+        val yaw = obj.optDoubleOrNull("yaw")
+        return WaypointMissionExecutor.GimbalHeadingConfig(
+            mode = mode,
+            pitch = pitch,
+            yaw = yaw
+        )
+    }
+
+    private fun parsePoiTarget(obj: JSONObject): WaypointMissionExecutor.PoiTarget? {
+        val latitude = obj.optDouble("latitude", Double.NaN)
+        val longitude = obj.optDouble("longitude", Double.NaN)
+        if (latitude.isNaN() || longitude.isNaN()) {
+            return null
+        }
+        val altitude = obj.optDoubleOrNull("altitude")
+        return WaypointMissionExecutor.PoiTarget(latitude, longitude, altitude)
+    }
+
+    private fun parseActionGroups(array: JSONArray): List<WaypointMissionExecutor.ActionGroupConfig> {
+        if (array.length() == 0) return emptyList()
+        val result = mutableListOf<WaypointMissionExecutor.ActionGroupConfig>()
+        for (i in 0 until array.length()) {
+            val obj = array.optJSONObject(i) ?: continue
+            val actionsArray = obj.optJSONArray("actions")
+            val actions = actionsArray?.let { parseActions(it) } ?: emptyList()
+            val triggerObj = obj.optJSONObject("trigger")
+            val triggerType = when {
+                triggerObj != null -> triggerObj.optString("type", "").takeUnless { it.isBlank() }
+                obj.has("trigger") -> obj.optString("trigger", "").takeUnless { it.isBlank() }
+                obj.has("actionTriggerType") -> obj.optString("actionTriggerType", "").takeUnless { it.isBlank() }
+                else -> null
+            }
+
+            result.add(
+                WaypointMissionExecutor.ActionGroupConfig(
+                    id = obj.optIntOrNull("id") ?: obj.optIntOrNull("actionGroupId"),
+                    startIndex = obj.optIntOrNull("start_index") ?: obj.optIntOrNull("actionGroupStartIndex"),
+                    endIndex = obj.optIntOrNull("end_index") ?: obj.optIntOrNull("actionGroupEndIndex"),
+                    mode = obj.optString("mode", obj.optString("actionGroupMode", "")).takeUnless { it.isBlank() },
+                    triggerType = triggerType,
+                    actions = actions
+                )
+            )
+        }
+        return result
+    }
+
+    private fun parseActions(array: JSONArray): List<WaypointMissionExecutor.ActionConfig> {
+        if (array.length() == 0) return emptyList()
+        val actions = mutableListOf<WaypointMissionExecutor.ActionConfig>()
+        for (i in 0 until array.length()) {
+            val action = array.optJSONObject(i) ?: continue
+            val func = action.optString("func", action.optString("actionActuatorFunc", ""))
+            if (func.isBlank()) continue
+            val paramsObj = action.optJSONObject("params") ?: action.optJSONObject("actionActuatorFuncParam")
+            val params = mutableMapOf<String, Any?>()
+            if (paramsObj != null) {
+                val keys = paramsObj.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    params[key] = paramsObj.get(key)
+                }
+            }
+            actions.add(
+                WaypointMissionExecutor.ActionConfig(
+                    id = action.optIntOrNull("id") ?: action.optIntOrNull("actionId"),
+                    func = func,
+                    params = params
+                )
+            )
+        }
+        return actions
+    }
+
+    private fun JSONObject.optDoubleOrNull(key: String): Double? {
+        if (!has(key)) return null
+        val value = optDouble(key, Double.NaN)
+        return if (value.isNaN()) null else value
+    }
+
+    private fun JSONObject.optIntOrNull(key: String): Int? {
+        return if (has(key)) optInt(key) else null
+    }
+
+    private fun JSONObject.optStringOrNull(key: String): String? {
+        if (!has(key)) return null
+        val value = optString(key, "")
+        return value.takeUnless { it.isBlank() }
     }
 
     private fun handleSimulatorEnable(clientId: String, action: String, params: JSONObject?) {

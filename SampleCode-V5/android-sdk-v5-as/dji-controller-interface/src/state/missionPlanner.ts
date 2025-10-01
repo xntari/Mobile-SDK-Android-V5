@@ -14,6 +14,13 @@ export interface MissionPlannerAddWaypointRequest {
   radius?: number;
   turns?: number;
   source?: string;
+  turn?: PlannedMissionEntry['turn'];
+  heading?: PlannedMissionEntry['heading'];
+  gimbalHeading?: PlannedMissionEntry['gimbalHeading'];
+  poi?: PlannedMissionEntry['poi'];
+  gimbalStrategy?: PlannedMissionEntry['gimbalStrategy'];
+  actionGroups?: PlannedMissionEntry['actionGroups'];
+  altitudeReference?: PlannedMissionEntry['altitudeReference'];
 }
 
 export interface MissionPlannerStageTargetRequest {
@@ -43,10 +50,29 @@ let snapshot: MissionPlannerSnapshot = {
   activeWaypoint: null,
 };
 
-const clonePlan = (plan: PlannedMissionEntry[]): PlannedMissionEntry[] => plan.map((entry) => ({
-  ...entry,
-  actions: entry.actions ? entry.actions.map((action) => ({ ...action })) : undefined,
-}));
+const clonePlan = (plan: PlannedMissionEntry[]): PlannedMissionEntry[] =>
+  plan.map((entry) => ({
+    ...entry,
+    actions: entry.actions ? entry.actions.map((action) => ({ ...action })) : undefined,
+    turn: entry.turn ? { ...entry.turn } : undefined,
+    heading: entry.heading
+      ? {
+          ...entry.heading,
+          poi: entry.heading.poi ? { ...entry.heading.poi } : undefined,
+        }
+      : undefined,
+    gimbalHeading: entry.gimbalHeading ? { ...entry.gimbalHeading } : undefined,
+    poi: entry.poi ? { ...entry.poi } : undefined,
+    actionGroups: entry.actionGroups
+      ? entry.actionGroups.map((group) => ({
+          ...group,
+          actions: group.actions.map((action) => ({
+            ...action,
+            params: action.params ? { ...action.params } : undefined,
+          })),
+        }))
+      : undefined,
+  }));
 
 const isSameManualTarget = (a: ManualTargetState | null, b: ManualTargetState | null): boolean => {
   if (!a && !b) return true;
