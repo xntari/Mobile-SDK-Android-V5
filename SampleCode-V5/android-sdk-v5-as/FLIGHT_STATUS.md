@@ -46,31 +46,24 @@ Use only standard ascii characters here - don't use ✅  or similar
 
   Next
 
-  1. **Mission Control (advanced planning)** – Altitude defaults now use the SDK takeoff ASL and the top bar exposes Mission Start/Pause/Resume/Stop hotkeys. Curved “fly-through” legs upload successfully and the bridge can mirror DJI Pilot waypoint metadata (turns, POI, gimbal/aircraft actions). Still TODO:
-     - Field-verify the new bridge output on-aircraft (action groups, heading overrides, mission-config descriptors) and adjust damping/turn-mode heuristics if the airframe still pauses.
-     - Implement the remaining gimbal strategies for POI orbiting (`gimbal_track_poi` continuous tracking, discrete gimbal updates) and expose matching controls in the UI.
-     - Expand orbit authoring so curved/POI plans export the right KMZ semantics and survive field validation.
-     - Add UI toggles for yaw mode (follow route/manual/lock), coordinate turn, and altitude reference (EGM96 vs relative) based on DJI Pilot samples.
+  1. **Mission Control (POI/orbit + LookAt integration)** - Curved fly-through uploads are stable; next we need to validate and refine the new POI/orbit workflow (global POI marker, orbit-mode defaults, and LookAt tooling). Upcoming work:
+     - Field-verify drift and gimbal modes (sim + hardware) to confirm headings, LookAt start/stop, and telemetry all stay in sync; capture logs/ack payloads for both success and failure cases.
+     - Harden POI lifecycle (altitude persistence, reset semantics) and surface LookAt command status in Mission Control/H20N so operators see when tracking fails.
+     - Wire LookAt state into mission telemetry/extra fields so the desktop timeline shows when we requested/stopped tracking (and highlight any DJI errors).
+     - Confirm the new LookAt altitude reference flag (`altitude_reference=egm96|wgs84`) stays accurate end-to-end: LookAt now converts EGM96 inputs to WGS84 before calling the SDK, but we still need to validate DJI's geoid offset on-aircraft and surface when a POI already provides WGS84 heights (e.g., raw LRF payloads).
+     - Validate the dedicated `LOOK_AT_GIMBAL_FREE` control path in both H20N and Mission Control – the desktop now sets the gimbal attitude mode to FREE before dispatching LookAt, and Mission uploads pick `gimbal_free` vs `gimbal_following`; verify aircraft yaw behaviour matches expectations.
+     - Document the operator flow (map click, staged target, LRF set, H20N panel) and update training notes once bench validation is complete.
 
 Plan:
 -----------------------------
-  - Decode DJI Pilot samples – Pull each file under tmp_missions/pilot_generated/ and log its WPML structure (actionGroup payloads, waypointTurnMode, altitude tags). This gives    us the authoritative schema for gimbal rotate, gimbal evenly rotate, POI locks, EGM96 altitudes, coordinated turns, and aircraft-yaw modes.
-  - Plan support matrix                                                                                                                                                           
-      1. Extend the mission-planner data model to capture the extra fields we see (yaw mode, POI references, action sequences, altitude reference selectors).                     
-      2. Teach WaypointMissionExecutor to emit the matching DJI action groups instead of just waypointGimbalPitchAngle. That includes building gimbalRotate, gimbalEvenlyRotate,
-  takePhoto, and POI entries, plus switching mode/damping based on coordinated-turn or stop-at-waypoint settings.                   
-      3. Update the desktop UI so operators can configure those extras (per-waypoint yaw lock/manual, POI targets, Orbit/Curved-stop selectors, altitude reference type) and      
-  preview them.                                                                          
-  - Implementation outline                                                                                                                                                        
-      - Add a parser/serializer for WPML action groups in the bridge so we can both import DJI missions and emit the same shape back out.                        
-      - For gimbal control, generate actionGroup blocks mirroring gimbal.kmz (reachPoint vs betweenAdjacentPoints triggers, pitch/yaw enable flags, rotate time).                 
-      - For POI/orbit, reuse the POI definitions from poicenter.kmz and feed waypointPoiPoint/actionGroup pairs while switching yaw mode to lock on the POI.
-      - Support altitude references (relativeToStartPoint, wgs84, etc.) by wiring the EGM96 option through the planner settings.
-      - Map the remaining turn styles (coordinated turn, stop modes) to UI toggles and executor cases.                                                                            
-  - Verification                                                                                                                                                                  
-      - Build tiny unit-extraction scripts to diff our generated KMZ segments against each DJI sample.                                                                            
-      - Fly a simulator mission for each new mode (curved stop, coordinated turn, POI/orbit) before field deployment and watch for WPML upload errors.
+  - Sample analysis - Keep diffing the DJI Pilot KMZ files under tmp_missions/pilot_generated/ to confirm how POI yaw lock, gimbal look-at, and orbit metadata are encoded.
+  - Bridge updates - Introduce LookAt helpers (free, following, zoom circle) in the gimbal bridge, repoint orbit marker telemetry to the shared POI store, and ensure mission uploads toggle between aircraft-yaw control and LookAt gimbal control based on the selected orbit mode.
+  - Geoid conversions - Audit DJI SDK helpers for geoid offsets (so far only `GpsUtils.egm96Altitude` is exposed; we backfilled EGM96→WGS84 via `GeoidModel.mslToEllipsoid`). Identify whether DJI ships an inverse helper before we rely on the bespoke model outside the West Coast.
+  - Desktop planner - Update Mission Control state types and UI to surface the orbit mode selector, treat the orbit marker as the POI indicator, and round-trip the chosen mode through KMZ export/import without reintroducing legacy orbit actions.
+  - Camera panel - Extend the H20N gimbal mode component with the new LookAt options plus manual target entry so operators can validate POI tracking outside of missions.
+  - Verification - Bench test look-at commands (simulator + hardware) capturing yaw, gimbal pitch, and LookAt state telemetry; then run curved missions in `drift` and `gimbal` modes to confirm the aircraft or gimbal tracks the POI as expected.
 ------------------------------
+  - **Object memory POI integration** – Promote named clusters from the Object Memory service into the Mission Control POI picker so a persistent cluster can seed LookAt/mission orbit runs (cluster CRUD + coordinate provenance needs to flow through `missionPlannerStore`). Bench-test with stored cluster coordinates and ensure LookAt altitude references stay consistent.
   2. **3D mapping** – Introduce a 3D planning view (layers for street/satellite/topo) for waypoint editing and mission visualization; evaluate MapLibre plugins vs alternative basemaps.
   3. Identify why the app crashes sometimes:
 

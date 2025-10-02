@@ -5,7 +5,7 @@ import { rotationMatrixFromEuler, vectorRotate, combineRotationMatrices } from '
 import { getCameraCenterRay, projectRayToGround } from '../utils/rayProjection';
 import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
 import { missionPlannerStore } from '../state/missionPlanner';
-import type { MissionWaypointTarget } from '../types/missionPlanner';
+import type { MissionWaypointTarget, PoiTarget } from '../types/missionPlanner';
 import { computeTargetMetrics } from '../utils/objectMemoryTarget';
 import { OrientationCompass } from './OrientationCompass';
 import { telemetryShallowEqual } from '../utils/telemetryCompare';
@@ -43,6 +43,9 @@ const OrientationPanelComponent: React.FC<OrientationPanelProps> = ({ telemetry,
   const [missionWaypoint, setMissionWaypoint] = React.useState<MissionWaypointTarget | null>(
     () => missionPlannerStore.getSnapshot().activeWaypoint ?? null,
   );
+  const [missionPoi, setMissionPoi] = React.useState<PoiTarget | null>(
+    () => missionPlannerStore.getSnapshot().poiTarget ?? null,
+  );
   const targetMetrics = React.useMemo(
     () => (
       panelVisible
@@ -51,6 +54,10 @@ const OrientationPanelComponent: React.FC<OrientationPanelProps> = ({ telemetry,
     ),
     [panelVisible, telemetry, objectTarget]
   );
+  const targetPitchDeg = React.useMemo(() => {
+    if (!targetMetrics || targetMetrics.altitudeDelta == null) return null;
+    return (Math.atan2(targetMetrics.altitudeDelta, targetMetrics.horizontalDistance) * 180) / Math.PI;
+  }, [targetMetrics]);
   React.useEffect(() => {
     if (!panelVisible) {
       return undefined;
@@ -62,6 +69,12 @@ const OrientationPanelComponent: React.FC<OrientationPanelProps> = ({ telemetry,
       return undefined;
     }
     return missionPlannerStore.subscribeActiveWaypoint(setMissionWaypoint);
+  }, [panelVisible]);
+  React.useEffect(() => {
+    if (!panelVisible) {
+      return undefined;
+    }
+    return missionPlannerStore.subscribePoiTarget(setMissionPoi);
   }, [panelVisible]);
   const gimbal = telemetry?.gimbals?.find((g) => g.index === 'LEFT_OR_MAIN');
   const aircraftMatrix = React.useMemo(() => {
@@ -114,6 +127,53 @@ const OrientationPanelComponent: React.FC<OrientationPanelProps> = ({ telemetry,
 
     return { distance, bearing, altitudeDelta };
   }, [panelVisible, telemetry?.location?.latitude, telemetry?.location?.longitude, telemetry?.altitude, missionWaypoint?.latitude, missionWaypoint?.longitude, missionWaypoint?.altitude]);
+  const missionPitchDeg = React.useMemo(() => {
+    if (!missionMetrics || missionMetrics.altitudeDelta == null) return null;
+    return (Math.atan2(missionMetrics.altitudeDelta, missionMetrics.distance) * 180) / Math.PI;
+  }, [missionMetrics]);
+
+  const poiMetrics = React.useMemo(() => {
+    if (!panelVisible || !telemetry?.location || !missionPoi) {
+      return null;
+    }
+
+    const { latitude: lat1, longitude: lon1 } = telemetry.location;
+    const { latitude: lat2, longitude: lon2, altitude } = missionPoi;
+    if (
+      typeof lat1 !== 'number' || typeof lon1 !== 'number' ||
+      typeof lat2 !== 'number' || typeof lon2 !== 'number'
+    ) {
+      return null;
+    }
+
+    const toRad = (deg: number) => (deg * Math.PI) / 180;
+    const φ1 = toRad(lat1);
+    const φ2 = toRad(lat2);
+    const Δφ = toRad(lat2 - lat1);
+    const Δλ = toRad(lon2 - lon1);
+
+    const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
+    const horizontalDistance = 6371e3 * c;
+
+    const y = Math.sin(Δλ) * Math.cos(φ2);
+    const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+    const bearing = ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+
+    const altitudeDelta = typeof altitude === 'number' && typeof telemetry.altitude === 'number'
+      ? altitude - telemetry.altitude
+      : null;
+
+    const slantDistance = altitudeDelta != null
+      ? Math.sqrt(horizontalDistance ** 2 + altitudeDelta ** 2)
+      : horizontalDistance;
+
+    const pitch = altitudeDelta != null
+      ? (Math.atan2(altitudeDelta, horizontalDistance) * 180) / Math.PI
+      : null;
+
+    return { horizontalDistance, slantDistance, bearing, altitudeDelta, pitch };
+  }, [panelVisible, telemetry?.location?.latitude, telemetry?.location?.longitude, telemetry?.altitude, missionPoi?.latitude, missionPoi?.longitude, missionPoi?.altitude]);
 
   // Calculate ground point projection for center of image
   const groundPoint = React.useMemo(() => {
@@ -164,6 +224,9 @@ const OrientationPanelComponent: React.FC<OrientationPanelProps> = ({ telemetry,
                 <span>Δalt {targetMetrics.altitudeDelta.toFixed(1)} m</span>
               )}
               <span>BRG {targetMetrics.bearing.toFixed(0)}°</span>
+              {targetPitchDeg != null && Number.isFinite(targetPitchDeg) && (
+                <span>Pitch {targetPitchDeg.toFixed(1)}°</span>
+              )}
             </div>
           </div>
         )}
@@ -175,11 +238,19 @@ const OrientationPanelComponent: React.FC<OrientationPanelProps> = ({ telemetry,
               bearing: targetMetrics.bearing,
               distance: targetMetrics.slantDistance,
               altitudeDelta: targetMetrics.altitudeDelta,
+              pitch: targetPitchDeg,
             } : undefined}
             mission={missionMetrics ? {
               bearing: missionMetrics.bearing,
               distance: missionMetrics.distance,
               altitudeDelta: missionMetrics.altitudeDelta,
+              pitch: missionPitchDeg,
+            } : undefined}
+            poi={poiMetrics ? {
+              bearing: poiMetrics.bearing,
+              distance: poiMetrics.slantDistance,
+              altitudeDelta: poiMetrics.altitudeDelta,
+              pitch: poiMetrics.pitch ?? null,
             } : undefined}
             homeBearing={telemetry?.home_bearing}
           />
@@ -192,6 +263,24 @@ const OrientationPanelComponent: React.FC<OrientationPanelProps> = ({ telemetry,
               <span>BRG {missionMetrics.bearing.toFixed(0)}°</span>
               {missionMetrics.altitudeDelta != null && (
                 <span>Δalt {missionMetrics.altitudeDelta.toFixed(1)} m</span>
+              )}
+              {missionPitchDeg != null && Number.isFinite(missionPitchDeg) && (
+                <span>Pitch {missionPitchDeg.toFixed(1)}°</span>
+              )}
+            </div>
+          </div>
+        )}
+        {poiMetrics && (
+          <div className="bg-black/50 border border-purple-500/40 text-purple-200 rounded px-3 py-2 text-[11px] flex items-center justify-between">
+            <div className="font-semibold text-purple-100">Mission POI</div>
+            <div className="flex items-center gap-3">
+              <span>{poiMetrics.slantDistance.toFixed(1)} m</span>
+              <span>BRG {poiMetrics.bearing.toFixed(0)}°</span>
+              {poiMetrics.altitudeDelta != null && (
+                <span>Δalt {poiMetrics.altitudeDelta.toFixed(1)} m</span>
+              )}
+              {poiMetrics.pitch != null && Number.isFinite(poiMetrics.pitch) && (
+                <span>Pitch {poiMetrics.pitch.toFixed(1)}°</span>
               )}
             </div>
           </div>

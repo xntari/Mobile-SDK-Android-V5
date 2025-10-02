@@ -42,6 +42,7 @@ import dji.sdk.keyvalue.value.flightcontroller.FailsafeAction
 import dji.v5.manager.datacenter.camera.view.PinPoint
 import dji.v5.manager.datacenter.camera.view.PinPointInfo
 import dji.sdk.keyvalue.value.gimbal.GimbalAttitudeRange
+import dji.sdk.keyvalue.value.gimbal.GimbalMode
 import dji.v5.manager.aircraft.perception.PerceptionManager
 import dji.v5.manager.aircraft.perception.data.ObstacleData
 import dji.v5.manager.aircraft.perception.data.PerceptionInfo
@@ -537,6 +538,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         GIMBAL_FREE_LOOK_STOP("gimbal_free_look_stop"),
         GIMBAL_RESET("gimbal_reset"),
         GIMBAL_LOOK_AT("gimbal_look_at"),
+        GIMBAL_SET_MODE("gimbal_set_mode"),
         FLIGHT_COMMAND("flight_command"),
         SYSTEM_COMMAND("system_command");
         
@@ -1218,6 +1220,7 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 MessageType.GIMBAL_FREE_LOOK_STOP -> handleGimbalFreeLookStop(clientId, json)
                 MessageType.GIMBAL_RESET -> handleGimbalReset(clientId, json)
                 MessageType.GIMBAL_LOOK_AT -> handleGimbalLookAt(clientId, json)
+                MessageType.GIMBAL_SET_MODE -> handleGimbalSetMode(clientId, json)
                 MessageType.FLIGHT_COMMAND -> handleFlightCommand(clientId, json)
                 MessageType.SYSTEM_COMMAND -> handleSystemCommand(clientId, json)
                 MessageType.HEARTBEAT -> handleHeartbeat(clientId, socket)
@@ -1697,17 +1700,37 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             val latitude = data.getDouble("latitude")
             val longitude = data.getDouble("longitude")
             val altitude = data.getDouble("altitude")
-            val modeName = data.optString("mode", "LOOK_AT_GIMBAL_FREE").uppercase()
+            val altitudeReferenceRaw = data.optString("altitude_reference",
+                data.optString("altitudeReference", "EGM96")).uppercase(Locale.US)
+            val modeName = data.optString("mode", "LOOK_AT_GIMBAL_FREE").uppercase(Locale.US)
 
             // Parse look at mode
             val lookAtMode = when(modeName) {
-                "LOOK_AT_GIMBAL_FREE", "FREE" -> LookAtMode.LOOK_AT_GIMBAL_FREE
-                "LOOK_AT_GIMBAL_FOLLOWING", "FOLLOWING", "FOLLOW" -> LookAtMode.LOOK_AT_GIMBAL_FOLLOWING
+                "LOOK_AT_GIMBAL_FREE", "GIMBAL_FREE", "FREE" -> LookAtMode.LOOK_AT_GIMBAL_FREE
+                "LOOK_AT_GIMBAL_FOLLOWING", "GIMBAL_FOLLOWING", "FOLLOWING", "FOLLOW" -> LookAtMode.LOOK_AT_GIMBAL_FOLLOWING
                 "LOOK_AT_ZOOM_CIRCLE", "ZOOM_CIRCLE" -> LookAtMode.LOOK_AT_ZOOM_CIRCLE
                 else -> LookAtMode.LOOK_AT_GIMBAL_FREE
             }
 
-            val location = LocationCoordinate3D(latitude, longitude, altitude)
+            val altitudeWgs84 = when (altitudeReferenceRaw) {
+                "WGS84", "ELLIPSOID" -> altitude
+                else -> {
+                    if (latitude.isFinite() && longitude.isFinite()) {
+                        val converted = GeoidModel.mslToEllipsoid(altitude, latitude, longitude)
+                        Log.i(TAG, "Gimbal look-at altitude conversion (EGM96→WGS84): input=$altitude, converted=$converted")
+                        converted
+                    } else {
+                        Log.w(TAG, "LookAt geoid conversion skipped due to invalid lat/lon: $latitude,$longitude")
+                        altitude
+                    }
+                }
+            }
+
+            if (lookAtMode != LookAtMode.LOOK_AT_ZOOM_CIRCLE) {
+                ensureGimbalAttitudeMode(GimbalMode.FREE)
+            }
+
+            val location = LocationCoordinate3D(latitude, longitude, altitudeWgs84)
             val lookAtInfo = LookAtInfo().apply {
                 this.location = location
                 this.mode = lookAtMode
@@ -1724,22 +1747,132 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                         "location" to mapOf(
                             "latitude" to latitude,
                             "longitude" to longitude,
-                            "altitude" to altitude
+                            "altitude" to altitude,
+                            "altitude_wgs84" to altitudeWgs84,
+                            "altitude_reference" to altitudeReferenceRaw.lowercase(Locale.US)
                         )
                     )
-                    val message = createMessage(MessageType.GIMBAL_LOOK_AT, responseData)
-                    clients[clientId]?.let { sendWebSocketTextFrame(it, message) }
+                    sendMessageAsync(clientId, MessageType.GIMBAL_LOOK_AT, responseData)
                 },
                 { error -> // Error callback
                     Log.e(TAG, "Gimbal look at failed: ${error.description()}")
-                    clients[clientId]?.let {
-                        sendErrorResponse(it, "Gimbal look at failed: ${error.description()}")
-                    }
+                    sendMessageAsync(
+                        clientId,
+                        MessageType.ERROR,
+                        mapOf("error" to "Gimbal look at failed: ${error.description()}")
+                    )
                 }
             )
         } catch (e: Exception) {
             Log.e(TAG, "handleGimbalLookAt error: ${e.message}", e)
-            clients[clientId]?.let { sendErrorResponse(it, "Look at failed: ${e.message}") }
+            sendMessageAsync(
+                clientId,
+                MessageType.ERROR,
+                mapOf("error" to "Look at failed: ${e.message}")
+            )
+        }
+    }
+
+    private fun handleGimbalSetMode(clientId: String, command: JSONObject) {
+        val data = command.optJSONObject("data")
+        if (data == null) {
+            sendMessageAsync(
+                clientId,
+                MessageType.ERROR,
+                mapOf("error" to "gimbal_set_mode missing data")
+            )
+            return
+        }
+
+        val modeName = data.optString("mode", "").uppercase(Locale.US)
+        val gimbalMode = when (modeName) {
+            "FREE" -> GimbalMode.FREE
+            "YAW_FOLLOW" -> GimbalMode.YAW_FOLLOW
+            "FPV" -> GimbalMode.FPV
+            else -> null
+        }
+
+        if (gimbalMode == null) {
+            sendMessageAsync(
+                clientId,
+                MessageType.ERROR,
+                mapOf(
+                    "error" to "Unsupported gimbal mode: $modeName",
+                    "action" to "gimbal_set_mode"
+                )
+            )
+            return
+        }
+
+        val indexName = data.optString("index", data.optString("component", "LEFT_OR_MAIN")).uppercase(Locale.US)
+        val component = try {
+            ComponentIndexType.valueOf(indexName)
+        } catch (_: Exception) {
+            ComponentIndexType.LEFT_OR_MAIN
+        }
+
+        try {
+            val keyManager = KeyManager.getInstance()
+            val key = KeyTools.createKey(GimbalKey.KeyGimbalMode, component)
+            keyManager.setValue(key, gimbalMode, object : CommonCallbacks.CompletionCallback {
+                override fun onSuccess() {
+                    sendMessageAsync(
+                        clientId,
+                        MessageType.GIMBAL_RESPONSE,
+                        mapOf(
+                            "action" to "gimbal_set_mode",
+                            "success" to true,
+                            "mode" to gimbalMode.name,
+                            "component" to component.name
+                        )
+                    )
+                }
+
+                override fun onFailure(error: IDJIError) {
+                    sendMessageAsync(
+                        clientId,
+                        MessageType.ERROR,
+                        mapOf(
+                            "error" to "Gimbal mode set failed: ${error.description()}",
+                            "action" to "gimbal_set_mode",
+                            "mode" to gimbalMode.name,
+                            "component" to component.name
+                        )
+                    )
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "gimbal_set_mode error: ${e.message}", e)
+            sendMessageAsync(
+                clientId,
+                MessageType.ERROR,
+                mapOf(
+                    "error" to "gimbal_set_mode error: ${e.message}",
+                    "action" to "gimbal_set_mode",
+                    "mode" to modeName
+                )
+            )
+        }
+    }
+
+    private fun ensureGimbalAttitudeMode(
+        desiredMode: GimbalMode,
+        component: ComponentIndexType = ComponentIndexType.LEFT_OR_MAIN
+    ) {
+        try {
+            val keyManager = KeyManager.getInstance() ?: return
+            val key = KeyTools.createKey(GimbalKey.KeyGimbalMode, component)
+            keyManager.setValue(key, desiredMode, object : CommonCallbacks.CompletionCallback {
+                override fun onSuccess() {
+                    Log.i(TAG, "Gimbal mode set to ${desiredMode.name} for ${component.name}")
+                }
+
+                override fun onFailure(error: IDJIError) {
+                    Log.w(TAG, "Failed to set gimbal mode to ${desiredMode.name}: ${error.description()}")
+                }
+            })
+        } catch (e: Exception) {
+            Log.w(TAG, "ensureGimbalAttitudeMode error: ${e.message}", e)
         }
     }
 
@@ -3349,7 +3482,28 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             Log.d(TAG, "Removed disconnected client: $clientId")
         }
     }
-    
+
+    private fun sendMessageAsync(
+        clientId: String,
+        type: MessageType,
+        data: Any,
+        priority: Priority = Priority.NORMAL,
+    ) {
+        executor.execute {
+            try {
+                val socket = clients[clientId]
+                if (socket == null || socket.isClosed) {
+                    Log.w(TAG, "Skipping send for $clientId (socket unavailable)")
+                    return@execute
+                }
+                val message = createMessage(type, data, priority)
+                sendWebSocketTextFrame(socket, message)
+            } catch (t: Throwable) {
+                Log.e(TAG, "Failed to send ${type.value} message to $clientId: ${t.message}", t)
+            }
+        }
+    }
+
     private fun sendWebSocketTextFrame(socket: Socket, message: String) {
         try {
             Log.d(TAG, "🔍 DEBUG sendWebSocketTextFrame: socket=${if (socket != null) "non-null" else "NULL"}, message=${if (message != null) "non-null (${message.length} chars)" else "NULL"}")

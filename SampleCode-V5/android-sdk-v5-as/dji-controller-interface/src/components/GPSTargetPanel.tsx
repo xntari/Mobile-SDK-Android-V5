@@ -7,6 +7,8 @@ import {
   type LiveViewLocationMessage
 } from '../agent/cameraProjectionClient';
 
+const LOOK_AT_MODE_STORAGE_KEY = 'lookAt.defaultMode';
+
 interface GPSTarget {
   id: string;
   name: string;
@@ -26,7 +28,20 @@ interface GPSTargetPanelProps {
 export const GPSTargetPanel: React.FC<GPSTargetPanelProps> = ({ telemetryData, onTargetSelect }) => {
   const [targets, setTargets] = useState<GPSTarget[]>([]);
   const [selectedTarget, setSelectedTarget] = useState<GPSTarget | null>(null);
-  const [lookAtMode, setLookAtMode] = useState<LookAtMode>('FREE');
+  const [lookAtMode, setLookAtMode] = useState<LookAtMode>(() => {
+    if (typeof window === 'undefined') {
+      return 'GIMBAL_FOLLOWING';
+    }
+    try {
+      const stored = window.localStorage.getItem(LOOK_AT_MODE_STORAGE_KEY);
+      if (stored === 'GIMBAL_FREE' || stored === 'GIMBAL_FOLLOWING' || stored === 'ZOOM_CIRCLE') {
+        return stored;
+      }
+    } catch {
+      // ignore
+    }
+    return 'GIMBAL_FOLLOWING';
+  });
   const [isTracking, setIsTracking] = useState(false);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [newTargetInput, setNewTargetInput] = useState({
@@ -80,6 +95,15 @@ export const GPSTargetPanel: React.FC<GPSTargetPanelProps> = ({ telemetryData, o
     return () => clearInterval(interval);
   }, [targets]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(LOOK_AT_MODE_STORAGE_KEY, lookAtMode);
+    } catch {
+      // ignore storage errors
+    }
+  }, [lookAtMode]);
+
   const handleAddTarget = useCallback(() => {
     const lat = parseFloat(newTargetInput.latitude);
     const lon = parseFloat(newTargetInput.longitude);
@@ -126,7 +150,8 @@ export const GPSTargetPanel: React.FC<GPSTargetPanelProps> = ({ telemetryData, o
         latitude: selectedTarget.latitude,
         longitude: selectedTarget.longitude,
         altitude: selectedTarget.altitude,
-        mode: lookAtMode
+        mode: lookAtMode,
+        altitudeReference: 'egm96'
       });
     } catch (err) {
       console.error('Failed to look at target:', err);
@@ -222,24 +247,24 @@ export const GPSTargetPanel: React.FC<GPSTargetPanelProps> = ({ telemetryData, o
             <label className="text-sm text-gray-400 block mb-1">Look At Mode</label>
             <div className="grid grid-cols-3 gap-2">
               <button
-                onClick={() => setLookAtMode('FREE')}
+                onClick={() => setLookAtMode('GIMBAL_FREE')}
                 className={`px-2 py-1 rounded text-sm ${
-                  lookAtMode === 'FREE'
+                  lookAtMode === 'GIMBAL_FREE'
                     ? 'bg-blue-600 text-white'
                     : 'bg-gray-700 text-gray-300'
                 }`}
               >
-                Free
+                Gimbal only
               </button>
               <button
-                onClick={() => setLookAtMode('FOLLOWING')}
+                onClick={() => setLookAtMode('GIMBAL_FOLLOWING')}
                 className={`px-2 py-1 rounded text-sm ${
-                  lookAtMode === 'FOLLOWING'
+                  lookAtMode === 'GIMBAL_FOLLOWING'
                     ? 'bg-blue-600 text-white'
                     : 'bg-gray-700 text-gray-300'
                 }`}
               >
-                Follow
+                Gimbal + aircraft
               </button>
               <button
                 onClick={() => setLookAtMode('ZOOM_CIRCLE')}
@@ -249,7 +274,7 @@ export const GPSTargetPanel: React.FC<GPSTargetPanelProps> = ({ telemetryData, o
                     : 'bg-gray-700 text-gray-300'
                 }`}
               >
-                Circle
+                Zoom circle
               </button>
             </div>
           </div>

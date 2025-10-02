@@ -1,6 +1,7 @@
 import React from 'react';
 
 export type GimbalMode = 'look_at' | 'free_look';
+export type GimbalAttitudeMode = 'FREE' | 'YAW_FOLLOW' | 'FPV';
 
 
 interface GimbalModeToggleProps {
@@ -24,6 +25,8 @@ interface GimbalModeToggleProps {
   zoomRange?: { min?: number; max?: number };
   zoomEnabled?: boolean;
   onZoomChange?: (ratio: number) => void;
+  gimbalAttitudeMode?: GimbalAttitudeMode;
+  onGimbalAttitudeModeChange?: (mode: GimbalAttitudeMode) => void;
 }
 
 export const GimbalModeToggle: React.FC<GimbalModeToggleProps> = ({
@@ -44,6 +47,8 @@ export const GimbalModeToggle: React.FC<GimbalModeToggleProps> = ({
   zoomRange,
   zoomEnabled = true,
   onZoomChange,
+  gimbalAttitudeMode = 'YAW_FOLLOW',
+  onGimbalAttitudeModeChange,
 }) => {
   const modes: { value: GimbalMode; label: string }[] = [
     { value: 'look_at', label: 'Look At' },
@@ -55,6 +60,12 @@ export const GimbalModeToggle: React.FC<GimbalModeToggleProps> = ({
   const maxZoom = showZoomRange ? (zoomRange!.max as number) : 30;
   const zoomValue = typeof zoomRatio === 'number' ? zoomRatio : minZoom;
   const clampedZoom = Math.min(maxZoom, Math.max(minZoom, zoomValue));
+
+  const attitudeModes: { value: GimbalAttitudeMode; label: string }[] = [
+    { value: 'FREE', label: 'Free' },
+    { value: 'YAW_FOLLOW', label: 'Yaw Follow' },
+    { value: 'FPV', label: 'FPV' },
+  ];
 
   return (
     <div className={`glass-panel p-2 ${className}`}>
@@ -72,11 +83,26 @@ export const GimbalModeToggle: React.FC<GimbalModeToggleProps> = ({
               }
             `}
           >
-            {modeOption.label}
-          </button>
+              {modeOption.label}
+            </button>
         ))}
       </div>
-      
+
+      <div className="mt-3">
+        <div className="text-xs text-gray-400 mb-2 font-semibold">GIMBAL ATTITUDE</div>
+        <div className="flex gap-1">
+          {attitudeModes.map((item) => (
+            <button
+              key={item.value}
+              onClick={() => onGimbalAttitudeModeChange?.(item.value)}
+              className={`px-3 py-1 text-xs rounded ${gimbalAttitudeMode === item.value ? 'bg-dji-blue text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Status and debug info */}
       {mode === 'free_look' && isFreeLookActive && (
         <div className="mt-2 space-y-1">

@@ -3,7 +3,7 @@ import { HSICompassProps } from '../types';
 import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
 import { computeTargetMetrics } from '../utils/objectMemoryTarget';
 import { missionPlannerStore } from '../state/missionPlanner';
-import type { MissionWaypointTarget } from '../types/missionPlanner';
+import type { MissionWaypointTarget, PoiTarget } from '../types/missionPlanner';
 
 export const HSICompass: React.FC<HSICompassProps> = ({
   size = 'normal',
@@ -18,6 +18,7 @@ export const HSICompass: React.FC<HSICompassProps> = ({
   const [telemetryData, setTelemetryData] = useState<any>(null);
   const [objectTarget, setObjectTarget] = useState<ObjectMemoryTargetSelection | null>(() => objectMemoryTargetStore.getCurrent());
   const [missionWaypoint, setMissionWaypoint] = useState<MissionWaypointTarget | null>(() => missionPlannerStore.getSnapshot().activeWaypoint ?? null);
+  const [missionPoi, setMissionPoi] = useState<PoiTarget | null>(() => missionPlannerStore.getSnapshot().poiTarget ?? null);
 
   useEffect(() => {
     const unsubscribe = objectMemoryTargetStore.subscribe(setObjectTarget);
@@ -25,6 +26,7 @@ export const HSICompass: React.FC<HSICompassProps> = ({
   }, []);
 
   useEffect(() => missionPlannerStore.subscribeActiveWaypoint(setMissionWaypoint), []);
+  useEffect(() => missionPlannerStore.subscribePoiTarget(setMissionPoi), []);
 
   const targetMetrics = React.useMemo(
     () => computeTargetMetrics(telemetryData, objectTarget?.anchor, objectTarget?.clusterLabel ?? objectTarget?.clusterId),
@@ -69,6 +71,52 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     missionWaypoint?.latitude,
     missionWaypoint?.longitude,
     missionWaypoint?.altitude,
+  ]);
+
+  const poiMetrics = React.useMemo(() => {
+    if (!telemetryData?.location || !missionPoi) {
+      return null;
+    }
+    const { latitude: lat1, longitude: lon1 } = telemetryData.location;
+    const { latitude: lat2, longitude: lon2, altitude } = missionPoi;
+    if (
+      typeof lat1 !== 'number' || typeof lon1 !== 'number' ||
+      typeof lat2 !== 'number' || typeof lon2 !== 'number'
+    ) {
+      return null;
+    }
+
+    const toRad = (deg: number) => (deg * Math.PI) / 180;
+    const φ1 = toRad(lat1);
+    const φ2 = toRad(lat2);
+    const Δφ = toRad(lat2 - lat1);
+    const Δλ = toRad(lon2 - lon1);
+    const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
+    const distance = 6371e3 * c;
+
+    const y = Math.sin(Δλ) * Math.cos(φ2);
+    const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+    const bearing = ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+
+    const altitudeDelta = typeof altitude === 'number' && typeof telemetryData.altitude === 'number'
+      ? altitude - telemetryData.altitude
+      : null;
+
+    const pitch = altitudeDelta != null
+      ? (Math.atan2(altitudeDelta, distance) * 180) / Math.PI
+      : null;
+
+    const slantDistance = altitudeDelta != null ? Math.sqrt(distance ** 2 + altitudeDelta ** 2) : distance;
+
+    return { distance, bearing, altitudeDelta, pitch, slantDistance };
+  }, [
+    telemetryData?.location?.latitude,
+    telemetryData?.location?.longitude,
+    telemetryData?.altitude,
+    missionPoi?.latitude,
+    missionPoi?.longitude,
+    missionPoi?.altitude,
   ]);
 
   // Convert distance to visual radius using linear or logarithmic scale
@@ -318,6 +366,7 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     homeDirection?: number,
     targetDirection?: { bearing: number },
     missionDirection?: { bearing: number },
+    poiDirection?: { bearing: number },
     attitude?: { roll: number; pitch: number; yaw: number },
     obstacleData?: any
   ) => {
@@ -447,6 +496,24 @@ export const HSICompass: React.FC<HSICompassProps> = ({
       ctx.lineTo(-6, -radius - 8);
       ctx.lineTo(0, -radius - 3);
       ctx.lineTo(6, -radius - 8);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    if (poiDirection) {
+      ctx.save();
+      ctx.translate(centerX, centerY);
+      ctx.rotate((poiDirection.bearing - heading) * Math.PI / 180);
+      ctx.fillStyle = '#a855f7';
+      ctx.strokeStyle = '#e9d5ff';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, -radius - 16);
+      ctx.lineTo(-5, -radius - 4);
+      ctx.lineTo(0, -radius + 2);
+      ctx.lineTo(5, -radius - 4);
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
@@ -627,10 +694,11 @@ export const HSICompass: React.FC<HSICompassProps> = ({
       homeDirection,
       targetMetrics ? { bearing: targetMetrics.bearing } : undefined,
       missionMetrics ? { bearing: missionMetrics.bearing } : undefined,
+      poiMetrics ? { bearing: poiMetrics.bearing } : undefined,
       attitude,
       obstacleData,
     );
-  }, [telemetryData, useRawPerceptionData, scaleRange, useLogarithmicScale, size, targetMetrics, missionMetrics]);
+  }, [telemetryData, useRawPerceptionData, scaleRange, useLogarithmicScale, size, targetMetrics, missionMetrics, poiMetrics]);
 
   // Size configurations - increased height to fit heading above and distance below
   const sizeConfig = size === 'small' 
@@ -762,6 +830,12 @@ export const HSICompass: React.FC<HSICompassProps> = ({
           {(missionWaypoint.label ?? 'Waypoint')}: {missionMetrics.distance.toFixed(1)} m · BRG {missionMetrics.bearing.toFixed(0)}°
         </div>
       )}
+      {size === 'small' && poiMetrics && (
+        <div className="mt-1 text-[10px] text-center text-purple-300">
+          POI: {poiMetrics.slantDistance.toFixed(1)} m · BRG {poiMetrics.bearing.toFixed(0)}°
+          {poiMetrics.pitch != null ? ` · Pitch ${poiMetrics.pitch.toFixed(1)}°` : ''}
+        </div>
+      )}
       
       {/* Digital readouts - only show for normal size */}
       {size === 'normal' && (
@@ -809,6 +883,14 @@ export const HSICompass: React.FC<HSICompassProps> = ({
               </div>
             </div>
           )}
+          {poiMetrics && (
+            <div className="text-center">
+              <div className="text-gray-400">POI</div>
+              <div className="font-mono text-purple-200">
+                {poiMetrics.bearing.toFixed(0)}°
+              </div>
+            </div>
+          )}
         </div>
           {targetMetrics && (
             <div className="mt-2 text-xs text-center text-purple-200">
@@ -820,6 +902,13 @@ export const HSICompass: React.FC<HSICompassProps> = ({
             <div className="mt-1 text-xs text-center text-sky-200">
               {(missionWaypoint.label ?? 'Waypoint')}: {missionMetrics.distance.toFixed(1)} m · BRG {missionMetrics.bearing.toFixed(0)}°
               {missionMetrics.altitudeDelta != null ? ` · Δalt ${missionMetrics.altitudeDelta.toFixed(1)} m` : ''}
+            </div>
+          )}
+          {poiMetrics && (
+            <div className="mt-1 text-xs text-center text-purple-200">
+              POI: {poiMetrics.slantDistance.toFixed(1)} m · BRG {poiMetrics.bearing.toFixed(0)}°
+              {poiMetrics.altitudeDelta != null ? ` · Δalt ${poiMetrics.altitudeDelta.toFixed(1)} m` : ''}
+              {poiMetrics.pitch != null ? ` · Pitch ${poiMetrics.pitch.toFixed(1)}°` : ''}
             </div>
           )}
         </>

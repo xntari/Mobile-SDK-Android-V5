@@ -4,9 +4,10 @@ import React, {
   useState,
   forwardRef,
   useImperativeHandle,
+  useCallback,
 } from "react";
 import { H20NDisplayProps, TelemetryData } from "../types";
-import { GimbalModeToggle, GimbalMode } from "./GimbalModeToggle";
+import { GimbalModeToggle, GimbalMode, GimbalAttitudeMode } from "./GimbalModeToggle";
 import type { Detection, Mask } from "../agent/visionClient";
 import { CameraDisplay } from "./CameraDisplay";
 import {
@@ -18,6 +19,7 @@ import { projectGeographicPointToScreen } from "../utils/rayProjection";
 import {
   registerLiveViewLocationListener,
   requestLiveViewLocation,
+  gimbalLookAt,
   type LiveViewPinPoint,
 } from "../agent/cameraProjectionClient";
 import { normalizeAngleDeg, shortestAngleDiffDeg } from "../utils/angleUtils";
@@ -26,6 +28,14 @@ import { spawnVideoRendererWorker } from "../utils/videoRendererWorker";
 import { telemetryShallowEqual } from "../utils/telemetryCompare";
 import { usePanelVisibility } from "../hooks/usePanelVisibility";
 import { h20nCameraPanelControls } from "./CameraPanel";
+import { missionPlannerStore } from "../state/missionPlanner";
+import type { ManualTargetState, PoiTarget } from "../types/missionPlanner";
+
+const clampLat = (value: number) => Math.max(-90, Math.min(90, value));
+const clampLon = (value: number) => Math.max(-180, Math.min(180, value));
+type LookAtCommandMode = 'GIMBAL_FREE' | 'GIMBAL_FOLLOWING' | 'ZOOM_CIRCLE';
+
+const LOOK_AT_MODE_STORAGE_KEY = 'lookAt.defaultMode';
 
 export interface H20NDisplayRef {
   getSnapshot: () => Promise<string>;
@@ -121,6 +131,30 @@ const H20NDisplayComponent = (
       timestamp: number;
     } | null>(null);
     const [droppedFrameCount, setDroppedFrameCount] = useState<number>(0);
+    const [missionPoiTarget, setMissionPoiTarget] = useState<PoiTarget | null>(() => missionPlannerStore.getSnapshot().poiTarget ?? null);
+    const [missionManualTarget, setMissionManualTarget] = useState<ManualTargetState | null>(() => missionPlannerStore.getSnapshot().manualTarget);
+    const [lookAtSelection, setLookAtSelection] = useState<LookAtCommandMode>(() => {
+      if (typeof window === 'undefined') {
+        return 'GIMBAL_FOLLOWING';
+      }
+      try {
+        const stored = window.localStorage.getItem(LOOK_AT_MODE_STORAGE_KEY);
+        if (stored === 'GIMBAL_FREE' || stored === 'GIMBAL_FOLLOWING' || stored === 'ZOOM_CIRCLE') {
+          return stored;
+        }
+      } catch {
+        // ignore
+      }
+      return 'GIMBAL_FOLLOWING';
+    });
+    const [lookAtStatus, setLookAtStatus] = useState<string | null>(null);
+    const [lookAtBusy, setLookAtBusy] = useState(false);
+    const lookAtIntervalRef = useRef<number | null>(null);
+    const [gimbalAttitudeMode, setGimbalAttitudeMode] = useState<GimbalAttitudeMode>('YAW_FOLLOW');
+    const lookAtModeRef = useRef<LookAtCommandMode>(lookAtSelection);
+    const lookAtLoopActiveRef = useRef<boolean>(false);
+    const lookAtBusyRef = useRef<boolean>(false);
+    const latestLookAtTargetRef = useRef<PoiTarget | null>(null);
 
     // Gimbal Free Look state
     const [gimbalMode, setGimbalMode] = useState<GimbalMode>("look_at");
@@ -167,6 +201,37 @@ const H20NDisplayComponent = (
         unsubscribe();
       };
     }, [panelVisible, simulatorActive]);
+
+    useEffect(() => missionPlannerStore.subscribePoiTarget(setMissionPoiTarget), []);
+    useEffect(() => missionPlannerStore.subscribeManualTarget(setMissionManualTarget), []);
+
+    useEffect(() => {
+      lookAtModeRef.current = lookAtSelection;
+      if (typeof window === 'undefined') {
+        return;
+      }
+      try {
+        window.localStorage.setItem(LOOK_AT_MODE_STORAGE_KEY, lookAtSelection);
+      } catch {
+        // ignore storage errors
+      }
+    }, [lookAtSelection]);
+
+    const clearLookAtInterval = useCallback(() => {
+      if (lookAtIntervalRef.current !== null) {
+        window.clearInterval(lookAtIntervalRef.current);
+        lookAtIntervalRef.current = null;
+      }
+    }, []);
+
+    useEffect(() => () => clearLookAtInterval(), [clearLookAtInterval]);
+
+    useEffect(() => {
+      if (!panelVisible) {
+        clearLookAtInterval();
+        lookAtLoopActiveRef.current = false;
+      }
+    }, [panelVisible, clearLookAtInterval]);
 
     useEffect(() => {
       const canvas = canvasRef.current;
@@ -288,6 +353,229 @@ const H20NDisplayComponent = (
     const bridgeHasSendCommand =
       typeof window !== "undefined" &&
       !!(window as any).electronAPI?.sendBridgeCommand;
+
+    const resolveLookAtTarget = React.useCallback((): PoiTarget | null => {
+      if (
+        missionPoiTarget &&
+        typeof missionPoiTarget.latitude === 'number' &&
+        typeof missionPoiTarget.longitude === 'number' &&
+        Number.isFinite(missionPoiTarget.latitude) &&
+        Number.isFinite(missionPoiTarget.longitude)
+      ) {
+        return missionPoiTarget;
+      }
+      if (
+        missionManualTarget &&
+        missionManualTarget.latitude != null &&
+        missionManualTarget.longitude != null
+      ) {
+        const altitude = typeof missionManualTarget.altitude === 'number' && Number.isFinite(missionManualTarget.altitude)
+          ? missionManualTarget.altitude
+          : telemetryData?.location?.altitude ?? null;
+        if (typeof missionManualTarget.latitude === 'number' && typeof missionManualTarget.longitude === 'number') {
+          return {
+            latitude: missionManualTarget.latitude,
+            longitude: missionManualTarget.longitude,
+            altitude,
+          };
+        }
+      }
+      return null;
+    }, [missionPoiTarget, missionManualTarget, telemetryData?.location?.altitude]);
+
+    const asStatusLabel = useCallback((mode: LookAtCommandMode) => {
+      if (mode === 'GIMBAL_FOLLOWING') return 'gimbal_following';
+      if (mode === 'ZOOM_CIRCLE') return 'zoom_circle';
+      return 'gimbal_free';
+    }, []);
+
+    const handleSetGimbalAttitudeMode = useCallback(async (mode: GimbalAttitudeMode) => {
+      setGimbalAttitudeMode(mode);
+      if (!bridgeHasSendCommand) {
+        setLookAtStatus('Bridge command channel unavailable');
+        return;
+      }
+      try {
+        await (window as any)?.electronAPI?.sendBridgeCommand({
+          type: 'gimbal_set_mode',
+          data: { mode },
+        });
+        setLookAtStatus(`Gimbal mode set to ${mode.replace('_', ' ').toLowerCase()}`);
+      } catch (error) {
+        setLookAtStatus(error instanceof Error ? error.message : 'Failed to set gimbal mode');
+      }
+    }, [bridgeHasSendCommand]);
+
+    const dispatchLookAt = useCallback(async (
+      mode: LookAtCommandMode,
+      options?: { silent?: boolean },
+    ): Promise<boolean> => {
+      if (lookAtBusyRef.current) {
+        if (!options?.silent) {
+          setLookAtStatus('LookAt command already in flight');
+        }
+        return false;
+      }
+
+      const target = resolveLookAtTarget();
+      latestLookAtTargetRef.current = target;
+      if (!target) {
+        if (!options?.silent) {
+          setLookAtStatus('POI not set — stopping LookAt loop');
+        }
+        lookAtLoopActiveRef.current = false;
+        return false;
+      }
+
+      const altitude = typeof target.altitude === 'number' && Number.isFinite(target.altitude)
+        ? target.altitude
+        : telemetryData?.location?.altitude ?? 0;
+
+      if (!options?.silent) {
+        setLookAtBusy(true);
+      }
+      lookAtBusyRef.current = true;
+
+      try {
+        await gimbalLookAt({
+          latitude: clampLat(target.latitude),
+          longitude: clampLon(target.longitude),
+          altitude,
+          mode,
+          altitudeReference: 'egm96',
+        });
+        if (!options?.silent) {
+          setLookAtStatus(`LookAt ${asStatusLabel(mode)} dispatched @ ${new Date().toLocaleTimeString()}`);
+        }
+        return true;
+      } catch (error) {
+        if (!options?.silent) {
+          setLookAtStatus(error instanceof Error ? error.message : 'LookAt command failed');
+        }
+        return false;
+      } finally {
+        if (!options?.silent) {
+          setLookAtBusy(false);
+        }
+        lookAtBusyRef.current = false;
+      }
+    }, [asStatusLabel, resolveLookAtTarget, telemetryData?.location?.altitude]);
+
+    const handleLookAtCommand = useCallback(async (mode: LookAtCommandMode) => {
+      if (!bridgeHasSendCommand) {
+        setLookAtStatus('Bridge command channel unavailable');
+        return;
+      }
+
+      try {
+        await handleSetGimbalAttitudeMode('FREE');
+      } catch (error) {
+        console.warn('Failed to set gimbal attitude mode to FREE before LookAt', error);
+      }
+
+      clearLookAtInterval();
+      lookAtLoopActiveRef.current = false;
+      lookAtModeRef.current = mode;
+
+      const initialOk = await dispatchLookAt(mode);
+      if (!initialOk) {
+        return;
+      }
+
+      const shouldLoop = mode !== 'GIMBAL_FREE';
+      lookAtLoopActiveRef.current = shouldLoop;
+      if (shouldLoop) {
+        lookAtIntervalRef.current = window.setInterval(() => {
+          void dispatchLookAt(lookAtModeRef.current, { silent: true });
+        }, 1000);
+      }
+    }, [bridgeHasSendCommand, clearLookAtInterval, dispatchLookAt, handleSetGimbalAttitudeMode]);
+
+    const handleStopLookAt = useCallback(async () => {
+      clearLookAtInterval();
+      lookAtLoopActiveRef.current = false;
+
+      if (!bridgeHasSendCommand) {
+        setLookAtStatus('Bridge command channel unavailable');
+        return;
+      }
+
+      const target = resolveLookAtTarget();
+      if (!target) {
+        setLookAtStatus('POI not set — nothing to stop');
+        return;
+      }
+
+      const altitude = typeof target.altitude === 'number' && Number.isFinite(target.altitude)
+        ? target.altitude
+        : telemetryData?.location?.altitude ?? 0;
+
+      setLookAtBusy(true);
+      lookAtBusyRef.current = true;
+      try {
+        await gimbalLookAt({
+          latitude: clampLat(target.latitude),
+          longitude: clampLon(target.longitude),
+          altitude,
+          mode: 'GIMBAL_FREE',
+          altitudeReference: 'egm96',
+        });
+        setLookAtStatus('LookAt stopped');
+      } catch (error) {
+        setLookAtStatus(error instanceof Error ? error.message : 'Failed to stop LookAt');
+      } finally {
+        setLookAtBusy(false);
+        lookAtBusyRef.current = false;
+      }
+    }, [bridgeHasSendCommand, clearLookAtInterval, resolveLookAtTarget, telemetryData?.location?.altitude]);
+
+    useEffect(() => {
+      latestLookAtTargetRef.current = resolveLookAtTarget();
+      if (lookAtLoopActiveRef.current) {
+        void dispatchLookAt(lookAtModeRef.current, { silent: true });
+      }
+    }, [dispatchLookAt, resolveLookAtTarget]);
+
+    const handleSetPoiFromManualTarget = useCallback(() => {
+      const source = missionManualTarget;
+      if (!source || source.latitude == null || source.longitude == null) {
+        setLookAtStatus('No staged target available');
+        return;
+      }
+      const altitude = typeof source.altitude === 'number' && Number.isFinite(source.altitude)
+        ? source.altitude
+        : telemetryData?.location?.altitude ?? null;
+      missionPlannerStore.setPoiTarget({
+        latitude: clampLat(source.latitude),
+        longitude: clampLon(source.longitude),
+        altitude,
+      });
+      setLookAtStatus('POI set from staged target');
+    }, [missionManualTarget, telemetryData?.location?.altitude]);
+
+    const handleSetPoiFromLaser = useCallback(() => {
+      const waypoint = lastLaserResult?.waypoint ?? lastLaserResult?.target ?? lastLaserResult;
+      const lat = typeof waypoint?.lat === 'number' ? waypoint.lat : waypoint?.latitude;
+      const lon = typeof waypoint?.lon === 'number' ? waypoint.lon : waypoint?.longitude;
+      if (typeof lat !== 'number' || typeof lon !== 'number') {
+        setLookAtStatus('Laser reading missing coordinates');
+        return;
+      }
+      const altitude = typeof waypoint?.alt_m === 'number'
+        ? waypoint.alt_m
+        : telemetryData?.location?.altitude ?? null;
+      missionPlannerStore.setPoiTarget({
+        latitude: clampLat(lat),
+        longitude: clampLon(lon),
+        altitude,
+      });
+      setLookAtStatus('POI set from laser range');
+    }, [lastLaserResult, telemetryData?.location?.altitude]);
+
+    const handleClearPoi = useCallback(() => {
+      missionPlannerStore.setPoiTarget(null);
+      setLookAtStatus('POI cleared');
+    }, []);
 
     // Helper: provide a snapshot of the current canvas as base64 JPEG
     const getSnapshot = async (): Promise<string> => {
@@ -1783,7 +2071,94 @@ const H20NDisplayComponent = (
             zoomRange={telemetryData?.camera_optics?.zoom_range}
             zoomEnabled={bridgeHasSendCommand}
             onZoomChange={handleZoomSliderChange}
+            gimbalAttitudeMode={gimbalAttitudeMode}
+            onGimbalAttitudeModeChange={handleSetGimbalAttitudeMode}
           />
+        </div>
+
+        <div className="absolute top-4 right-4 z-30 pointer-events-auto w-72">
+          <div className="glass-panel p-3 text-xs text-gray-200 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-gray-400 uppercase text-[11px]">LookAt / POI</span>
+              {lookAtBusy && <span className="text-[10px] text-yellow-400">sending…</span>}
+            </div>
+            <div className="text-[11px] text-gray-300">
+              <div>
+                <span className="text-gray-500">POI:</span>{' '}
+                {missionPoiTarget
+                  ? `${missionPoiTarget.latitude.toFixed(6)}, ${missionPoiTarget.longitude.toFixed(6)}`
+                  : 'None'}
+              </div>
+              {missionPoiTarget?.altitude != null && Number.isFinite(missionPoiTarget.altitude) && (
+                <div className="text-[10px] text-gray-500">
+                  Alt {missionPoiTarget.altitude.toFixed(1)} m
+                </div>
+              )}
+              {missionManualTarget?.latitude != null && missionManualTarget.longitude != null && (
+                <div className="text-[10px] text-gray-500 mt-1">
+                  Staged target {missionManualTarget.latitude.toFixed(6)},{' '}
+                  {missionManualTarget.longitude.toFixed(6)}
+                </div>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-1">
+              <button
+                type="button"
+                onClick={handleSetPoiFromManualTarget}
+                className="px-2 py-1 rounded border border-sky-500/60 bg-sky-500/15 text-sky-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                disabled={!(missionManualTarget && missionManualTarget.latitude != null && missionManualTarget.longitude != null)}
+              >
+                Use staged target
+              </button>
+              <button
+                type="button"
+                onClick={handleSetPoiFromLaser}
+                className="px-2 py-1 rounded border border-emerald-500/60 bg-emerald-500/15 text-emerald-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                disabled={!lastLaserResult}
+              >
+                Use last LRF
+              </button>
+              <button
+                type="button"
+                onClick={handleClearPoi}
+                className="px-2 py-1 rounded border border-gray-600 bg-black/40 text-gray-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                disabled={!missionPoiTarget}
+              >
+                Clear POI
+              </button>
+            </div>
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] text-gray-400">LookAt mode</span>
+              <select
+                value={lookAtSelection}
+                onChange={(event) => setLookAtSelection(event.target.value as LookAtCommandMode)}
+                className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200"
+              >
+                <option value="GIMBAL_FOLLOWING">Gimbal + aircraft follow</option>
+                <option value="GIMBAL_FREE">Gimbal only (keep aircraft attitude)</option>
+                <option value="ZOOM_CIRCLE">Zoom circle</option>
+              </select>
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => handleLookAtCommand(lookAtSelection)}
+                className="flex-1 px-2 py-1 rounded border border-purple-500/60 bg-purple-500/15 text-purple-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                disabled={lookAtBusy}
+              >
+                Start
+              </button>
+              <button
+                type="button"
+                onClick={() => handleStopLookAt()}
+                className="flex-1 px-2 py-1 rounded border border-gray-600 bg-black/40 text-gray-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                disabled={lookAtBusy}
+              >
+                Stop
+              </button>
+            </div>
+            {lookAtStatus && <div className="text-[10px] text-gray-400">{lookAtStatus}</div>}
+          </div>
         </div>
 
         {/* Video content overlay area - matches actual video display rectangle */}

@@ -19,6 +19,7 @@ import type {
   WaypointActionConfig,
   PoiTarget,
   AltitudeReferenceMode,
+  OrbitMode,
 } from '../types/missionPlanner';
 import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
 import { missionPlannerStore } from '../state/missionPlanner';
@@ -52,6 +53,15 @@ interface MissionPlanCommandEntry {
 
 const MAX_LOG_ENTRIES = 40;
 const clampAltitude = (value: number) => Math.max(-500, Math.min(6000, value));
+
+const STORAGE_KEYS = {
+  flyToMode: 'mission.flyTo.mode',
+  flyToHeight: 'mission.flyTo.height',
+  securityHeight: 'mission.flyTo.securityHeight',
+  maxSpeed: 'mission.flyTo.maxSpeed',
+  flightPathMode: 'mission.flightPathMode',
+  orbitMode: 'mission.orbit.mode',
+};
 
 const formatLatLon = (value?: number) =>
   typeof value === 'number' ? value.toFixed(7) : '—';
@@ -428,11 +438,85 @@ export const FlyToPanel: React.FC = () => {
 
   const [distanceMeters, setDistanceMeters] = React.useState<number>(5);
   const [verticalMeters, setVerticalMeters] = React.useState<number>(2);
-  const [maxSpeed, setMaxSpeed] = React.useState<number>(10);
-  const [securityTakeoffHeight, setSecurityTakeoffHeight] = React.useState<number>(20);
-  const [flyToMode, setFlyToMode] = React.useState<'smart_height' | 'set_height'>('set_height');
-  const [flyToHeight, setFlyToHeight] = React.useState<number>(20);
-  const [flightPathMode, setFlightPathMode] = React.useState<'straight' | 'curved'>('straight');
+  const [maxSpeed, setMaxSpeed] = React.useState<number>(() => {
+    if (typeof window === 'undefined') return 10;
+    try {
+      const stored = window.localStorage.getItem(STORAGE_KEYS.maxSpeed);
+      const parsed = stored != null ? Number(stored) : NaN;
+      if (!Number.isNaN(parsed) && parsed > 0) {
+        return parsed;
+      }
+    } catch {
+      // ignore storage error
+    }
+    return 10;
+  });
+  const [securityTakeoffHeight, setSecurityTakeoffHeight] = React.useState<number>(() => {
+    if (typeof window === 'undefined') return 20;
+    try {
+      const stored = window.localStorage.getItem(STORAGE_KEYS.securityHeight);
+      const parsed = stored != null ? Number(stored) : NaN;
+      if (!Number.isNaN(parsed) && parsed >= 0) {
+        return parsed;
+      }
+    } catch {
+      // ignore storage error
+    }
+    return 20;
+  });
+  const [flyToMode, setFlyToMode] = React.useState<'smart_height' | 'set_height'>(() => {
+    if (typeof window === 'undefined') return 'set_height';
+    try {
+      const stored = window.localStorage.getItem(STORAGE_KEYS.flyToMode);
+      if (stored === 'smart_height' || stored === 'set_height') {
+        return stored;
+      }
+    } catch {
+      // ignore
+    }
+    return 'set_height';
+  });
+  const [flyToHeight, setFlyToHeight] = React.useState<number>(() => {
+    if (typeof window === 'undefined') return 20;
+    try {
+      const stored = window.localStorage.getItem(STORAGE_KEYS.flyToHeight);
+      const parsed = stored != null ? Number(stored) : NaN;
+      if (!Number.isNaN(parsed)) {
+        return parsed;
+      }
+    } catch {
+      // ignore
+    }
+    return 20;
+  });
+  const [flightPathMode, setFlightPathMode] = React.useState<'straight' | 'curved'>(() => {
+    if (typeof window === 'undefined') return 'straight';
+    try {
+      const stored = window.localStorage.getItem(STORAGE_KEYS.flightPathMode);
+      if (stored === 'straight' || stored === 'curved') {
+        return stored;
+      }
+    } catch {
+      // ignore
+    }
+    return 'straight';
+  });
+  const [orbitMode, setOrbitModeState] = React.useState<OrbitMode>(() => {
+    const snapshotMode = missionPlannerStore.getSnapshot().orbitMode ?? 'none';
+    if (typeof window === 'undefined') {
+      return snapshotMode;
+    }
+    try {
+      const stored = window.localStorage.getItem(STORAGE_KEYS.orbitMode);
+      if (stored === 'none' || stored === 'drift' || stored === 'gimbal' || stored === 'gimbal_free') {
+        missionPlannerStore.setOrbitMode(stored);
+        return stored;
+      }
+    } catch {
+      // ignore
+    }
+    return snapshotMode;
+  });
   const [logEntries, setLogEntries] = React.useState<MissionLogEntry[]>([]);
   const [manualTarget, setManualTarget] = React.useState<ManualTargetState>({ latitude: null, longitude: null, altitude: null });
   const [placingTarget, setPlacingTarget] = React.useState<boolean>(false);
@@ -441,8 +525,6 @@ export const FlyToPanel: React.FC = () => {
   const [expandedEntries, setExpandedEntries] = React.useState<Record<string, boolean>>({});
   const [actionParamDrafts, setActionParamDrafts] = React.useState<Record<string, string>>({});
   const [actionParamErrors, setActionParamErrors] = React.useState<Record<string, string>>({});
-  const [orbitRadius, setOrbitRadius] = React.useState<number>(25);
-  const [orbitTurns, setOrbitTurns] = React.useState<number>(1);
   const [lastLaserFix, setLastLaserFix] = React.useState<{ latitude: number; longitude: number; altitude?: number } | null>(null);
   const [targetSelection, setTargetSelection] = React.useState<ObjectMemoryTargetSelection | null>(() =>
     objectMemoryTargetStore.getCurrent(),
@@ -452,6 +534,7 @@ export const FlyToPanel: React.FC = () => {
   const lastWaypointStateRef = React.useRef<string | null>(null);
   const lastWaypointIndexRef = React.useRef<string | null>(null);
   const waypointTimelineSeenRef = React.useRef<Set<string>>(new Set());
+  const [poiTarget, setPoiTarget] = React.useState<PoiTarget | null>(() => missionPlannerStore.getSnapshot().poiTarget ?? null);
   const [lastLoadedKmz, setLastLoadedKmz] = React.useState<{
     name: string;
     path?: string;
@@ -459,7 +542,50 @@ export const FlyToPanel: React.FC = () => {
     timestamp: number;
   } | null>(null);
 
+  const orbitModeRef = React.useRef<OrbitMode>(orbitMode);
+  const poiTargetRef = React.useRef<PoiTarget | null>(poiTarget);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try { window.localStorage.setItem(STORAGE_KEYS.maxSpeed, String(maxSpeed)); } catch {}
+  }, [maxSpeed]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try { window.localStorage.setItem(STORAGE_KEYS.securityHeight, String(securityTakeoffHeight)); } catch {}
+  }, [securityTakeoffHeight]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try { window.localStorage.setItem(STORAGE_KEYS.flyToMode, flyToMode); } catch {}
+  }, [flyToMode]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try { window.localStorage.setItem(STORAGE_KEYS.flyToHeight, String(flyToHeight)); } catch {}
+  }, [flyToHeight]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try { window.localStorage.setItem(STORAGE_KEYS.flightPathMode, flightPathMode); } catch {}
+  }, [flightPathMode]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try { window.localStorage.setItem(STORAGE_KEYS.orbitMode, orbitMode); } catch {}
+  }, [orbitMode]);
+
+  React.useEffect(() => {
+    orbitModeRef.current = orbitMode;
+  }, [orbitMode]);
+
+  React.useEffect(() => {
+    poiTargetRef.current = poiTarget;
+  }, [poiTarget]);
+
   React.useEffect(() => objectMemoryTargetStore.subscribe(setTargetSelection), []);
+  React.useEffect(() => missionPlannerStore.subscribePoiTarget(setPoiTarget), []);
+  React.useEffect(() => missionPlannerStore.subscribeOrbitMode(setOrbitModeState), []);
 
   const flyToStatus = telemetry?.fly_to_status as FlyToStatus | undefined;
   const waypointStatus = telemetry?.waypoint_status as WaypointStatusTelemetry | undefined;
@@ -504,6 +630,10 @@ export const FlyToPanel: React.FC = () => {
       return entry.error.description;
     }
     return fallback;
+  }, []);
+
+  const handleOrbitModeChange = React.useCallback((mode: OrbitMode) => {
+    missionPlannerStore.setOrbitMode(mode);
   }, []);
 
   const ensureTelemetry = (): TelemetryData | null => {
@@ -592,6 +722,76 @@ export const FlyToPanel: React.FC = () => {
     }
     return null;
   }, [manualTarget.latitude, manualTarget.longitude, manualTarget.altitude, manualTarget.source, derivedTarget?.latitude, derivedTarget?.longitude, derivedTarget?.altitude]);
+
+  const canAssignPoi = Boolean(
+    activeTarget &&
+    activeTarget.latitude != null &&
+    activeTarget.longitude != null,
+  );
+
+  const defaultTargetAltitudePreview = computeDefaultTargetAltitude();
+
+  const appendLog = React.useCallback((label: string, payload: Record<string, any>, kind: MissionLogKind = 'command') => {
+    setLogEntries((prev) => {
+      const entry: MissionLogEntry = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        timestamp: Date.now(),
+        label,
+        payload,
+        kind,
+      };
+      const next = [entry, ...prev];
+      return next.slice(0, MAX_LOG_ENTRIES);
+    });
+  }, []);
+
+  const handleSetPoiFromTarget = React.useCallback(() => {
+    const target = activeTarget;
+    if (!target || target.latitude == null || target.longitude == null) {
+      setStatusMessage('No staged target available to assign as POI.');
+      return;
+    }
+    const altitudeCandidate = typeof target.altitude === 'number' && Number.isFinite(target.altitude)
+      ? target.altitude
+      : typeof telemetry?.location?.altitude === 'number'
+        ? telemetry.location.altitude
+        : typeof telemetry?.altitude === 'number'
+          ? telemetry.altitude
+          : null;
+    missionPlannerStore.setPoiTarget({
+      latitude: clampLat(target.latitude),
+      longitude: clampLon(target.longitude),
+      altitude: altitudeCandidate,
+    });
+    setStatusMessage(`POI set to ${formatLatLon(target.latitude)}, ${formatLatLon(target.longitude)}`);
+  }, [activeTarget, telemetry?.location?.altitude, telemetry?.altitude]);
+
+  const handleClearPoiTarget = React.useCallback(() => {
+    missionPlannerStore.setPoiTarget(null);
+    setStatusMessage('POI target cleared.');
+  }, []);
+
+  const handleSetPoiFromObjectMemory = React.useCallback(() => {
+    if (!derivedTarget) {
+      setStatusMessage('Select an Object Memory target to assign a POI.');
+      return;
+    }
+    const altitude = typeof derivedTarget.altitude === 'number' && Number.isFinite(derivedTarget.altitude)
+      ? derivedTarget.altitude
+      : defaultTargetAltitudePreview ?? telemetry?.location?.altitude ?? null;
+    const poiPayload = {
+      latitude: clampLat(derivedTarget.latitude),
+      longitude: clampLon(derivedTarget.longitude),
+      altitude,
+    };
+    missionPlannerStore.setPoiTarget(poiPayload);
+    appendLog('POI target updated (object-memory)', {
+      ...poiPayload,
+      source: 'object-memory',
+      cluster: targetSelection?.clusterLabel ?? targetSelection?.clusterId,
+    }, 'manual');
+    setStatusMessage('POI set from Object Memory');
+  }, [appendLog, defaultTargetAltitudePreview, derivedTarget, setStatusMessage, targetSelection?.clusterId, targetSelection?.clusterLabel, telemetry?.location?.altitude]);
 
   const manualTargetSourceLabel = React.useMemo(() => {
     switch (manualTarget.source) {
@@ -786,7 +986,6 @@ export const FlyToPanel: React.FC = () => {
   const heightRangeMin = typeof heightRange?.min === 'number' ? heightRange.min : 1;
   const heightRangeMax = typeof heightRange?.max === 'number' ? heightRange.max : 500;
 
-  const defaultTargetAltitudePreview = computeDefaultTargetAltitude();
   const homeLocation = telemetry?.home_location;
   const hasHomeLocation = Boolean(homeLocation
     && Number.isFinite(homeLocation.latitude)
@@ -796,19 +995,6 @@ export const FlyToPanel: React.FC = () => {
       && Number.isFinite(telemetry.location.latitude)
       && Number.isFinite(telemetry.location.longitude));
 
-  const appendLog = React.useCallback((label: string, payload: Record<string, any>, kind: MissionLogKind = 'command') => {
-    setLogEntries((prev) => {
-      const entry: MissionLogEntry = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        timestamp: Date.now(),
-        label,
-        payload,
-        kind,
-      };
-      const next = [entry, ...prev];
-      return next.slice(0, MAX_LOG_ENTRIES);
-    });
-  }, []);
 
   const handleClearMissionLog = React.useCallback(() => {
     setLogEntries([]);
@@ -832,46 +1018,35 @@ export const FlyToPanel: React.FC = () => {
       longitude: activeTarget.longitude,
       altitude: altitudeCandidate,
     };
-    setMissionPlan((prev) => [...prev, entry]);
+    updateMissionPlan((prev) => [...prev, entry]);
     setExpandedEntries((prev) => ({ ...prev, [entry.id]: true }));
     appendLog('Plan waypoint added', entry, 'manual');
     setStatusMessage('Waypoint added to mission plan.');
   }, [activeTarget, telemetry?.location?.altitude, telemetry?.altitude, appendLog, defaultTargetAltitudePreview]);
 
   const addOrbitToPlan = React.useCallback(() => {
-    if (!activeTarget || activeTarget.latitude == null || activeTarget.longitude == null) {
-      setStatusMessage('Stage a target before adding an orbit.');
+    if (!canAssignPoi || !activeTarget || activeTarget.latitude == null || activeTarget.longitude == null) {
+      setStatusMessage('Stage a target before assigning the POI/orbit center.');
       return;
     }
-    if (!Number.isFinite(orbitRadius) || orbitRadius <= 0) {
-      setStatusMessage('Orbit radius must be a positive number.');
-      return;
-    }
-    if (!Number.isFinite(orbitTurns) || orbitTurns <= 0) {
-      setStatusMessage('Orbit turns must be at least 1.');
-      return;
-    }
-    const radiusMeters = Math.max(5, Math.round(orbitRadius));
-    const turns = Math.max(1, Math.round(orbitTurns));
     const altitudeCandidate = defaultTargetAltitudePreview
       ?? telemetry?.location?.altitude
       ?? telemetry?.altitude
       ?? activeTarget.altitude
       ?? null;
-    const entry: PlannedMissionEntry = {
-      id: `orbit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      kind: 'orbit',
+    missionPlannerStore.setPoiTarget({
+      latitude: clampLat(activeTarget.latitude),
+      longitude: clampLon(activeTarget.longitude),
+      altitude: altitudeCandidate,
+    });
+    appendLog('POI target updated (mission control)', {
       latitude: activeTarget.latitude,
       longitude: activeTarget.longitude,
       altitude: altitudeCandidate,
-      radius: radiusMeters,
-      turns,
-    };
-    setMissionPlan((prev) => [...prev, entry]);
-    setExpandedEntries((prev) => ({ ...prev, [entry.id]: true }));
-    appendLog('Plan orbit added', entry, 'manual');
-    setStatusMessage(`Orbit added (radius ${radiusMeters} m, ${turns} turn${turns === 1 ? '' : 's'}).`);
-  }, [activeTarget, telemetry?.location?.altitude, telemetry?.altitude, orbitRadius, orbitTurns, appendLog, defaultTargetAltitudePreview]);
+      source: 'mission_control',
+    }, 'manual');
+    setStatusMessage('POI target updated from staged target.');
+  }, [activeTarget, canAssignPoi, defaultTargetAltitudePreview, telemetry?.location?.altitude, telemetry?.altitude, appendLog]);
 
   const addReturnHomeToPlan = React.useCallback(() => {
     const home = telemetry?.home_location;
@@ -890,7 +1065,7 @@ export const FlyToPanel: React.FC = () => {
         ?? telemetry?.location?.altitude
         ?? null,
     };
-    setMissionPlan((prev) => [...prev, entry]);
+    updateMissionPlan((prev) => [...prev, entry]);
     setExpandedEntries((prev) => ({ ...prev, [entry.id]: true }));
     appendLog('Plan return-to-home added', entry, 'manual');
     setStatusMessage('Return-to-home added to mission plan.');
@@ -915,7 +1090,7 @@ export const FlyToPanel: React.FC = () => {
       longitude: clampLon(home.longitude),
       altitude: altitudeCandidate,
     };
-    setMissionPlan((prev) => [...prev, entry]);
+    updateMissionPlan((prev) => [...prev, entry]);
     setExpandedEntries((prev) => ({ ...prev, [entry.id]: true }));
     appendLog('Plan home waypoint added', entry, 'manual');
     setStatusMessage('Home waypoint added to mission plan.');
@@ -941,7 +1116,7 @@ export const FlyToPanel: React.FC = () => {
       longitude: clampLon(origin.longitude),
       altitude: altitudeCandidate,
     };
-    setMissionPlan((prev) => [...prev, entry]);
+    updateMissionPlan((prev) => [...prev, entry]);
     setExpandedEntries((prev) => ({ ...prev, [entry.id]: true }));
     appendLog('Plan origin waypoint added', entry, 'manual');
     setStatusMessage('Origin waypoint appended to mission plan.');
@@ -977,14 +1152,14 @@ export const FlyToPanel: React.FC = () => {
       longitude: clampLon(landingLongitude),
       altitude: landingAltitude,
     };
-    setMissionPlan((prev) => [...prev, entry]);
+    updateMissionPlan((prev) => [...prev, entry]);
     setExpandedEntries((prev) => ({ ...prev, [entry.id]: true }));
     appendLog('Plan land added', entry, 'manual');
     setStatusMessage('Landing step added to mission plan.');
   }, [missionPlan, telemetry?.location?.latitude, telemetry?.location?.longitude, telemetry?.home_location?.latitude, telemetry?.home_location?.longitude, appendLog, defaultTargetAltitudePreview, resolveTakeoffAltitude]);
 
   const removePlanEntry = React.useCallback((id: string) => {
-    setMissionPlan((prev) => prev.filter((entry) => entry.id !== id));
+    updateMissionPlan((prev) => prev.filter((entry) => entry.id !== id));
     setExpandedEntries((prev) => {
       if (!(id in prev)) return prev;
       const next = { ...prev };
@@ -1018,7 +1193,7 @@ export const FlyToPanel: React.FC = () => {
   }, []);
 
   const clearMissionPlan = React.useCallback(() => {
-    setMissionPlan([]);
+    replaceMissionPlan([]);
     setExpandedEntries({});
     setActionParamDrafts({});
     setActionParamErrors({});
@@ -1043,11 +1218,154 @@ export const FlyToPanel: React.FC = () => {
     }));
   }, []);
 
+  const sanitizePoiTarget = React.useCallback((target: PoiTarget | null): PoiTarget | null => {
+    if (!target) {
+      return null;
+    }
+    const latitude = clampLat(target.latitude);
+    const longitude = clampLon(target.longitude);
+    const altitude = typeof target.altitude === 'number' && Number.isFinite(target.altitude)
+      ? target.altitude
+      : null;
+    return {
+      latitude,
+      longitude,
+      altitude,
+    };
+  }, []);
+
+  const poiTargetsEqual = React.useCallback((a?: PoiTarget | null, b?: PoiTarget | null) => {
+    if (!a && !b) return true;
+    if (!a || !b) return false;
+    const altA = typeof a.altitude === 'number' && Number.isFinite(a.altitude) ? a.altitude : null;
+    const altB = typeof b.altitude === 'number' && Number.isFinite(b.altitude) ? b.altitude : null;
+    return (
+      Math.abs(a.latitude - b.latitude) < 1e-7 &&
+      Math.abs(a.longitude - b.longitude) < 1e-7 &&
+      ((altA === null && altB === null) || (altA !== null && altB !== null && Math.abs(altA - altB) < 1e-3))
+    );
+  }, []);
+
+  const applyOrbitDefaultsToPlan = React.useCallback(
+    (plan: PlannedMissionEntry[], mode: OrbitMode, poi: PoiTarget | null): PlannedMissionEntry[] => {
+      const sanitizedPoi = sanitizePoiTarget(poi);
+      const normalizedMode: OrbitMode = mode ?? 'none';
+      let changed = false;
+
+      const nextPlan = plan.map((entry) => {
+        if (entry.kind !== 'waypoint') {
+          if (entry.orbitAutoHeading) {
+            changed = true;
+            return {
+              ...entry,
+              orbitAutoHeading: undefined,
+            };
+          }
+          return entry;
+        }
+
+        if (normalizedMode === 'drift' && sanitizedPoi) {
+          if (entry.orbitAutoHeading === false) {
+            return entry;
+          }
+
+          const needsHeadingUpdate = entry.heading?.mode !== 'towardPOI'
+            || !poiTargetsEqual(entry.heading?.poi, sanitizedPoi);
+          const needsPoiUpdate = !poiTargetsEqual(entry.poi, sanitizedPoi);
+
+          if (!needsHeadingUpdate && !needsPoiUpdate && entry.orbitAutoHeading === true) {
+            return entry;
+          }
+
+          changed = true;
+          return {
+            ...entry,
+            heading: {
+              ...(entry.heading ?? {}),
+              mode: 'towardPOI',
+              poi: { ...sanitizedPoi },
+            },
+            poi: { ...sanitizedPoi },
+            orbitAutoHeading: true,
+          };
+        }
+
+        if (entry.orbitAutoHeading) {
+          const shouldClearHeading = entry.heading?.mode === 'towardPOI';
+          const shouldClearPoi = !!entry.poi && (!poiTargetsEqual(entry.poi, sanitizedPoi) || sanitizedPoi == null);
+
+          if (!shouldClearHeading && !shouldClearPoi && normalizedMode === 'drift' && sanitizedPoi) {
+            return entry;
+          }
+
+          changed = true;
+          return {
+            ...entry,
+            heading: shouldClearHeading ? null : entry.heading,
+            poi: shouldClearPoi ? null : entry.poi,
+            orbitAutoHeading: normalizedMode === 'drift' && sanitizedPoi ? true : undefined,
+          };
+        }
+
+        if (
+          normalizedMode === 'drift' &&
+          sanitizedPoi &&
+          entry.orbitAutoHeading == null &&
+          entry.heading?.mode === 'towardPOI'
+        ) {
+          changed = true;
+          return {
+            ...entry,
+            heading: {
+              ...entry.heading,
+              mode: 'towardPOI',
+              poi: { ...sanitizedPoi },
+            },
+            poi: { ...sanitizedPoi },
+            orbitAutoHeading: true,
+          };
+        }
+
+        if (
+          normalizedMode !== 'drift' &&
+          entry.orbitAutoHeading == null &&
+          entry.heading?.mode === 'towardPOI' &&
+          (entry.poi || sanitizedPoi == null)
+        ) {
+          changed = true;
+          return {
+            ...entry,
+            heading: null,
+            poi: null,
+            orbitAutoHeading: undefined,
+          };
+        }
+
+        return entry;
+      });
+
+      return changed ? nextPlan : plan;
+    },
+    [poiTargetsEqual, sanitizePoiTarget],
+  );
+
+  const updateMissionPlan = React.useCallback((updater: (prev: PlannedMissionEntry[]) => PlannedMissionEntry[]) => {
+    setMissionPlan((prev) => applyOrbitDefaultsToPlan(updater(prev), orbitModeRef.current, poiTargetRef.current));
+  }, [applyOrbitDefaultsToPlan]);
+
+  const replaceMissionPlan = React.useCallback((nextPlan: PlannedMissionEntry[]) => {
+    setMissionPlan(applyOrbitDefaultsToPlan(nextPlan, orbitModeRef.current, poiTargetRef.current));
+  }, [applyOrbitDefaultsToPlan]);
+
+  React.useEffect(() => {
+    setMissionPlan((prev) => applyOrbitDefaultsToPlan(prev, orbitMode, poiTarget));
+  }, [applyOrbitDefaultsToPlan, orbitMode, poiTarget]);
+
   const updatePlanEntryById = React.useCallback((
     id: string,
     updater: (entry: PlannedMissionEntry) => PlannedMissionEntry,
   ) => {
-    setMissionPlan((prev) => prev.map((entry) => {
+    updateMissionPlan((prev) => prev.map((entry) => {
       if (entry.id !== id) {
         return entry;
       }
@@ -1064,7 +1382,7 @@ export const FlyToPanel: React.FC = () => {
       };
       return updater(base);
     }));
-  }, [cloneActionGroups, setMissionPlan]);
+  }, [cloneActionGroups, updateMissionPlan]);
 
   const updatePlanEntryAltitude = React.useCallback((id: string, altitude: number | null) => {
     updatePlanEntryById(id, (entry) => ({ ...entry, altitude }));
@@ -1105,7 +1423,11 @@ export const FlyToPanel: React.FC = () => {
   const updatePlanEntryHeading = React.useCallback((id: string, heading: WaypointHeadingConfig | null) => {
     updatePlanEntryById(id, (entry) => {
       if (!heading) {
-        return { ...entry, heading: undefined };
+        return {
+          ...entry,
+          heading: undefined,
+          orbitAutoHeading: entry.orbitAutoHeading ? undefined : entry.orbitAutoHeading,
+        };
       }
       const normalized: WaypointHeadingConfig = {
         ...heading,
@@ -1121,9 +1443,17 @@ export const FlyToPanel: React.FC = () => {
         normalized.yawBase,
       );
       if (!hasValue) {
-        return { ...entry, heading: undefined };
+        return {
+          ...entry,
+          heading: undefined,
+          orbitAutoHeading: entry.orbitAutoHeading ? undefined : entry.orbitAutoHeading,
+        };
       }
-      return { ...entry, heading: normalized };
+      return {
+        ...entry,
+        heading: normalized,
+        orbitAutoHeading: false,
+      };
     });
   }, [updatePlanEntryById]);
 
@@ -1148,15 +1478,27 @@ export const FlyToPanel: React.FC = () => {
   const updatePlanEntryPoi = React.useCallback((id: string, poi: PoiTarget | null) => {
     updatePlanEntryById(id, (entry) => {
       if (!poi) {
-        return { ...entry, poi: undefined };
+        return {
+          ...entry,
+          poi: undefined,
+          orbitAutoHeading: entry.orbitAutoHeading ? undefined : entry.orbitAutoHeading,
+        };
       }
       if (
         !Number.isFinite(poi.latitude) ||
         !Number.isFinite(poi.longitude)
       ) {
-        return { ...entry, poi: undefined };
+        return {
+          ...entry,
+          poi: undefined,
+          orbitAutoHeading: entry.orbitAutoHeading ? undefined : entry.orbitAutoHeading,
+        };
       }
-      return { ...entry, poi: { ...poi } };
+      return {
+        ...entry,
+        poi: { ...poi },
+        orbitAutoHeading: false,
+      };
     });
   }, [updatePlanEntryById]);
 
@@ -1332,56 +1674,27 @@ export const FlyToPanel: React.FC = () => {
       }
       const clampedLat = clampLat(latitude);
       const clampedLon = clampLon(longitude);
+      const defaultAltitudeForWaypoint = computeDefaultTargetAltitude();
+      const altitudeFallback = typeof manualTarget.altitude === 'number'
+        ? manualTarget.altitude
+        : telemetry?.location?.altitude ?? null;
       const altitudeCandidate = typeof request.altitude === 'number'
         ? request.altitude
-        : (typeof manualTarget.altitude === 'number'
-            ? manualTarget.altitude
-            : computeDefaultTargetAltitude());
+        : (defaultAltitudeForWaypoint ?? altitudeFallback ?? 0);
 
       if (request.kind === 'orbit') {
-        const radius = request.radius ?? orbitRadius;
-        const turns = request.turns ?? orbitTurns;
-        const entry: PlannedMissionEntry = {
-          id: `orbit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          kind: 'orbit',
+        missionPlannerStore.setPoiTarget({
           latitude: clampedLat,
           longitude: clampedLon,
           altitude: altitudeCandidate,
-          radius,
-          turns,
-        };
-        if (request.turn) {
-          entry.turn = { ...request.turn };
-        }
-        if (request.heading) {
-          entry.heading = { ...request.heading };
-        }
-        if (request.gimbalHeading) {
-          entry.gimbalHeading = { ...request.gimbalHeading };
-        }
-        if (request.poi) {
-          entry.poi = { ...request.poi };
-        }
-        if (request.gimbalStrategy) {
-          entry.gimbalStrategy = request.gimbalStrategy;
-        }
-        if (request.actionGroups) {
-          entry.actionGroups = request.actionGroups.map((group) => ({
-            ...group,
-            actions: group.actions.map((action) => ({
-              ...action,
-              params: action.params ? { ...action.params } : undefined,
-            })),
-          }));
-        }
-        if (request.altitudeReference) {
-          entry.altitudeReference = request.altitudeReference;
-        }
-        setMissionPlan((prev) => [...prev, entry]);
-        appendLog('Plan orbit added (map)', entry, 'manual');
-        setStatusMessage(
-          `Orbit added from map (radius ${radius} m, ${turns} turn${turns === 1 ? '' : 's'})`,
-        );
+        });
+        appendLog('POI target updated (map)', {
+          latitude: clampedLat,
+          longitude: clampedLon,
+          altitude: altitudeCandidate,
+          source: request.source ?? 'map',
+        }, 'manual');
+        setStatusMessage(`POI set from map ${clampedLat.toFixed(6)}, ${clampedLon.toFixed(6)}`);
         if (manualTarget.latitude == null || manualTarget.longitude == null) {
           stageManualTarget(
             {
@@ -1431,7 +1744,7 @@ export const FlyToPanel: React.FC = () => {
       if (request.altitudeReference) {
         entry.altitudeReference = request.altitudeReference;
       }
-      setMissionPlan((prev) => [...prev, entry]);
+      updateMissionPlan((prev) => [...prev, entry]);
       appendLog('Plan waypoint added (map)', entry, 'manual');
       setStatusMessage('Waypoint added from map.');
       if (manualTarget.latitude == null || manualTarget.longitude == null) {
@@ -1477,8 +1790,6 @@ export const FlyToPanel: React.FC = () => {
   }, [
     appendLog,
     manualTarget.altitude,
-    orbitRadius,
-    orbitTurns,
     stageManualTarget,
     computeDefaultTargetAltitude,
     telemetry?.altitude,
@@ -1862,7 +2173,7 @@ export const FlyToPanel: React.FC = () => {
         });
         setSimPreview(null);
         setExpandedEntries(expandedMap);
-        setMissionPlan(planWithIds);
+        replaceMissionPlan(planWithIds);
         setStatusMessage(`Loaded KMZ into mission plan (${planWithIds.length} entries). Review and simulate before execution.`);
         return;
       }
@@ -1989,7 +2300,7 @@ export const FlyToPanel: React.FC = () => {
       setExpandedEntries(expandedMap);
 
       setSimPreview(null);
-      setMissionPlan(augmentedPlan);
+      replaceMissionPlan(augmentedPlan);
       setStatusMessage(`Loaded KMZ into mission plan (${augmentedPlan.length} entries). Review and simulate before execution.`);
     } catch (error) {
       console.error('KMZ load failed', error);
@@ -2207,9 +2518,11 @@ export const FlyToPanel: React.FC = () => {
       exported_at: new Date().toISOString(),
       finish_action: finishAction,
       path_mode: flightPathMode,
+      orbit_mode: orbitMode,
       max_speed: globalSpeed,
       security_takeoff_height: securityHeight,
       takeoff_altitude_asl: baseAltitude,
+      poi_target: sanitizePoiTarget(poiTarget),
       plan: metadataPlan,
     };
 
@@ -3091,6 +3404,7 @@ ${wpmlWaypoints}
       mode: flyToMode,
       security_takeoff_height: securityTakeoffHeight,
       path_mode: flightPathMode,
+      orbit_mode: orbitMode,
       reason: 'mission_plan',
       target_location: {
         latitude: finalTarget.latitude,
@@ -3098,6 +3412,11 @@ ${wpmlWaypoints}
         altitude: targetAltitudeAsl ?? null,
       },
     };
+
+    const sanitizedPoiForCommand = sanitizePoiTarget(poiTarget);
+    if (sanitizedPoiForCommand) {
+      commandPayload.poi_target = sanitizedPoiForCommand;
+    }
 
     if (requestSource) {
       commandPayload.trigger_source = requestSource;
@@ -3263,6 +3582,19 @@ ${wpmlWaypoints}
               </select>
             </label>
             <label className="flex flex-col gap-1 text-[11px]">
+              <span>Orbit / POI Mode</span>
+              <select
+                value={orbitMode}
+                onChange={(event) => handleOrbitModeChange(event.target.value as OrbitMode)}
+                className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200"
+              >
+                <option value="none">None (heading follows wayline)</option>
+                <option value="drift">Drift (aircraft faces POI)</option>
+                <option value="gimbal">Gimbal LookAt POI (aircraft assists)</option>
+                <option value="gimbal_free">Gimbal LookAt POI (gimbal only)</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-[11px]">
               <span>Default Target Height (m AGL)</span>
               <input
                 type="number"
@@ -3279,13 +3611,73 @@ ${wpmlWaypoints}
                 }}
                 className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-right"
               />
-              {heightRange && (
-                <span className="text-[10px] text-gray-500">
-                  Capability range {heightRange.min ?? '—'} – {heightRange.max ?? '—'} m
-                </span>
-              )}
-            </label>
+          {heightRange && (
+            <span className="text-[10px] text-gray-500">
+              Capability range {heightRange.min ?? '—'} – {heightRange.max ?? '—'} m
+            </span>
+          )}
+        </label>
+      </div>
+      <div className="flex flex-col gap-2 border-t border-gray-700/60 pt-2 mt-1">
+        <div className="flex items-center justify-between">
+          <div className="flex flex-col">
+            <span className="text-gray-400 text-[11px] uppercase">POI Target</span>
+            <span className="font-mono text-[11px] text-gray-200">
+              {poiTarget
+                ? `${formatLatLon(poiTarget.latitude)}, ${formatLatLon(poiTarget.longitude)}`
+                : 'None'}
+            </span>
+            {poiTarget?.altitude != null && Number.isFinite(poiTarget.altitude) && (
+              <span className="text-[10px] text-gray-500">
+                Alt {poiTarget.altitude.toFixed(1)} m
+              </span>
+            )}
+            {orbitMode !== 'none' && !poiTarget && (
+              <span className="text-[10px] text-yellow-400">POI required for current orbit mode.</span>
+            )}
           </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className={`px-2 py-1 rounded border ${canAssignPoi ? 'border-gray-600 text-gray-200 hover:bg-gray-800' : 'border-gray-800 text-gray-600 cursor-not-allowed'}`}
+              disabled={!canAssignPoi}
+              onClick={handleSetPoiFromTarget}
+            >
+              Use target
+            </button>
+            <button
+              type="button"
+              className={`px-2 py-1 rounded border ${poiTarget ? 'border-gray-600 text-gray-200 hover:bg-gray-800' : 'border-gray-800 text-gray-600 cursor-not-allowed'}`}
+              disabled={!poiTarget}
+              onClick={handleClearPoiTarget}
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+        {targetSelection && derivedTarget && (
+          <div className="mt-2 rounded border border-purple-700/40 bg-purple-900/15 px-2 py-2 text-[10px] text-purple-100">
+            <div className="flex items-center justify-between">
+              <div className="font-semibold text-purple-200">
+                {targetSelection.clusterLabel ?? targetSelection.clusterId ?? 'Object Memory'}
+              </div>
+              <button
+                type="button"
+                onClick={handleSetPoiFromObjectMemory}
+                className="px-2 py-1 rounded border border-purple-500/60 bg-purple-500/15 text-purple-100 hover:bg-purple-500/25"
+              >
+                Use object memory
+              </button>
+            </div>
+            <div className="mt-1 font-mono text-purple-200">
+              {formatLatLon(derivedTarget.latitude)}, {formatLatLon(derivedTarget.longitude)}
+            </div>
+            <div className="mt-0.5 text-purple-300">
+              Alt {derivedTarget.altitude != null ? derivedTarget.altitude.toFixed(1) : '—'} m
+            </div>
+          </div>
+        )}
+      </div>
           <div className="text-[10px] text-gray-500 mb-3">
             Default AMSL target: {defaultTargetAltitudePreview != null ? defaultTargetAltitudePreview.toFixed(1) : '—'} m
           </div>
@@ -3622,42 +4014,29 @@ ${wpmlWaypoints}
                 Add Origin (W1)
               </button>
             </div>
-            <div className="flex flex-wrap items-center gap-1 text-[10px] text-gray-300">
-              <label className="flex items-center gap-1">
-                Radius (m)
-                <input
-                  type="number"
-                  value={orbitRadius}
-                  min={5}
-                  max={500}
-                  onChange={(event) => setOrbitRadius(Number(event.target.value) || 0)}
-                  className="w-16 bg-black/40 border border-gray-700/70 rounded px-1 py-0.5 text-right"
-                />
-              </label>
-              <label className="flex items-center gap-1">
-                Turns
-                <input
-                  type="number"
-                  value={orbitTurns}
-                  min={1}
-                  max={10}
-                  onChange={(event) => setOrbitTurns(Number(event.target.value) || 1)}
-                  className="w-12 bg-black/40 border border-gray-700/70 rounded px-1 py-0.5 text-right"
-                />
-              </label>
+            <div className="flex flex-wrap items-center gap-2 text-[10px] text-gray-300">
+              <span className="text-gray-400 uppercase">POI Tools</span>
               <button
                 type="button"
-                className="ml-auto rounded border border-purple-500/60 bg-purple-500/15 text-purple-200 px-2 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="rounded border border-purple-500/60 bg-purple-500/15 text-purple-200 px-2 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
                 onClick={addOrbitToPlan}
-                disabled={!activeTarget || activeTarget.latitude == null || activeTarget.longitude == null}
+                disabled={!canAssignPoi}
               >
-                Add Orbit
+                Use staged target
+              </button>
+              <button
+                type="button"
+                className="rounded border border-gray-600 bg-black/30 text-gray-200 px-2 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                onClick={handleClearPoiTarget}
+                disabled={!poiTarget}
+              >
+                Clear POI
               </button>
             </div>
           </div>
           {missionPlan.length === 0 ? (
             <div className="text-[10px] text-gray-500">
-              No mission plan entries. Stage a target and use the buttons above to build a multi-point mission or orbit.
+              No mission plan entries. Stage a target and use the buttons above to build a multi-point mission or assign a POI.
             </div>
           ) : (
             <div className="space-y-1.5 max-h-32 overflow-y-auto text-[10px] text-gray-300">

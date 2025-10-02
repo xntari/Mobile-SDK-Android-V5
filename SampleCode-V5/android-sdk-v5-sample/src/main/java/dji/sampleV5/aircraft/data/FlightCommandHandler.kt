@@ -978,6 +978,16 @@ class FlightCommandHandler(
             else -> null
         }
 
+        val orbitModeRaw = params.optString("orbit_mode", "none").lowercase(Locale.ROOT)
+        val orbitMode = when (orbitModeRaw) {
+            "drift" -> WaypointMissionExecutor.OrbitMode.DRIFT
+            "gimbal" -> WaypointMissionExecutor.OrbitMode.GIMBAL
+            "gimbal_free" -> WaypointMissionExecutor.OrbitMode.GIMBAL_FREE
+            else -> WaypointMissionExecutor.OrbitMode.NONE
+        }
+
+        val poiTarget = params.optJSONObject("poi_target")?.let { parsePoiTarget(it) }
+
         val baseExtra = buildFlyToExtra(
             targetLocation = targetLocation,
             targetAltitude = targetAltitudeAsl,
@@ -1005,6 +1015,17 @@ class FlightCommandHandler(
             if (pathMode != null) {
                 put("path_mode", pathMode.name.lowercase(Locale.ROOT))
             }
+            put("orbit_mode", orbitMode.name.lowercase(Locale.ROOT))
+            poiTarget?.let { target ->
+                put(
+                    "poi_target",
+                    mapOf(
+                        "latitude" to target.latitude,
+                        "longitude" to target.longitude,
+                        "altitude" to target.altitude
+                    )
+                )
+            }
         }
 
         val missionOverrides = params.optJSONObject("mission_config")?.let { parseMissionOverrides(it) }
@@ -1020,7 +1041,9 @@ class FlightCommandHandler(
             plan = planPoints,
             finishAction = finishAction,
             pathMode = pathMode,
-            missionOverrides = missionOverrides
+            missionOverrides = missionOverrides,
+            orbitMode = orbitMode,
+            poiTarget = poiTarget
         )
 
         attemptWaypointFallback(

@@ -98,7 +98,9 @@ export function requestLiveViewLocation(params: {
   return api.sendBridgeCommand(command);
 }
 
-export type LookAtMode = 'FREE' | 'FOLLOWING' | 'ZOOM_CIRCLE';
+export type LookAtMode = 'GIMBAL_FREE' | 'GIMBAL_FOLLOWING' | 'ZOOM_CIRCLE';
+
+export type LookAtAltitudeReference = 'egm96' | 'wgs84';
 
 export type GimbalLookAtMessage = {
   type: 'gimbal_look_at';
@@ -117,6 +119,7 @@ export function gimbalLookAt(params: {
   longitude: number;
   altitude: number;
   mode: LookAtMode;
+  altitudeReference?: LookAtAltitudeReference;
 }): Promise<any> | undefined {
   if (typeof window === 'undefined') return undefined;
   const api = (window as any).electronAPI;
@@ -129,6 +132,7 @@ export function gimbalLookAt(params: {
       longitude: params.longitude,
       altitude: params.altitude,
       mode: params.mode,
+      altitude_reference: params.altitudeReference ?? 'egm96',
     },
   };
 

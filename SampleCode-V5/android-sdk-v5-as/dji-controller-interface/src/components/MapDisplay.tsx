@@ -10,6 +10,7 @@ import type {
   PlannedMissionEntry,
   ManualTargetState,
   MissionWaypointTarget,
+  PoiTarget,
 } from '../types/missionPlanner';
 
 const clampLat = (value: number) => Math.max(-90, Math.min(90, value));
@@ -54,6 +55,13 @@ const ORBIT_COLORS = {
   background: '#fed7aa',
   border: '#ea580c',
   shadow: '0 0 4px rgba(234, 88, 12, 0.4)',
+};
+
+const POI_COLORS = {
+  text: '#4c1d95',
+  background: '#ede9fe',
+  border: '#7c3aed',
+  shadow: '0 0 6px rgba(124, 58, 237, 0.45)',
 };
 
 const WAYPOINT_COLORS = {
@@ -106,6 +114,24 @@ const createPlanMarkerElement = (label: string, kind?: string, highlight = false
   return element;
 };
 
+const createPoiMarkerElement = () => {
+  const element = document.createElement('div');
+  element.style.width = '20px';
+  element.style.height = '20px';
+  element.style.borderRadius = '50%';
+  element.style.border = `2px solid ${POI_COLORS.border}`;
+  element.style.backgroundColor = POI_COLORS.background;
+  element.style.boxShadow = POI_COLORS.shadow;
+  element.style.display = 'flex';
+  element.style.alignItems = 'center';
+  element.style.justifyContent = 'center';
+  element.style.fontSize = '9px';
+  element.style.fontWeight = '700';
+  element.style.color = POI_COLORS.text;
+  element.textContent = 'POI';
+  return element;
+};
+
 const MapDisplayComponent: React.FC<MapDisplayProps> = ({
   flightPath = [],
   telemetryData: telemetryDataProp = null,
@@ -117,6 +143,7 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
   const targetMarkerRef = useRef<maplibregl.Marker | null>(null);
   const manualTargetMarkerRef = useRef<maplibregl.Marker | null>(null);
   const activeWaypointMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const poiMarkerRef = useRef<maplibregl.Marker | null>(null);
   const planMarkerRefs = useRef<Map<string, maplibregl.Marker>>(new Map());
   const animationFrameRef = useRef<number | null>(null);
   const telemetryStateRef = useRef<MapTelemetryUpdate | null>(null);
@@ -133,6 +160,7 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
   const [missionPlan, setMissionPlan] = useState<PlannedMissionEntry[]>(() => missionPlannerStore.getSnapshot().plan);
   const [manualTarget, setManualTarget] = useState<ManualTargetState | null>(() => missionPlannerStore.getSnapshot().manualTarget);
   const [activeWaypoint, setActiveWaypoint] = useState<MissionWaypointTarget | null>(() => missionPlannerStore.getSnapshot().activeWaypoint ?? null);
+  const [poiTarget, setPoiTarget] = useState<PoiTarget | null>(() => missionPlannerStore.getSnapshot().poiTarget ?? null);
 
   const [autoCenter, setAutoCenter] = useState(() => {
     try {
@@ -153,6 +181,7 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
   useEffect(() => missionPlannerStore.subscribePlan(setMissionPlan), []);
   useEffect(() => missionPlannerStore.subscribeManualTarget(setManualTarget), []);
   useEffect(() => missionPlannerStore.subscribeActiveWaypoint(setActiveWaypoint), []);
+  useEffect(() => missionPlannerStore.subscribePoiTarget(setPoiTarget), []);
 
   const targetMetrics = React.useMemo(
     () => computeTargetMetrics(telemetryData, objectTarget?.anchor, objectTarget?.clusterLabel ?? objectTarget?.clusterId),
@@ -337,6 +366,10 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
       lastArrowRotationRef.current = null;
       homeMarkerRef.current = null;
       targetMarkerRef.current = null;
+      if (poiMarkerRef.current) {
+        poiMarkerRef.current.remove();
+        poiMarkerRef.current = null;
+      }
     };
   }, []);
 
@@ -368,12 +401,30 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
       }
 
       if (wantsOrbit) {
-        missionPlannerStore.requestAddWaypoint({
+        const altitudeCandidate =
+          typeof manualTarget?.altitude === 'number'
+            ? manualTarget.altitude
+            : typeof telemetryData?.location?.altitude === 'number'
+              ? telemetryData.location.altitude
+              : typeof telemetryData?.altitude === 'number'
+                ? telemetryData.altitude
+                : null;
+
+        missionPlannerStore.setPoiTarget({
           latitude: clampedLat,
           longitude: clampedLon,
-          kind: 'orbit',
-          source: 'map',
+          altitude: altitudeCandidate,
         });
+
+        if (manualTarget?.latitude == null || manualTarget?.longitude == null) {
+          missionPlannerStore.requestStageTarget({
+            latitude: clampedLat,
+            longitude: clampedLon,
+            altitude: altitudeCandidate ?? undefined,
+            source: 'map',
+          });
+        }
+
         return;
       }
 
@@ -392,7 +443,14 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
     return () => {
       map.off('click', handleClick);
     };
-  }, [mapReady]);
+  }, [
+    mapReady,
+    manualTarget?.latitude,
+    manualTarget?.longitude,
+    manualTarget?.altitude,
+    telemetryData?.location?.altitude,
+    telemetryData?.altitude,
+  ]);
 
   const applyTelemetryUpdate = useCallback(() => {
     animationFrameRef.current = null;
@@ -623,6 +681,37 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
       planMarkerRefs.current.clear();
     };
   }, [mapReady, displayedPlan]);
+
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) {
+      if (poiMarkerRef.current) {
+        poiMarkerRef.current.remove();
+        poiMarkerRef.current = null;
+      }
+      return;
+    }
+
+    const map = mapRef.current;
+    if (!poiTarget || !Number.isFinite(poiTarget.latitude) || !Number.isFinite(poiTarget.longitude)) {
+      if (poiMarkerRef.current) {
+        poiMarkerRef.current.remove();
+        poiMarkerRef.current = null;
+      }
+      return;
+    }
+
+    const clampedLat = clampLat(poiTarget.latitude);
+    const clampedLon = clampLon(poiTarget.longitude);
+
+    if (!poiMarkerRef.current) {
+      const element = createPoiMarkerElement();
+      poiMarkerRef.current = new maplibregl.Marker({ element })
+        .setLngLat([clampedLon, clampedLat])
+        .addTo(map);
+    } else {
+      poiMarkerRef.current.setLngLat([clampedLon, clampedLat]);
+    }
+  }, [mapReady, poiTarget]);
 
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;

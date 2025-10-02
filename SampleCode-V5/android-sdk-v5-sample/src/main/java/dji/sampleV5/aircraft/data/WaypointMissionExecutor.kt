@@ -6,17 +6,24 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import dji.sdk.keyvalue.key.FlightControllerKey
+import dji.sdk.keyvalue.key.GimbalKey
 import dji.sdk.keyvalue.key.KeyTools
 import dji.sdk.keyvalue.key.ProductKey
 import dji.sdk.keyvalue.key.RtkMobileStationKey
 import dji.sdk.keyvalue.value.common.LocationCoordinate2D
 import dji.sdk.keyvalue.value.common.LocationCoordinate3D
+import dji.sdk.keyvalue.value.common.ComponentIndexType
 import dji.sdk.keyvalue.value.flightcontroller.FlyToMode
+import dji.sdk.keyvalue.value.flightcontroller.LookAtInfo
+import dji.sdk.keyvalue.value.flightcontroller.LookAtMode
+import dji.sdk.keyvalue.value.gimbal.GimbalMode
 import dji.sdk.keyvalue.value.product.ProductType
 import dji.sdk.keyvalue.value.rtkmobilestation.RTKTakeoffAltitudeInfo
 import dji.v5.common.callback.CommonCallbacks
 import dji.v5.common.error.IDJIError
 import dji.v5.common.utils.GpsUtils
+import dji.v5.et.action
+import dji.v5.et.create
 import dji.v5.manager.KeyManager
 import dji.v5.manager.aircraft.waypoint3.WaylineExecutingInfoListener
 import dji.v5.manager.aircraft.waypoint3.WaypointMissionExecuteStateListener
@@ -89,6 +96,13 @@ class WaypointMissionExecutor(
         CURVED
     }
 
+    enum class OrbitMode {
+        NONE,
+        DRIFT,
+        GIMBAL,
+        GIMBAL_FREE
+    }
+
     data class Request(
         val targetLocation: LocationCoordinate3D,
         val targetAltitudeAsl: Double?,
@@ -100,7 +114,9 @@ class WaypointMissionExecutor(
         val plan: List<PlanPoint> = emptyList(),
         val finishAction: WaylineFinishedAction = WaylineFinishedAction.NO_ACTION,
         val pathMode: PathMode? = null,
-        val missionOverrides: MissionConfigOverrides? = null
+        val missionOverrides: MissionConfigOverrides? = null,
+        val orbitMode: OrbitMode = OrbitMode.NONE,
+        val poiTarget: PoiTarget? = null
     )
 
     data class MissionConfigOverrides(
@@ -191,6 +207,12 @@ class WaypointMissionExecutor(
         val gimbalStrategy: String? = null
     )
 
+    private data class OrbitLookAtState(
+        val mode: LookAtMode,
+        val target: PoiTarget,
+        val altitude: Double
+    )
+
     private fun resolveDefaultTurnMode(pathMode: PathMode?, index: Int, total: Int): String? {
         if (pathMode != PathMode.CURVED) return null
         if (total <= 1) return WPML_TURN_MODE_STOP_WITH_DISCONTINUITY
@@ -249,6 +271,100 @@ class WaypointMissionExecutor(
                     // TODO: Support additional gimbal strategies (gimbal-track-poi, discrete updates)
                 }
             }
+        }
+    }
+
+    private fun applyOrbitDriftHeading(plan: MutableList<PlanPointResolved>, poi: PoiTarget) {
+        plan.forEachIndexed { index, point ->
+            val needsHeading = point.heading == null || point.heading.mode.isNullOrBlank() || point.heading.mode.equals("followWayline", ignoreCase = true)
+            val updatedHeading = if (needsHeading) {
+                HeadingConfig(mode = "towardPOI", poi = poi)
+            } else {
+                point.heading
+            }
+            val updatedPoi = point.poi ?: poi
+            plan[index] = point.copy(
+                heading = updatedHeading,
+                poi = updatedPoi
+            )
+        }
+    }
+
+    private fun startGimbalLookAt(target: PoiTarget, takeoffAsl: Double?, lookAtMode: LookAtMode) {
+        if (runCatching { KeyManager.getInstance() }.getOrNull() == null) {
+            Log.w(TAG, "KeyManager unavailable; unable to start LookAt")
+            return
+        }
+        val altitudeMsl = target.altitude ?: takeoffAsl ?: 0.0
+        val altitudeWgs84 = if (!target.latitude.isNaN() && !target.latitude.isInfinite() &&
+            !target.longitude.isNaN() && !target.longitude.isInfinite()) {
+            GeoidModel.mslToEllipsoid(altitudeMsl, target.latitude, target.longitude)
+        } else {
+            altitudeMsl
+        }
+        val current = activeLookAtState.get()
+        if (current != null &&
+            current.target.latitude == target.latitude &&
+            current.target.longitude == target.longitude &&
+            abs(current.altitude - altitudeWgs84) < 0.01 &&
+            current.mode == lookAtMode
+        ) {
+            return
+        }
+
+        ensureGimbalAttitudeMode(GimbalMode.FREE)
+
+        val lookAtInfo = LookAtInfo().apply {
+            location = LocationCoordinate3D(target.latitude, target.longitude, altitudeWgs84)
+            mode = lookAtMode
+        }
+
+        val lookAtKey = FlightControllerKey.KeyLookAt.create()
+        lookAtKey.action(lookAtInfo, {
+            Log.i(TAG, "LookAt ${lookAtMode.name.lowercase(Locale.ROOT)} started for ${target.latitude},${target.longitude} (alt_wgs84=$altitudeWgs84, alt_msl=$altitudeMsl)")
+            activeLookAtState.set(OrbitLookAtState(lookAtInfo.mode, target, altitudeWgs84))
+        }, { error ->
+            Log.w(TAG, "Failed to start LookAt ${lookAtMode.name}: ${error.description()}")
+            activeLookAtState.set(null)
+        })
+    }
+
+    private fun stopGimbalLookAt() {
+        val state = activeLookAtState.getAndSet(null) ?: return
+        if (runCatching { KeyManager.getInstance() }.getOrNull() == null) {
+            Log.w(TAG, "KeyManager unavailable; unable to reset LookAt")
+            return
+        }
+        val lookAtInfo = LookAtInfo().apply {
+            location = LocationCoordinate3D(state.target.latitude, state.target.longitude, state.altitude)
+            mode = LookAtMode.LOOK_AT_GIMBAL_FREE
+        }
+        val lookAtKey = FlightControllerKey.KeyLookAt.create()
+        lookAtKey.action(lookAtInfo, {
+            Log.i(TAG, "LookAt reset to GIMBAL_FREE")
+        }, { error ->
+            Log.w(TAG, "Failed to reset LookAt: ${error.description()}")
+        })
+    }
+
+    private fun ensureGimbalAttitudeMode(
+        desiredMode: GimbalMode,
+        component: ComponentIndexType = ComponentIndexType.LEFT_OR_MAIN
+    ) {
+        val keyManager = runCatching { KeyManager.getInstance() }.getOrNull() ?: return
+        runCatching {
+            val key = KeyTools.createKey(GimbalKey.KeyGimbalMode, component)
+            keyManager.setValue(key, desiredMode, object : CommonCallbacks.CompletionCallback {
+                override fun onSuccess() {
+                    Log.i(TAG, "Gimbal mode set to ${desiredMode.name} for ${component.name}")
+                }
+
+                override fun onFailure(error: IDJIError) {
+                    Log.w(TAG, "Failed to set gimbal mode to ${desiredMode.name}: ${error.description()}")
+                }
+            })
+        }.onFailure {
+            Log.w(TAG, "ensureGimbalAttitudeMode error: ${it.message}", it)
         }
     }
 
@@ -406,6 +522,7 @@ class WaypointMissionExecutor(
     private val activeMissionSecurityHeight = AtomicReference<Double?>(null)
     private val uploadInProgress = AtomicBoolean(false)
     private val startWatcherRef = AtomicReference<MissionStartWatcher?>(null)
+    private val activeLookAtState = AtomicReference<OrbitLookAtState?>(null)
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
     fun execute(request: Request, callback: (Result) -> Unit) {
@@ -534,6 +651,65 @@ class WaypointMissionExecutor(
             applyGimbalStrategies(planResolved, takeoffAsl)
         }
 
+        when (request.orbitMode) {
+            OrbitMode.DRIFT -> {
+                val poiTarget = request.poiTarget
+                if (poiTarget != null) {
+                    applyOrbitDriftHeading(planResolved, poiTarget)
+                } else {
+                    Log.w(TAG, "Orbit drift mode requested without poi_target; headings unchanged")
+                }
+                stopGimbalLookAt()
+            }
+            OrbitMode.GIMBAL -> {
+                val poiTarget = request.poiTarget
+                if (poiTarget != null) {
+                    startGimbalLookAt(poiTarget, takeoffAsl, LookAtMode.LOOK_AT_GIMBAL_FOLLOWING)
+                    planResolved.forEachIndexed { index, point ->
+                        val headingPoi = point.heading?.poi
+                        if (
+                            point.heading?.mode.equals("towardPOI", ignoreCase = true) &&
+                            headingPoi != null &&
+                            abs(headingPoi.latitude - poiTarget.latitude) < 1e-7 &&
+                            abs(headingPoi.longitude - poiTarget.longitude) < 1e-7
+                        ) {
+                            planResolved[index] = point.copy(
+                                heading = point.heading.copy(mode = "followWayline", poi = null)
+                            )
+                        }
+                    }
+                } else {
+                    Log.w(TAG, "Orbit gimbal mode requested without poi_target; LookAt not started")
+                    stopGimbalLookAt()
+                }
+            }
+            OrbitMode.GIMBAL_FREE -> {
+                val poiTarget = request.poiTarget
+                if (poiTarget != null) {
+                    startGimbalLookAt(poiTarget, takeoffAsl, LookAtMode.LOOK_AT_GIMBAL_FREE)
+                    planResolved.forEachIndexed { index, point ->
+                        val headingPoi = point.heading?.poi
+                        if (
+                            point.heading?.mode.equals("towardPOI", ignoreCase = true) &&
+                            headingPoi != null &&
+                            abs(headingPoi.latitude - poiTarget.latitude) < 1e-7 &&
+                            abs(headingPoi.longitude - poiTarget.longitude) < 1e-7
+                        ) {
+                            planResolved[index] = point.copy(
+                                heading = point.heading.copy(mode = "followWayline", poi = null)
+                            )
+                        }
+                    }
+                } else {
+                    Log.w(TAG, "Orbit gimbal_free mode requested without poi_target; LookAt not started")
+                    stopGimbalLookAt()
+                }
+            }
+            OrbitMode.NONE -> {
+                stopGimbalLookAt()
+            }
+        }
+
         val targetRelativeHeight = computeTargetHeight(
             request = request,
             takeoffAsl = takeoffAsl,
@@ -557,6 +733,19 @@ class WaypointMissionExecutor(
                     "altitude_asl" to waypoint.altitudeAsl
                 )
             }
+        }
+        takeoffDebug["orbit_mode"] = request.orbitMode.name.lowercase(Locale.ROOT)
+        request.poiTarget?.let { poi ->
+            takeoffDebug["poi_target"] = mapOf(
+                "latitude" to poi.latitude,
+                "longitude" to poi.longitude,
+                "altitude" to poi.altitude
+            )
+        }
+        takeoffDebug["look_at_request"] = when (request.orbitMode) {
+            OrbitMode.GIMBAL -> "gimbal_following"
+            OrbitMode.GIMBAL_FREE -> "gimbal_free"
+            else -> "none"
         }
 
         val horizontalDistance: Double? = if (planResolved.isNotEmpty()) {
@@ -641,6 +830,7 @@ class WaypointMissionExecutor(
     }
 
     fun executeExternalKmz(fileName: String, kmzData: ByteArray, callback: (Result) -> Unit) {
+        stopGimbalLookAt()
         val context = contextProvider.invoke()
         if (context == null) {
             callback(Result.Failure("Waypoint fallback unavailable (no context)", extra = mapOf("backend" to BACKEND_ID)))
@@ -1529,6 +1719,7 @@ class WaypointMissionExecutor(
     }
 
     fun clearActiveMission() {
+        stopGimbalLookAt()
         activeMissionId.set(null)
         activeMissionPath.set(null)
         activeMissionWaypoints.set(emptyList())

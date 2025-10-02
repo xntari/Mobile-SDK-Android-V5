@@ -9,11 +9,19 @@ interface OrientationCompassProps {
     bearing: number;
     distance: number;
     altitudeDelta: number | null;
+    pitch?: number | null;
   };
   mission?: {
     bearing: number;
     distance?: number;
     altitudeDelta?: number | null;
+    pitch?: number | null;
+  };
+  poi?: {
+    bearing: number;
+    distance?: number;
+    altitudeDelta?: number | null;
+    pitch?: number | null;
   };
   homeBearing?: number;
 }
@@ -24,6 +32,7 @@ export const OrientationCompass: React.FC<OrientationCompassProps> = ({
   className = '',
   target,
   mission,
+  poi,
   homeBearing,
 }) => {
   const centerX = size / 2;
@@ -257,6 +266,45 @@ export const OrientationCompass: React.FC<OrientationCompassProps> = ({
     );
   }, [mission, compassHeading, centerX, centerY, radius]);
 
+  const poiElements = React.useMemo(() => {
+    if (!poi) return null;
+    const relativeAngle = (poi.bearing - compassHeading + 360) % 360;
+    const rad = ((relativeAngle - 90) * Math.PI) / 180;
+    const markerRadius = radius * 0.82;
+    const markerX = centerX + Math.cos(rad) * markerRadius;
+    const markerY = centerY + Math.sin(rad) * markerRadius;
+    const trailRadius = radius * 0.55;
+    const trailX = centerX + Math.cos(rad) * trailRadius;
+    const trailY = centerY + Math.sin(rad) * trailRadius;
+
+    return (
+      <g>
+        <line
+          x1={trailX}
+          y1={trailY}
+          x2={markerX}
+          y2={markerY}
+          stroke="#c084fc"
+          strokeWidth={2}
+          strokeDasharray="2,2"
+        />
+        <circle cx={markerX} cy={markerY} r={6} fill="#a855f7" stroke="#c084fc" strokeWidth={2} />
+        {poi.pitch != null && Number.isFinite(poi.pitch) && (
+          <text
+            x={markerX}
+            y={markerY - 12}
+            fill="#e9d5ff"
+            fontSize="10"
+            fontWeight="600"
+            textAnchor="middle"
+          >
+            {poi.pitch.toFixed(0)}°
+          </text>
+        )}
+      </g>
+    );
+  }, [poi, compassHeading, centerX, centerY, radius]);
+
   const homeElements = React.useMemo(() => {
     if (typeof homeBearing !== 'number' || Number.isNaN(homeBearing)) return null;
     const relativeAngle = (homeBearing - compassHeading + 360) % 360;
@@ -334,6 +382,7 @@ export const OrientationCompass: React.FC<OrientationCompassProps> = ({
       {/* Home / mission / target indicators */}
       {homeElements}
       {missionElements}
+      {poiElements}
       {targetElements}
 
       {/* Gimbal direction arrow */}

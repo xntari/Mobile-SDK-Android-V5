@@ -1,5 +1,7 @@
 export type MissionEntryKind = 'waypoint' | 'orbit' | 'return_home' | 'land';
 
+export type OrbitMode = 'none' | 'drift' | 'gimbal' | 'gimbal_free';
+
 export type WaypointTurnMode =
   | 'toPointAndPassWithContinuityCurvature'
   | 'toPointAndStopWithContinuityCurvature'
@@ -93,6 +95,7 @@ export interface PlannedMissionEntry {
   gimbalStrategy?: string | null;
   actionGroups?: WaypointActionGroup[];
   altitudeReference?: AltitudeReferenceMode | null;
+  orbitAutoHeading?: boolean;
 }
 
 export interface ManualTargetState {
@@ -115,4 +118,6 @@ export interface MissionPlannerSnapshot {
   plan: PlannedMissionEntry[];
   manualTarget: ManualTargetState | null;
   activeWaypoint?: MissionWaypointTarget | null;
+  poiTarget?: PoiTarget | null;
+  orbitMode?: OrbitMode;
 }
