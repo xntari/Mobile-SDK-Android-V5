@@ -59,14 +59,22 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
     const bearing = ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 
-    const altitudeDelta = typeof altitude === 'number' && typeof telemetryData.altitude === 'number'
-      ? altitude - telemetryData.altitude
+    const aircraftAltitude =
+      typeof telemetryData?.location?.altitude === 'number'
+        ? telemetryData.location.altitude
+        : typeof telemetryData?.altitude === 'number'
+          ? telemetryData.altitude
+          : null;
+
+    const altitudeDelta = typeof altitude === 'number' && typeof aircraftAltitude === 'number'
+      ? altitude - aircraftAltitude
       : null;
 
     return { distance, bearing, altitudeDelta };
   }, [
     telemetryData?.location?.latitude,
     telemetryData?.location?.longitude,
+    telemetryData?.location?.altitude,
     telemetryData?.altitude,
     missionWaypoint?.latitude,
     missionWaypoint?.longitude,
@@ -99,8 +107,15 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
     const bearing = ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 
-    const altitudeDelta = typeof altitude === 'number' && typeof telemetryData.altitude === 'number'
-      ? altitude - telemetryData.altitude
+    const aircraftAltitude =
+      typeof telemetryData?.location?.altitude === 'number'
+        ? telemetryData.location.altitude
+        : typeof telemetryData?.altitude === 'number'
+          ? telemetryData.altitude
+          : null;
+
+    const altitudeDelta = typeof altitude === 'number' && typeof aircraftAltitude === 'number'
+      ? altitude - aircraftAltitude
       : null;
 
     const pitch = altitudeDelta != null
@@ -113,6 +128,7 @@ export const HSICompass: React.FC<HSICompassProps> = ({
   }, [
     telemetryData?.location?.latitude,
     telemetryData?.location?.longitude,
+    telemetryData?.location?.altitude,
     telemetryData?.altitude,
     missionPoi?.latitude,
     missionPoi?.longitude,

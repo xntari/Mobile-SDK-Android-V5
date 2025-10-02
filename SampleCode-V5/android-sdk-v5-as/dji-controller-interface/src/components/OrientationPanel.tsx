@@ -121,12 +121,28 @@ const OrientationPanelComponent: React.FC<OrientationPanelProps> = ({ telemetry,
     const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
     const bearing = ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 
-    const altitudeDelta = typeof altitude === 'number' && typeof telemetry.altitude === 'number'
-      ? altitude - telemetry.altitude
+    const aircraftAltitude =
+      typeof telemetry?.location?.altitude === 'number'
+        ? telemetry.location.altitude
+        : typeof telemetry?.altitude === 'number'
+          ? telemetry.altitude
+          : null;
+
+    const altitudeDelta = typeof altitude === 'number' && typeof aircraftAltitude === 'number'
+      ? altitude - aircraftAltitude
       : null;
 
     return { distance, bearing, altitudeDelta };
-  }, [panelVisible, telemetry?.location?.latitude, telemetry?.location?.longitude, telemetry?.altitude, missionWaypoint?.latitude, missionWaypoint?.longitude, missionWaypoint?.altitude]);
+  }, [
+    panelVisible,
+    telemetry?.location?.latitude,
+    telemetry?.location?.longitude,
+    telemetry?.location?.altitude,
+    telemetry?.altitude,
+    missionWaypoint?.latitude,
+    missionWaypoint?.longitude,
+    missionWaypoint?.altitude,
+  ]);
   const missionPitchDeg = React.useMemo(() => {
     if (!missionMetrics || missionMetrics.altitudeDelta == null) return null;
     return (Math.atan2(missionMetrics.altitudeDelta, missionMetrics.distance) * 180) / Math.PI;
@@ -160,8 +176,15 @@ const OrientationPanelComponent: React.FC<OrientationPanelProps> = ({ telemetry,
     const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
     const bearing = ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 
-    const altitudeDelta = typeof altitude === 'number' && typeof telemetry.altitude === 'number'
-      ? altitude - telemetry.altitude
+    const aircraftAltitude =
+      typeof telemetry?.location?.altitude === 'number'
+        ? telemetry.location.altitude
+        : typeof telemetry?.altitude === 'number'
+          ? telemetry.altitude
+          : null;
+
+    const altitudeDelta = typeof altitude === 'number' && typeof aircraftAltitude === 'number'
+      ? altitude - aircraftAltitude
       : null;
 
     const slantDistance = altitudeDelta != null
@@ -173,7 +196,16 @@ const OrientationPanelComponent: React.FC<OrientationPanelProps> = ({ telemetry,
       : null;
 
     return { horizontalDistance, slantDistance, bearing, altitudeDelta, pitch };
-  }, [panelVisible, telemetry?.location?.latitude, telemetry?.location?.longitude, telemetry?.altitude, missionPoi?.latitude, missionPoi?.longitude, missionPoi?.altitude]);
+  }, [
+    panelVisible,
+    telemetry?.location?.latitude,
+    telemetry?.location?.longitude,
+    telemetry?.location?.altitude,
+    telemetry?.altitude,
+    missionPoi?.latitude,
+    missionPoi?.longitude,
+    missionPoi?.altitude,
+  ]);
 
   // Calculate ground point projection for center of image
   const groundPoint = React.useMemo(() => {

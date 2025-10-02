@@ -360,6 +360,7 @@ class FlightCommandHandler(
         }
 
         val altitude = if (targetJson.has("altitude")) targetJson.optDouble("altitude", Double.NaN) else Double.NaN
+        val altitudeReference = targetJson.optStringOrNull("altitude_reference")?.lowercase(Locale.US)
         val maxSpeed = if (params.has("max_speed")) params.optDouble("max_speed", Double.NaN) else Double.NaN
         val securityTakeoffHeight = if (params.has("security_takeoff_height")) params.optDouble("security_takeoff_height", Double.NaN) else Double.NaN
         val modeRaw = if (params.has("mode")) params.optString("mode") else null
@@ -373,7 +374,14 @@ class FlightCommandHandler(
             return
         }
 
-        val targetAltitude = if (altitude.isNaN()) null else altitude
+        val targetAltitude = if (altitude.isNaN()) null else when {
+            altitudeReference != null && (altitudeReference.contains("egm") || altitudeReference.contains("msl")) -> {
+                val converted = GeoidModel.mslToEllipsoid(altitude, latitude, longitude)
+                Log.d(TAG, "fly_to_prepare altitude converted (EGM96→WGS84): input=$altitude converted=$converted @ $latitude,$longitude")
+                converted
+            }
+            else -> altitude
+        }
         val targetLocation = LocationCoordinate3D(latitude, longitude, targetAltitude ?: 0.0)
         val flyToTarget = FlyToTarget().apply {
             this.targetLocation = targetLocation
@@ -1062,7 +1070,20 @@ class FlightCommandHandler(
             return null
         }
 
-        val altitude = entry.optDoubleOrNull("altitude")
+        var altitude = entry.optDoubleOrNull("altitude")
+        val altitudeReference = entry.optStringOrNull("altitude_reference")?.lowercase(Locale.US)
+        if (altitude != null && altitudeReference != null) {
+            when {
+                altitudeReference.contains("egm") || altitudeReference.contains("msl") -> {
+                    val converted = GeoidModel.mslToEllipsoid(altitude, latitude, longitude)
+                    Log.d(TAG, "Converting waypoint altitude from EGM96 to WGS84: $altitude -> $converted at $latitude,$longitude")
+                    altitude = converted
+                }
+                else -> {
+                    // Leave other reference modes (absolute_wgs84, relative_to_takeoff, inherit, etc.) untouched for now
+                }
+            }
+        }
         val kind = entry.optStringOrNull("kind")
 
         var gimbalPitch = entry.optDoubleOrNull("gimbal_pitch")

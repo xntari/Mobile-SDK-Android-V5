@@ -22,6 +22,8 @@ import type {
   OrbitMode,
 } from '../types/missionPlanner';
 import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
+import { listClusters } from '../agent/objectMemoryClient';
+import type { ObjectMemoryCluster, ObjectMemoryClusterAnchor } from '../agent/objectMemoryClient';
 import { missionPlannerStore } from '../state/missionPlanner';
 
 type MissionLogKind = 'command' | 'telemetry' | 'simulation' | 'laser' | 'manual' | 'kmz';
@@ -187,6 +189,21 @@ const ALTITUDE_REFERENCE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'absolute_wgs84', label: 'Absolute (WGS84 ellipsoid)' },
   { value: 'egm96', label: 'Absolute (EGM96 geoid)' },
 ];
+
+const MSL_ALTITUDE_SOURCES: Array<ManualTargetState['source']> = ['manual', 'laser', 'object-memory'];
+
+const inferAltitudeReference = (
+  altitude: number | null | undefined,
+  source?: ManualTargetState['source'],
+): AltitudeReferenceMode | undefined => {
+  if (typeof altitude !== 'number' || !Number.isFinite(altitude)) {
+    return undefined;
+  }
+  if (source && MSL_ALTITUDE_SOURCES.includes(source)) {
+    return 'egm96';
+  }
+  return 'absolute_wgs84';
+};
 
 const ACTION_TRIGGER_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'reach_point', label: 'When waypoint reached' },
@@ -529,6 +546,9 @@ export const FlyToPanel: React.FC = () => {
   const [targetSelection, setTargetSelection] = React.useState<ObjectMemoryTargetSelection | null>(() =>
     objectMemoryTargetStore.getCurrent(),
   );
+  const [objectMemoryClusters, setObjectMemoryClusters] = React.useState<ObjectMemoryCluster[]>([]);
+  const [objectMemoryLoading, setObjectMemoryLoading] = React.useState(false);
+  const [objectMemoryError, setObjectMemoryError] = React.useState<string | null>(null);
   const [statusMessage, setStatusMessage] = React.useState<string | null>(null);
   const lastAckRef = React.useRef<number | null>(null);
   const lastWaypointStateRef = React.useRef<string | null>(null);
@@ -586,6 +606,25 @@ export const FlyToPanel: React.FC = () => {
   React.useEffect(() => objectMemoryTargetStore.subscribe(setTargetSelection), []);
   React.useEffect(() => missionPlannerStore.subscribePoiTarget(setPoiTarget), []);
   React.useEffect(() => missionPlannerStore.subscribeOrbitMode(setOrbitModeState), []);
+
+  const refreshObjectMemoryClusters = React.useCallback(async () => {
+    setObjectMemoryLoading(true);
+    try {
+      const response = await listClusters({ limit: 200 });
+      const clusters = (response?.clusters ?? []).filter((cluster) => cluster.object_map_anchor);
+      setObjectMemoryClusters(clusters);
+      setObjectMemoryError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load object memory clusters';
+      setObjectMemoryError(message);
+    } finally {
+      setObjectMemoryLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void refreshObjectMemoryClusters();
+  }, [refreshObjectMemoryClusters]);
 
   const flyToStatus = telemetry?.fly_to_status as FlyToStatus | undefined;
   const waypointStatus = telemetry?.waypoint_status as WaypointStatusTelemetry | undefined;
@@ -723,6 +762,13 @@ export const FlyToPanel: React.FC = () => {
     return null;
   }, [manualTarget.latitude, manualTarget.longitude, manualTarget.altitude, manualTarget.source, derivedTarget?.latitude, derivedTarget?.longitude, derivedTarget?.altitude]);
 
+  const selectedObjectMemoryClusterId = targetSelection?.clusterId ?? '';
+  const objectMemorySelectionAvailable = selectedObjectMemoryClusterId
+    ? objectMemoryClusters.some((cluster) => cluster.cluster_id === selectedObjectMemoryClusterId)
+    : false;
+  const objectMemorySelectValue = objectMemorySelectionAvailable ? selectedObjectMemoryClusterId : '';
+  const objectMemorySelectionMissing = Boolean(selectedObjectMemoryClusterId && !objectMemorySelectionAvailable);
+
   const canAssignPoi = Boolean(
     activeTarget &&
     activeTarget.latitude != null &&
@@ -744,6 +790,61 @@ export const FlyToPanel: React.FC = () => {
       return next.slice(0, MAX_LOG_ENTRIES);
     });
   }, []);
+
+  const applyPoiFromAnchor = React.useCallback(
+    (anchor: ObjectMemoryClusterAnchor | null | undefined, context?: { clusterId?: string; clusterLabel?: string | null }) => {
+      if (!anchor) {
+        setStatusMessage('Selected object memory entry has no anchor telemetry.');
+        return false;
+      }
+
+      const candidate = anchor.object_map?.target_point ?? anchor.object_position;
+      if (
+        !candidate ||
+        typeof candidate.latitude !== 'number' ||
+        typeof candidate.longitude !== 'number'
+      ) {
+        setStatusMessage('Selected object memory anchor is missing coordinates.');
+        return false;
+      }
+
+      const altitudeCandidate =
+        typeof candidate.altitude_m === 'number'
+          ? candidate.altitude_m
+          : typeof anchor.object_map?.laser_location?.altitude_m === 'number'
+            ? anchor.object_map?.laser_location?.altitude_m
+            : typeof anchor.object_position?.altitude_m === 'number'
+              ? anchor.object_position.altitude_m
+              : null;
+
+      const altitude =
+        typeof altitudeCandidate === 'number'
+          ? altitudeCandidate
+          : defaultTargetAltitudePreview ?? telemetry?.location?.altitude ?? null;
+
+      const poiPayload = {
+        latitude: clampLat(candidate.latitude),
+        longitude: clampLon(candidate.longitude),
+        altitude,
+      };
+
+      missionPlannerStore.setPoiTarget(poiPayload);
+      appendLog(
+        'POI target updated (object-memory)',
+        {
+          ...poiPayload,
+          source: 'object-memory',
+          cluster: context?.clusterLabel ?? context?.clusterId,
+        },
+        'manual',
+      );
+
+      const clusterLabel = context?.clusterLabel ?? context?.clusterId ?? 'object memory';
+      setStatusMessage(`POI set from ${clusterLabel}`);
+      return true;
+    },
+    [appendLog, defaultTargetAltitudePreview, setStatusMessage, telemetry?.location?.altitude],
+  );
 
   const handleSetPoiFromTarget = React.useCallback(() => {
     const target = activeTarget;
@@ -771,27 +872,47 @@ export const FlyToPanel: React.FC = () => {
     setStatusMessage('POI target cleared.');
   }, []);
 
+  const handleSelectObjectMemoryCluster = React.useCallback((clusterId: string) => {
+    if (!clusterId) {
+      objectMemoryTargetStore.set(null);
+      setStatusMessage('Object Memory selection cleared.');
+      return;
+    }
+
+    const cluster = objectMemoryClusters.find((entry) => entry.cluster_id === clusterId);
+    if (!cluster) {
+      setStatusMessage('Selected Object Memory cluster is unavailable.');
+      return;
+    }
+
+    const anchor = cluster.object_map_anchor;
+    if (!anchor) {
+      setStatusMessage('Selected cluster has no anchor coordinates.');
+      return;
+    }
+
+    objectMemoryTargetStore.set({
+      clusterId: cluster.cluster_id,
+      clusterLabel: cluster.label,
+      anchor,
+    });
+
+    applyPoiFromAnchor(anchor, {
+      clusterId: cluster.cluster_id,
+      clusterLabel: cluster.label,
+    });
+  }, [applyPoiFromAnchor, objectMemoryClusters, setStatusMessage]);
+
   const handleSetPoiFromObjectMemory = React.useCallback(() => {
-    if (!derivedTarget) {
+    if (!targetSelection) {
       setStatusMessage('Select an Object Memory target to assign a POI.');
       return;
     }
-    const altitude = typeof derivedTarget.altitude === 'number' && Number.isFinite(derivedTarget.altitude)
-      ? derivedTarget.altitude
-      : defaultTargetAltitudePreview ?? telemetry?.location?.altitude ?? null;
-    const poiPayload = {
-      latitude: clampLat(derivedTarget.latitude),
-      longitude: clampLon(derivedTarget.longitude),
-      altitude,
-    };
-    missionPlannerStore.setPoiTarget(poiPayload);
-    appendLog('POI target updated (object-memory)', {
-      ...poiPayload,
-      source: 'object-memory',
-      cluster: targetSelection?.clusterLabel ?? targetSelection?.clusterId,
-    }, 'manual');
-    setStatusMessage('POI set from Object Memory');
-  }, [appendLog, defaultTargetAltitudePreview, derivedTarget, setStatusMessage, targetSelection?.clusterId, targetSelection?.clusterLabel, telemetry?.location?.altitude]);
+    applyPoiFromAnchor(targetSelection.anchor, {
+      clusterId: targetSelection.clusterId,
+      clusterLabel: targetSelection.clusterLabel,
+    });
+  }, [applyPoiFromAnchor, setStatusMessage, targetSelection]);
 
   const manualTargetSourceLabel = React.useMemo(() => {
     switch (manualTarget.source) {
@@ -1006,11 +1127,18 @@ export const FlyToPanel: React.FC = () => {
       setStatusMessage('Stage a target before adding a waypoint to the plan.');
       return;
     }
-    const altitudeCandidate = defaultTargetAltitudePreview
+    const manualAltitude = typeof manualTarget.altitude === 'number' ? manualTarget.altitude : null;
+    const activeAltitude = typeof activeTarget.altitude === 'number' ? activeTarget.altitude : null;
+    const altitudeCandidate = manualAltitude
+      ?? activeAltitude
+      ?? defaultTargetAltitudePreview
       ?? telemetry?.location?.altitude
       ?? telemetry?.altitude
-      ?? activeTarget.altitude
       ?? null;
+    const altitudeReference = inferAltitudeReference(
+      altitudeCandidate,
+      activeTarget?.source ?? manualTarget.source,
+    );
     const entry: PlannedMissionEntry = {
       id: `wp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       kind: 'waypoint',
@@ -1018,6 +1146,9 @@ export const FlyToPanel: React.FC = () => {
       longitude: activeTarget.longitude,
       altitude: altitudeCandidate,
     };
+    if (altitudeReference) {
+      entry.altitudeReference = altitudeReference;
+    }
     updateMissionPlan((prev) => [...prev, entry]);
     setExpandedEntries((prev) => ({ ...prev, [entry.id]: true }));
     appendLog('Plan waypoint added', entry, 'manual');
@@ -1055,6 +1186,14 @@ export const FlyToPanel: React.FC = () => {
       return;
     }
 
+    const altitudeReference = inferAltitudeReference(
+      defaultTargetAltitudePreview
+        ?? takeoffAltitudeAsl
+        ?? telemetry?.location?.altitude
+        ?? null,
+      'map',
+    );
+
     const entry: PlannedMissionEntry = {
       id: `return-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       kind: 'return_home',
@@ -1065,6 +1204,9 @@ export const FlyToPanel: React.FC = () => {
         ?? telemetry?.location?.altitude
         ?? null,
     };
+    if (altitudeReference) {
+      entry.altitudeReference = altitudeReference;
+    }
     updateMissionPlan((prev) => [...prev, entry]);
     setExpandedEntries((prev) => ({ ...prev, [entry.id]: true }));
     appendLog('Plan return-to-home added', entry, 'manual');
@@ -1082,6 +1224,7 @@ export const FlyToPanel: React.FC = () => {
       ?? takeoffAltitudeAsl
       ?? telemetry?.location?.altitude
       ?? null;
+    const altitudeReference = inferAltitudeReference(altitudeCandidate, 'map');
 
     const entry: PlannedMissionEntry = {
       id: `home-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -1090,6 +1233,9 @@ export const FlyToPanel: React.FC = () => {
       longitude: clampLon(home.longitude),
       altitude: altitudeCandidate,
     };
+    if (altitudeReference) {
+      entry.altitudeReference = altitudeReference;
+    }
     updateMissionPlan((prev) => [...prev, entry]);
     setExpandedEntries((prev) => ({ ...prev, [entry.id]: true }));
     appendLog('Plan home waypoint added', entry, 'manual');
@@ -1108,6 +1254,8 @@ export const FlyToPanel: React.FC = () => {
       ?? telemetry?.location?.altitude
       ?? telemetry?.altitude
       ?? null;
+    const altitudeReference = origin.altitudeReference
+      ?? inferAltitudeReference(altitudeCandidate, manualTarget.source);
 
     const entry: PlannedMissionEntry = {
       id: `origin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -1116,6 +1264,9 @@ export const FlyToPanel: React.FC = () => {
       longitude: clampLon(origin.longitude),
       altitude: altitudeCandidate,
     };
+    if (altitudeReference) {
+      entry.altitudeReference = altitudeReference;
+    }
     updateMissionPlan((prev) => [...prev, entry]);
     setExpandedEntries((prev) => ({ ...prev, [entry.id]: true }));
     appendLog('Plan origin waypoint added', entry, 'manual');
@@ -1145,6 +1296,8 @@ export const FlyToPanel: React.FC = () => {
       ?? defaultTargetAltitudePreview
       ?? 0;
 
+    const altitudeReference = inferAltitudeReference(landingAltitude, 'map');
+
     const entry: PlannedMissionEntry = {
       id: `land-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       kind: 'land',
@@ -1152,6 +1305,9 @@ export const FlyToPanel: React.FC = () => {
       longitude: clampLon(landingLongitude),
       altitude: landingAltitude,
     };
+    if (altitudeReference) {
+      entry.altitudeReference = altitudeReference;
+    }
     updateMissionPlan((prev) => [...prev, entry]);
     setExpandedEntries((prev) => ({ ...prev, [entry.id]: true }));
     appendLog('Plan land added', entry, 'manual');
@@ -2943,6 +3099,11 @@ ${wpmlWaypoints}
       return;
     }
 
+    const altitudeReference = inferAltitudeReference(
+      altitude ?? resolvedAltitude,
+      manualTarget.source ?? activeTarget?.source,
+    );
+
     const params: Record<string, any> = {
       target_location: {
         latitude,
@@ -2950,6 +3111,10 @@ ${wpmlWaypoints}
         altitude: clampAltitude(resolvedAltitude),
       },
     };
+
+    if (altitudeReference) {
+      params.target_location.altitude_reference = altitudeReference;
+    }
 
     if (Number.isFinite(maxSpeed) && maxSpeed > 0) {
       params.max_speed = Math.round(maxSpeed);
@@ -3413,6 +3578,10 @@ ${wpmlWaypoints}
       },
     };
 
+    if (finalTarget.altitude_reference) {
+      commandPayload.target_location.altitude_reference = finalTarget.altitude_reference;
+    }
+
     const sanitizedPoiForCommand = sanitizePoiTarget(poiTarget);
     if (sanitizedPoiForCommand) {
       commandPayload.poi_target = sanitizedPoiForCommand;
@@ -3655,6 +3824,55 @@ ${wpmlWaypoints}
             </button>
           </div>
         </div>
+        <div className="flex items-end gap-2">
+          <label className="flex flex-1 flex-col gap-1 text-[11px]">
+            <span>Object Memory POI</span>
+            <select
+              value={objectMemorySelectValue}
+              onChange={(event) => handleSelectObjectMemoryCluster(event.target.value)}
+              disabled={objectMemoryLoading}
+              className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200"
+            >
+              <option value="">Select object memory…</option>
+              {objectMemorySelectionMissing && selectedObjectMemoryClusterId && (
+                <option value={selectedObjectMemoryClusterId}>
+                  {targetSelection?.clusterLabel ?? selectedObjectMemoryClusterId} (staged)
+                </option>
+              )}
+              {objectMemoryClusters.map((cluster) => {
+                const optionLabel = cluster.label && cluster.label.trim().length
+                  ? cluster.label
+                  : cluster.cluster_id;
+                const countLabel = typeof cluster.sample_count === 'number'
+                  ? ` · ${cluster.sample_count}`
+                  : '';
+                return (
+                  <option key={cluster.cluster_id} value={cluster.cluster_id}>
+                    {optionLabel}
+                    {countLabel}
+                  </option>
+                );
+              })}
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={() => { void refreshObjectMemoryClusters(); }}
+            disabled={objectMemoryLoading}
+            className="px-2 py-1 rounded border border-gray-600 text-gray-200 hover:bg-gray-800 disabled:opacity-50 disabled:hover:bg-gray-900"
+          >
+            {objectMemoryLoading ? 'Loading…' : 'Reload'}
+          </button>
+        </div>
+        {objectMemorySelectionMissing && !objectMemoryLoading && !objectMemoryError && (
+          <div className="text-[10px] text-yellow-400">Selected cluster missing from latest list — reload to resync.</div>
+        )}
+        {objectMemoryError && (
+          <div className="text-[10px] text-red-400">{objectMemoryError}</div>
+        )}
+        {!objectMemoryError && !objectMemoryLoading && objectMemoryClusters.length === 0 && (
+          <div className="text-[10px] text-gray-500">No object memory clusters with coordinates available.</div>
+        )}
         {targetSelection && derivedTarget && (
           <div className="mt-2 rounded border border-purple-700/40 bg-purple-900/15 px-2 py-2 text-[10px] text-purple-100">
             <div className="flex items-center justify-between">

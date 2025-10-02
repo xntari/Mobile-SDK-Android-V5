@@ -33,7 +33,7 @@ import type { ManualTargetState, PoiTarget } from "../types/missionPlanner";
 
 const clampLat = (value: number) => Math.max(-90, Math.min(90, value));
 const clampLon = (value: number) => Math.max(-180, Math.min(180, value));
-type LookAtCommandMode = 'GIMBAL_FREE' | 'GIMBAL_FOLLOWING' | 'ZOOM_CIRCLE';
+type LookAtCommandMode = 'GIMBAL_FREE' | 'GIMBAL_FOLLOWING' | 'ZOOM_CIRCLE' | 'MANUAL_TRACK';
 
 const LOOK_AT_MODE_STORAGE_KEY = 'lookAt.defaultMode';
 
@@ -139,7 +139,7 @@ const H20NDisplayComponent = (
       }
       try {
         const stored = window.localStorage.getItem(LOOK_AT_MODE_STORAGE_KEY);
-        if (stored === 'GIMBAL_FREE' || stored === 'GIMBAL_FOLLOWING' || stored === 'ZOOM_CIRCLE') {
+        if (stored === 'GIMBAL_FREE' || stored === 'GIMBAL_FOLLOWING' || stored === 'ZOOM_CIRCLE' || stored === 'MANUAL_TRACK') {
           return stored;
         }
       } catch {
@@ -152,6 +152,7 @@ const H20NDisplayComponent = (
     const lookAtIntervalRef = useRef<number | null>(null);
     const [gimbalAttitudeMode, setGimbalAttitudeMode] = useState<GimbalAttitudeMode>('YAW_FOLLOW');
     const lookAtModeRef = useRef<LookAtCommandMode>(lookAtSelection);
+    const dispatchLookAtRef = useRef<((mode: LookAtCommandMode, options?: { silent?: boolean }) => Promise<boolean>) | null>(null);
     const lookAtLoopActiveRef = useRef<boolean>(false);
     const lookAtBusyRef = useRef<boolean>(false);
     const latestLookAtTargetRef = useRef<PoiTarget | null>(null);
@@ -181,6 +182,112 @@ const H20NDisplayComponent = (
       vy: 0,
     });
     const isFreeLookActiveRef = useRef<boolean>(false);
+    const freeLookSessionOwnerRef = useRef<'pointer' | 'manual' | null>(null);
+    const manualTrackActiveRef = useRef<boolean>(false);
+    const MANUAL_TRACK_INTERVAL_MS = 100;
+    const FREE_LOOK_MAX_RATE_DEG = 120;
+    const MANUAL_TRACK_MAX_YAW_RATE = 90;
+    const MANUAL_TRACK_MAX_PITCH_RATE = 60;
+    const MANUAL_TRACK_YAW_GAIN = 1.2;
+    const MANUAL_TRACK_PITCH_GAIN = 1.0;
+    const MANUAL_TRACK_DEADBAND_DEG = 0.4;
+    const MANUAL_TRACK_LIMIT_DEG = 300;
+    const MANUAL_TRACK_LIMIT_MARGIN_DEG = MANUAL_TRACK_LIMIT_DEG - 5;
+    const MANUAL_TRACK_FLIP_THRESHOLD_DEG = 288;
+
+    const bridgeHasSendCommand = Boolean(
+      typeof window !== 'undefined' &&
+        (window as any).electronAPI?.sendBridgeCommand,
+    );
+
+    const normalizeAngle360 = useCallback((value: number): number => {
+      return ((value % 360) + 360) % 360;
+    }, []);
+
+    const normalizeAngle180 = useCallback((value: number): number => {
+      let angle = value;
+      while (angle > 180) angle -= 360;
+      while (angle < -180) angle += 360;
+      return angle;
+    }, []);
+
+    const clamp = useCallback((value: number, min: number, max: number): number => {
+      return Math.min(max, Math.max(min, value));
+    }, []);
+
+    const manualTrackCurrentYawRef = useRef<number | null>(null);
+    const manualTrackYawOffsetRef = useRef<number>(0);
+
+    const stopManualTrackSession = useCallback(async (options?: { silent?: boolean }) => {
+      if (freeLookSessionOwnerRef.current !== 'manual') {
+        manualTrackActiveRef.current = false;
+        return;
+      }
+      manualTrackActiveRef.current = false;
+      freeLookSessionOwnerRef.current = null;
+      manualTrackCurrentYawRef.current = null;
+
+      if (!bridgeHasSendCommand) {
+        return;
+      }
+
+      try {
+        await (window as any)?.electronAPI?.sendBridgeCommand({
+          type: 'gimbal_free_look_update',
+          data: { vx: 0, vy: 0 },
+        });
+      } catch (error) {
+        if (!(options?.silent ?? false)) {
+          console.warn('Failed to send zero velocity before stopping manual track', error);
+        }
+      }
+
+      try {
+        await (window as any)?.electronAPI?.sendBridgeCommand({
+          type: 'gimbal_free_look_stop',
+        });
+      } catch (error) {
+        if (!(options?.silent ?? false)) {
+          console.warn('Failed to stop manual free-look session', error);
+        }
+      }
+    }, [bridgeHasSendCommand]);
+
+    const ensureManualFreeLookSession = useCallback(async (options?: { silent?: boolean }) => {
+      if (freeLookSessionOwnerRef.current === 'pointer') {
+        if (!(options?.silent ?? false)) {
+          setLookAtStatus('Gimbal free-look is currently controlled manually.');
+        }
+        return false;
+      }
+
+      if (!bridgeHasSendCommand) {
+        if (!(options?.silent ?? false)) {
+          setLookAtStatus('Bridge command channel unavailable');
+        }
+        return false;
+      }
+
+      if (!manualTrackActiveRef.current || freeLookSessionOwnerRef.current !== 'manual') {
+        try {
+          await (window as any)?.electronAPI?.sendBridgeCommand({
+            type: 'gimbal_free_look_start',
+            data: { source: 'manual-track' },
+          });
+          manualTrackActiveRef.current = true;
+          freeLookSessionOwnerRef.current = 'manual';
+          manualTrackCurrentYawRef.current = null;
+        } catch (error) {
+          manualTrackActiveRef.current = false;
+          if (!(options?.silent ?? false)) {
+            setLookAtStatus(error instanceof Error ? error.message : 'Failed to start manual tracking session');
+          }
+          return false;
+        }
+      }
+
+      return true;
+    }, [bridgeHasSendCommand, setLookAtStatus]);
     // Free Look tuning
     const [sensitivity, setSensitivity] = useState<number>(1.5); // 1.0 baseline
     const [smoothing, setSmoothing] = useState<number>(0.15); // 0..0.9 (client filter)
@@ -349,11 +456,6 @@ const H20NDisplayComponent = (
       },
       [maxZoom, minZoom, sendZoomCommand],
     );
-
-    const bridgeHasSendCommand =
-      typeof window !== "undefined" &&
-      !!(window as any).electronAPI?.sendBridgeCommand;
-
     const resolveLookAtTarget = React.useCallback((): PoiTarget | null => {
       if (
         missionPoiTarget &&
@@ -386,6 +488,7 @@ const H20NDisplayComponent = (
     const asStatusLabel = useCallback((mode: LookAtCommandMode) => {
       if (mode === 'GIMBAL_FOLLOWING') return 'gimbal_following';
       if (mode === 'ZOOM_CIRCLE') return 'zoom_circle';
+      if (mode === 'MANUAL_TRACK') return 'manual_track';
       return 'gimbal_free';
     }, []);
 
@@ -406,10 +509,196 @@ const H20NDisplayComponent = (
       }
     }, [bridgeHasSendCommand]);
 
+    const dispatchManualTrack = useCallback(async (options?: { silent?: boolean }): Promise<boolean> => {
+      const silent = options?.silent ?? false;
+
+      const target = resolveLookAtTarget();
+      latestLookAtTargetRef.current = target;
+
+      if (!target) {
+        lookAtLoopActiveRef.current = false;
+        await stopManualTrackSession({ silent: true });
+        if (!silent) {
+          setLookAtStatus('POI not set — manual track idle');
+        }
+        return false;
+      }
+
+      if (!(await ensureManualFreeLookSession({ silent }))) {
+        return false;
+      }
+
+      const telemetryLocation = telemetryData?.location;
+      const aircraftLat = telemetryLocation?.latitude;
+      const aircraftLon = telemetryLocation?.longitude;
+
+      const aircraftAltitude = typeof telemetryLocation?.altitude === 'number' && Number.isFinite(telemetryLocation.altitude)
+        ? telemetryLocation.altitude
+        : typeof telemetryData?.altitude === 'number' && Number.isFinite(telemetryData.altitude)
+          ? telemetryData.altitude
+          : 0;
+
+      const aircraftHeading = typeof telemetryData?.heading === 'number' && Number.isFinite(telemetryData.heading)
+        ? telemetryData.heading
+        : typeof telemetryData?.attitude?.yaw === 'number' && Number.isFinite(telemetryData.attitude.yaw)
+          ? telemetryData.attitude.yaw
+          : null;
+
+      const gimbalState = telemetryData?.gimbals?.find((g) => g.index === 'LEFT_OR_MAIN');
+      const gimbalPitch = typeof gimbalState?.attitude?.pitch === 'number' && Number.isFinite(gimbalState.attitude.pitch)
+        ? gimbalState.attitude.pitch
+        : null;
+      const rawGimbalYaw = typeof gimbalState?.yaw_relative === 'number' && Number.isFinite(gimbalState.yaw_relative)
+        ? gimbalState.yaw_relative
+        : (typeof gimbalState?.attitude?.yaw === 'number' && Number.isFinite(gimbalState.attitude.yaw) && typeof aircraftHeading === 'number'
+            ? normalizeAngle180(gimbalState.attitude.yaw - aircraftHeading)
+            : null);
+
+      if (
+        typeof aircraftLat !== 'number' ||
+        typeof aircraftLon !== 'number' ||
+        typeof aircraftHeading !== 'number' ||
+        typeof gimbalPitch !== 'number' ||
+        typeof rawGimbalYaw !== 'number'
+      ) {
+        await stopManualTrackSession({ silent: true });
+        if (!silent) {
+          setLookAtStatus('Telemetry incomplete for manual track');
+        }
+        return false;
+      }
+
+      const prevContinuousYaw = manualTrackCurrentYawRef.current;
+      let gimbalContinuousYaw = rawGimbalYaw;
+      if (prevContinuousYaw != null) {
+        let diff = rawGimbalYaw - prevContinuousYaw;
+        if (diff > 180) diff -= 360;
+        if (diff < -180) diff += 360;
+        gimbalContinuousYaw = prevContinuousYaw + diff;
+      }
+      manualTrackCurrentYawRef.current = gimbalContinuousYaw;
+
+      const targetLat = target.latitude;
+      const targetLon = target.longitude;
+      if (!Number.isFinite(targetLat) || !Number.isFinite(targetLon)) {
+        if (!silent) {
+          setLookAtStatus('POI coordinates invalid for manual track');
+        }
+        return false;
+      }
+
+      const targetAltitude = typeof target.altitude === 'number' && Number.isFinite(target.altitude)
+        ? target.altitude
+        : aircraftAltitude;
+
+      const toRad = (value: number) => (value * Math.PI) / 180;
+      const φ1 = toRad(aircraftLat);
+      const φ2 = toRad(targetLat);
+      const Δφ = toRad(targetLat - aircraftLat);
+      const Δλ = toRad(targetLon - aircraftLon);
+      const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
+      const horizontalDistance = 6371000 * c;
+
+      const y = Math.sin(Δλ) * Math.cos(φ2);
+      const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+      const bearing = normalizeAngle360((Math.atan2(y, x) * 180) / Math.PI);
+
+      const altitudeDelta = targetAltitude - aircraftAltitude;
+      const pitchTarget = (Math.atan2(altitudeDelta, Math.max(horizontalDistance, 0.01)) * 180) / Math.PI;
+
+      const desiredYawRelative = normalizeAngle180(bearing - aircraftHeading);
+
+      // Determine best unwrapped yaw target within ±300°
+      let yawOffset = manualTrackYawOffsetRef.current;
+      let bestYaw = desiredYawRelative + 360 * yawOffset;
+      let bestScore = Number.POSITIVE_INFINITY;
+      const candidateOffsets = [yawOffset - 1, yawOffset, yawOffset + 1];
+      for (const candidateOffset of candidateOffsets) {
+        const candidateYaw = desiredYawRelative + 360 * candidateOffset;
+        const limitPenalty = Math.max(Math.abs(candidateYaw) - MANUAL_TRACK_LIMIT_MARGIN_DEG, 0);
+        const score = Math.abs(candidateYaw - gimbalContinuousYaw) + limitPenalty * 2;
+        if (score < bestScore) {
+          bestScore = score;
+          bestYaw = candidateYaw;
+          yawOffset = candidateOffset;
+        }
+      }
+
+      if (Math.abs(bestYaw) > MANUAL_TRACK_FLIP_THRESHOLD_DEG) {
+        const flippedYaw = bestYaw + (bestYaw > 0 ? -360 : 360);
+        if (Math.abs(flippedYaw) <= MANUAL_TRACK_LIMIT_MARGIN_DEG) {
+          bestYaw = flippedYaw;
+          yawOffset += bestYaw > 0 ? -1 : 1;
+        }
+      }
+
+      // Clamp within absolute hardware limits if necessary
+      if (Math.abs(bestYaw) > MANUAL_TRACK_LIMIT_DEG) {
+        bestYaw = clamp(bestYaw, -MANUAL_TRACK_LIMIT_DEG, MANUAL_TRACK_LIMIT_DEG);
+      }
+
+      manualTrackYawOffsetRef.current = Math.round((bestYaw - desiredYawRelative) / 360);
+
+      const yawError = bestYaw - gimbalContinuousYaw;
+      const pitchError = pitchTarget - gimbalPitch;
+
+      const yawRate = clamp(yawError * MANUAL_TRACK_YAW_GAIN, -MANUAL_TRACK_MAX_YAW_RATE, MANUAL_TRACK_MAX_YAW_RATE);
+      const pitchRate = clamp(pitchError * MANUAL_TRACK_PITCH_GAIN, -MANUAL_TRACK_MAX_PITCH_RATE, MANUAL_TRACK_MAX_PITCH_RATE);
+
+      let vx = yawRate / FREE_LOOK_MAX_RATE_DEG;
+      let vy = -pitchRate / FREE_LOOK_MAX_RATE_DEG;
+
+      if (Math.abs(yawError) < MANUAL_TRACK_DEADBAND_DEG) {
+        vx = 0;
+      }
+      if (Math.abs(pitchError) < MANUAL_TRACK_DEADBAND_DEG) {
+        vy = 0;
+      }
+
+      vx = clamp(vx, -1, 1);
+      vy = clamp(vy, -1, 1);
+
+      try {
+        await (window as any)?.electronAPI?.sendBridgeCommand({
+          type: 'gimbal_free_look_update',
+          data: { vx, vy },
+        });
+        if (!silent) {
+          setLookAtStatus(`Manual track Δyaw ${yawError.toFixed(1)}° · Δpitch ${pitchError.toFixed(1)}°`);
+        }
+        return true;
+      } catch (error) {
+        if (!silent) {
+          setLookAtStatus(error instanceof Error ? error.message : 'Manual track update failed');
+        }
+        return false;
+      }
+    }, [
+      clamp,
+      ensureManualFreeLookSession,
+      FREE_LOOK_MAX_RATE_DEG,
+      MANUAL_TRACK_DEADBAND_DEG,
+      MANUAL_TRACK_MAX_PITCH_RATE,
+      MANUAL_TRACK_MAX_YAW_RATE,
+      MANUAL_TRACK_PITCH_GAIN,
+      MANUAL_TRACK_YAW_GAIN,
+      normalizeAngle180,
+      normalizeAngle360,
+      resolveLookAtTarget,
+      setLookAtStatus,
+      stopManualTrackSession,
+      telemetryData,
+    ]);
+
     const dispatchLookAt = useCallback(async (
       mode: LookAtCommandMode,
       options?: { silent?: boolean },
     ): Promise<boolean> => {
+      if (mode === 'MANUAL_TRACK') {
+        return dispatchManualTrack(options);
+      }
+
       if (lookAtBusyRef.current) {
         if (!options?.silent) {
           setLookAtStatus('LookAt command already in flight');
@@ -459,7 +748,14 @@ const H20NDisplayComponent = (
         }
         lookAtBusyRef.current = false;
       }
-    }, [asStatusLabel, resolveLookAtTarget, telemetryData?.location?.altitude]);
+    }, [
+      asStatusLabel,
+      dispatchManualTrack,
+      resolveLookAtTarget,
+      telemetryData?.location?.altitude,
+      telemetryData?.location,
+      telemetryData,
+    ]);
 
     const handleLookAtCommand = useCallback(async (mode: LookAtCommandMode) => {
       if (!bridgeHasSendCommand) {
@@ -475,21 +771,35 @@ const H20NDisplayComponent = (
 
       clearLookAtInterval();
       lookAtLoopActiveRef.current = false;
+      if (mode !== 'MANUAL_TRACK') {
+        await stopManualTrackSession({ silent: true });
+      }
       lookAtModeRef.current = mode;
 
       const initialOk = await dispatchLookAt(mode);
       if (!initialOk) {
+        if (mode === 'MANUAL_TRACK') {
+          await stopManualTrackSession({ silent: true });
+        }
         return;
       }
 
-      const shouldLoop = mode !== 'GIMBAL_FREE';
-      lookAtLoopActiveRef.current = shouldLoop;
-      if (shouldLoop) {
-        lookAtIntervalRef.current = window.setInterval(() => {
-          void dispatchLookAt(lookAtModeRef.current, { silent: true });
-        }, 1000);
-      }
-    }, [bridgeHasSendCommand, clearLookAtInterval, dispatchLookAt, handleSetGimbalAttitudeMode]);
+      lookAtLoopActiveRef.current = true;
+      const intervalMs = mode === 'MANUAL_TRACK' ? MANUAL_TRACK_INTERVAL_MS : 1000;
+      lookAtIntervalRef.current = window.setInterval(() => {
+        const loopDispatch = dispatchLookAtRef.current;
+        if (loopDispatch) {
+          void loopDispatch(lookAtModeRef.current, { silent: true });
+        }
+      }, intervalMs);
+    }, [
+      MANUAL_TRACK_INTERVAL_MS,
+      bridgeHasSendCommand,
+      clearLookAtInterval,
+      dispatchLookAt,
+      handleSetGimbalAttitudeMode,
+      stopManualTrackSession,
+    ]);
 
     const handleStopLookAt = useCallback(async () => {
       clearLookAtInterval();
@@ -497,6 +807,12 @@ const H20NDisplayComponent = (
 
       if (!bridgeHasSendCommand) {
         setLookAtStatus('Bridge command channel unavailable');
+        return;
+      }
+
+      if (lookAtModeRef.current === 'MANUAL_TRACK') {
+        await stopManualTrackSession({ silent: true });
+        setLookAtStatus('Manual track stopped');
         return;
       }
 
@@ -527,14 +843,34 @@ const H20NDisplayComponent = (
         setLookAtBusy(false);
         lookAtBusyRef.current = false;
       }
-    }, [bridgeHasSendCommand, clearLookAtInterval, resolveLookAtTarget, telemetryData?.location?.altitude]);
+    }, [
+      bridgeHasSendCommand,
+      clearLookAtInterval,
+      resolveLookAtTarget,
+      stopManualTrackSession,
+      telemetryData?.location?.altitude,
+    ]);
 
     useEffect(() => {
       latestLookAtTargetRef.current = resolveLookAtTarget();
       if (lookAtLoopActiveRef.current) {
-        void dispatchLookAt(lookAtModeRef.current, { silent: true });
+        const loopDispatch = dispatchLookAtRef.current;
+        if (loopDispatch) {
+          void loopDispatch(lookAtModeRef.current, { silent: true });
+        }
       }
     }, [dispatchLookAt, resolveLookAtTarget]);
+
+    useEffect(() => {
+      return () => {
+        clearLookAtInterval();
+        void stopManualTrackSession({ silent: true });
+      };
+    }, [clearLookAtInterval, stopManualTrackSession]);
+
+    useEffect(() => {
+      dispatchLookAtRef.current = dispatchLookAt;
+    }, [dispatchLookAt]);
 
     const handleSetPoiFromManualTarget = useCallback(() => {
       const source = missionManualTarget;
@@ -778,9 +1114,14 @@ const H20NDisplayComponent = (
     const startFreeLook = () => {
       if (gimbalMode !== "free_look") return;
 
+      if (manualTrackActiveRef.current) {
+        void stopManualTrackSession({ silent: true });
+      }
+
       console.log("[DEV_GIMBAL] Starting Free Look mode");
       setIsFreeLookActive(true);
       isFreeLookActiveRef.current = true;
+      freeLookSessionOwnerRef.current = 'pointer';
 
       // Send start command
       if ((window as any).electronAPI) {
@@ -797,6 +1138,7 @@ const H20NDisplayComponent = (
               "[DEV_GIMBAL] Failed to send Free Look START:",
               error,
             );
+            freeLookSessionOwnerRef.current = null;
           });
       }
 
@@ -845,6 +1187,10 @@ const H20NDisplayComponent = (
           .catch((error: any) => {
             console.error("[DEV_GIMBAL] Failed to send Free Look STOP:", error);
           });
+      }
+
+      if (freeLookSessionOwnerRef.current === 'pointer') {
+        freeLookSessionOwnerRef.current = null;
       }
     };
 
@@ -2137,6 +2483,7 @@ const H20NDisplayComponent = (
                 <option value="GIMBAL_FOLLOWING">Gimbal + aircraft follow</option>
                 <option value="GIMBAL_FREE">Gimbal only (keep aircraft attitude)</option>
                 <option value="ZOOM_CIRCLE">Zoom circle</option>
+                <option value="MANUAL_TRACK">Manual track (sim override)</option>
               </select>
             </div>
             <div className="flex gap-2">
