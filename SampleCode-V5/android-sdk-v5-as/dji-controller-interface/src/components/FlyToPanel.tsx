@@ -3658,6 +3658,71 @@ ${wpmlWaypoints}
 
   const simulatorBadge = React.useMemo(() => getSimulatorModeBadge(telemetry?.simulator), [telemetry?.simulator]);
   const simulatorStatus = telemetry?.simulator;
+  const [simulatorActionPending, setSimulatorActionPending] = React.useState(false);
+
+  const handleSimulatorQuickToggle = React.useCallback(async () => {
+    if (simulatorActionPending) return;
+    if (!telemetry) {
+      setStatusMessage('Telemetry unavailable — cannot toggle simulator.');
+      return;
+    }
+    setSimulatorActionPending(true);
+    try {
+      if (simulatorStatus?.enabled) {
+        const result = await sendFlightCommand('simulator_disable');
+        if (result?.error || result?.error_message) {
+          setStatusMessage(result.error || result.error_message || 'Simulator disable rejected');
+        } else {
+          setStatusMessage('Simulator disable requested');
+        }
+        return;
+      }
+
+      const config = simulatorStatus?.configuration;
+      const home = telemetry.home_location;
+      const location = telemetry.location;
+      const latitude = config?.latitude ?? home?.latitude ?? location?.latitude;
+      const longitude = config?.longitude ?? home?.longitude ?? location?.longitude;
+      if (
+        typeof latitude !== 'number' || !Number.isFinite(latitude) ||
+        typeof longitude !== 'number' || !Number.isFinite(longitude)
+      ) {
+        setStatusMessage('Set simulator coordinates in the expanded controls before enabling.');
+        return;
+      }
+
+      const params: Record<string, any> = {
+        latitude,
+        longitude,
+        satellites: typeof config?.satellites === 'number' && Number.isFinite(config.satellites)
+          ? config.satellites
+          : 12,
+      };
+
+      const altitudeCandidate =
+        (typeof config?.altitude === 'number' && Number.isFinite(config.altitude) ? config.altitude : undefined) ??
+        (typeof home?.altitude === 'number' && Number.isFinite(home.altitude) ? home.altitude : undefined) ??
+        (typeof location?.altitude === 'number' && Number.isFinite(location.altitude) ? location.altitude : undefined) ??
+        (typeof telemetry.takeoff_altitude === 'number' && Number.isFinite(telemetry.takeoff_altitude)
+          ? telemetry.takeoff_altitude
+          : undefined);
+
+      if (typeof altitudeCandidate === 'number') {
+        params.altitude = altitudeCandidate;
+      }
+
+      const result = await sendFlightCommand('simulator_enable', params);
+      if (result?.error || result?.error_message) {
+        setStatusMessage(result.error || result.error_message || 'Simulator enable rejected');
+      } else {
+        setStatusMessage('Simulator enable requested');
+      }
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : 'Simulator command failed');
+    } finally {
+      setSimulatorActionPending(false);
+    }
+  }, [simulatorActionPending, telemetry, simulatorStatus, sendFlightCommand, setStatusMessage]);
 
   return (
     <Panel
@@ -3679,6 +3744,20 @@ ${wpmlWaypoints}
           storageKey="missionControl.section.simulator"
           defaultOpen={false}
           summary={simulatorStatus ? (simulatorStatus.enabled ? 'Enabled' : 'Disabled') : 'No link'}
+          headerActions={
+            <button
+              type="button"
+              onClick={handleSimulatorQuickToggle}
+              disabled={simulatorActionPending}
+              className={`px-2 py-1 text-[10px] uppercase tracking-wide rounded border transition ${
+                simulatorStatus?.enabled
+                  ? 'border-status-error/60 text-status-error hover:bg-status-error/10'
+                  : 'border-status-good/60 text-status-good hover:bg-status-good/15'
+              } ${simulatorActionPending ? 'opacity-60 cursor-not-allowed hover:bg-transparent' : ''}`}
+            >
+              {simulatorStatus?.enabled ? 'Disable' : 'Enable'}
+            </button>
+          }
         >
           <div className="flex flex-wrap items-center gap-2 text-[11px]">
             <span className={`px-2 py-0.5 border rounded ${simulatorBadge.className}`}>

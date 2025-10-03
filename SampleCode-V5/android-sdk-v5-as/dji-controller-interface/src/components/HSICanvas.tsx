@@ -253,12 +253,21 @@ export const HSICanvas: React.FC<HSICanvasProps> = ({
       if (Math.abs(x) < 0.05 && Math.abs(y) < 0.05) return;
 
       const magnitude = Math.sqrt(x * x + y * y);
-      const length = clamp(magnitude * 45, 0, radius * 0.55);
-      const angle = Math.atan2(x, y);
-      const vx = centerX + Math.sin(angle) * length;
-      const vy = centerY + Math.cos(angle) * length;
+      if (magnitude < 0.05) {
+        return;
+      }
 
-      ctx.strokeStyle = '#f97316';
+      const velocityLength = clamp(magnitude * 8, 0, radius * 0.85);
+      // Calculate angle in body frame (x=right, y=forward)
+      const bodyAngle = Math.atan2(velocity.x, velocity.y); // Note: x,y swapped for correct angle
+      // Since compass rotates by -compassHeading, we need to add compassHeading back
+      const displayAngle = bodyAngle - (-(compassHeading + 90.0) * Math.PI / 180);
+
+      // Calculate display position
+      const vx = centerX + Math.sin(displayAngle) * velocityLength;
+      const vy = centerY + Math.cos(displayAngle) * velocityLength;
+
+      ctx.strokeStyle = '#fbbf24';
       ctx.lineWidth = 2;
       ctx.setLineDash([6, 3]);
       ctx.beginPath();
@@ -267,9 +276,10 @@ export const HSICanvas: React.FC<HSICanvasProps> = ({
       ctx.stroke();
       ctx.setLineDash([]);
 
-      ctx.fillStyle = '#fb923c';
+      ctx.fillStyle = '#fbbf24';
       ctx.beginPath();
-      ctx.arc(vx, vy, 4, 0, Math.PI * 2);
+
+      ctx.arc(vx, vy, 3, 0, Math.PI * 2);
       ctx.fill();
     };
 
@@ -374,6 +384,7 @@ export const HSICanvas: React.FC<HSICanvasProps> = ({
           drawDistanceArray(perceptionDistances, 'perception');
         }
       } else if (Array.isArray(obstacleData.sectors) && obstacleData.sectors.length) {
+        drawDistanceArray(perceptionDistances, 'perception');
         drawObstacleSectors(obstacleData.sectors);
       } else if (Array.isArray(perceptionDistances) && perceptionDistances.length) {
         drawDistanceArray(perceptionDistances, 'perception');
@@ -382,23 +393,23 @@ export const HSICanvas: React.FC<HSICanvasProps> = ({
 
     const getObstacleColor = (distance: number) => {
       if (distance >= 6) {
-        return { color: 'rgb(255,0,0)', alpha: 1 };
+        return { color: 'rgb(255,0,0)', alpha: 0.9 };
       }
       if (distance < 1) {
-        return { color: 'rgb(255,0,0)', alpha: 0.9 };
+        return { color: 'rgb(255,0,0)', alpha: 0.8 };
       }
       if (distance < 2) {
         const t = distance - 1;
-        return { color: `rgb(255,${Math.round(165 * t)},0)`, alpha: 0.6 };
+        return { color: `rgb(255,${Math.round(165 * t)},0)`, alpha: 0.8 };
       }
       if (distance < 5) {
         const t = (distance - 2) / 3;
-        return { color: `rgb(255,${Math.round(165 + (255 - 165) * t)},0)`, alpha: 0.5 };
+        return { color: `rgb(255,${Math.round(165 + (255 - 165) * t)},0)`, alpha: 0.7 };
       }
       const t = clamp((distance - 5) / 3, 0, 1);
       const r = Math.round(255 - 179 * t);
       const b = Math.round(0 + 175 * t);
-      return { color: `rgb(${r},255,${b})`, alpha: 0.3 };
+      return { color: `rgb(${r},255,${b})`, alpha: 0.6 };
     };
 
     const drawDistanceArray = (distances: number[], source: 'radar' | 'perception') => {
@@ -413,9 +424,9 @@ export const HSICanvas: React.FC<HSICanvasProps> = ({
           return;
         }
         const angle = i * degreesPerSector;
-        const relative = (angle - compassHeading + 360) % 360;
-        const startRad = ((relative - degreesPerSector / 2 - 90) * Math.PI) / 180;
-        const endRad = ((relative + degreesPerSector / 2 - 90) * Math.PI) / 180;
+        const normalizedAngle = ((angle % 360) + 360) % 360;
+        const startRad = ((normalizedAngle - degreesPerSector / 2 - 90) * Math.PI) / 180;
+        const endRad = ((normalizedAngle + degreesPerSector / 2 - 90) * Math.PI) / 180;
         const useDistance = meters >= 6 ? 0.75 : meters;
         const sectorRadius = distanceToRadius(useDistance, scaleRange, radius);
         const { color, alpha } = getObstacleColor(meters);
@@ -448,14 +459,14 @@ export const HSICanvas: React.FC<HSICanvasProps> = ({
           caution: '#facc15',
         };
         const color = colors[sector.warning_level] || '#facc15';
-        const relative = (sector.angle - compassHeading + 360) % 360;
+        const normalizedAngle = ((sector.angle % 360) + 360) % 360;
         const spread = sector.source === 'radar' ? 10 : 6;
-        const startRad = ((relative - spread / 2 - 90) * Math.PI) / 180;
-        const endRad = ((relative + spread / 2 - 90) * Math.PI) / 180;
+        const startRad = ((normalizedAngle - spread / 2 - 90) * Math.PI) / 180;
+        const endRad = ((normalizedAngle + spread / 2 - 90) * Math.PI) / 180;
         const sectorRadius = distanceToRadius(sector.distance, scaleRange, radius);
 
         ctx.save();
-        ctx.globalAlpha = sector.warning_level === 'critical' ? 0.9 : sector.warning_level === 'warning' ? 0.6 : 0.4;
+        ctx.globalAlpha = sector.warning_level === 'critical' ? 0.5 : sector.warning_level === 'warning' ? 0.4 : 0.4;
         ctx.fillStyle = color;
         ctx.beginPath();
         ctx.moveTo(centerX, centerY);
