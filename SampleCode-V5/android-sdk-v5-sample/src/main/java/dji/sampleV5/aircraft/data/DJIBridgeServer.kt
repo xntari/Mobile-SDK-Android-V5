@@ -501,6 +501,53 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
             emptyMap()
         }
     }
+
+    private fun extractZoomRange(rangeValue: Any?): Map<String, Double>? {
+        return when (rangeValue) {
+            is ZoomRatiosRange -> {
+                fun extract(methodNames: List<String>): Double? {
+                    for (name in methodNames) {
+                        try {
+                            val method = rangeValue.javaClass.getMethod(name)
+                            val value = method.invoke(rangeValue) as? Number
+                            if (value != null) {
+                                return value.toDouble()
+                            }
+                        } catch (_: Exception) {
+                            // Ignore
+                        }
+                    }
+                    return null
+                }
+                val min = extract(listOf("getMinZoomRatio", "getMin", "getMinimum"))
+                val max = extract(listOf("getMaxZoomRatio", "getMax", "getMaximum"))
+                if (min != null && max != null) mapOf("min" to min, "max" to max) else null
+            }
+            is Pair<*, *> -> {
+                val min = (rangeValue.first as? Number)?.toDouble()
+                val max = (rangeValue.second as? Number)?.toDouble()
+                if (min != null && max != null) mapOf("min" to min, "max" to max) else null
+            }
+            is List<*> -> {
+                if (rangeValue.size >= 2) {
+                    val min = (rangeValue[0] as? Number)?.toDouble()
+                    val max = (rangeValue[1] as? Number)?.toDouble()
+                    if (min != null && max != null) {
+                        mapOf("min" to min, "max" to max)
+                    } else {
+                        null
+                    }
+                } else {
+                    null
+                }
+            }
+            is Number -> {
+                val value = rangeValue.toDouble()
+                mapOf("min" to value, "max" to value)
+            }
+            else -> null
+        }
+    }
     
     // Message Types - Extensible for all future data types
     enum class MessageType(val value: String) {
@@ -531,6 +578,9 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         CAMERA_LASER_RESULT("camera_laser_result"),
         CAMERA_LIVE_VIEW_LOCATION("camera_live_view_location"),
         CAMERA_ZOOM("camera_zoom"),
+        CAMERA_THERMAL_ZOOM("camera_thermal_zoom"),
+        CAMERA_THERMAL_SUPER_RESOLUTION("camera_thermal_super_resolution"),
+        CAMERA_CAPABILITIES("camera_capabilities"),
         GIMBAL_TAP_TARGET("gimbal_tap_target"),
         GIMBAL_RESPONSE("gimbal_response"),
         GIMBAL_FREE_LOOK_START("gimbal_free_look_start"),
@@ -1213,6 +1263,9 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
                 MessageType.CAMERA_LASER_GET -> handleCameraLaserGet(clientId, json)
                 MessageType.CAMERA_LASER_MEASURE -> handleCameraLaserMeasure(clientId, json)
                 MessageType.CAMERA_ZOOM -> handleCameraZoom(clientId, json)
+                MessageType.CAMERA_THERMAL_ZOOM -> handleCameraThermalZoom(clientId, json)
+                MessageType.CAMERA_THERMAL_SUPER_RESOLUTION -> handleCameraThermalSuperResolution(clientId, json)
+                MessageType.CAMERA_CAPABILITIES -> handleCameraCapabilitiesProbe(clientId, json)
                 MessageType.CAMERA_LIVE_VIEW_LOCATION -> handleCameraLiveViewLocation(clientId, json)
                 MessageType.GIMBAL_TAP_TARGET -> handleGimbalTapTarget(clientId, json)
                 MessageType.GIMBAL_FREE_LOOK_START -> handleGimbalFreeLookStart(clientId, json)
@@ -1283,6 +1336,126 @@ class DJIBridgeServer(private val port: Int, private val bridgeActivity: Any) {
         } catch (e: Exception) {
             Log.e(TAG, "camera_zoom error: ${e.message}", e)
             clients[clientId]?.let { sendErrorResponse(it, "camera_zoom failed: ${e.message}") }
+        }
+    }
+
+    private fun handleCameraThermalZoom(clientId: String, command: JSONObject) {
+        try {
+            val data = command.optJSONObject("data") ?: run {
+                clients[clientId]?.let { sendErrorResponse(it, "camera_thermal_zoom missing data") }
+                return
+            }
+
+            var ratio = data.optDouble("ratio", Double.NaN)
+            if (ratio.isNaN()) {
+                clients[clientId]?.let { sendErrorResponse(it, "camera_thermal_zoom ratio required") }
+                return
+            }
+
+            val componentName = data.optString("camera_index", "LEFT_OR_MAIN").uppercase(Locale.ROOT)
+            val component = ComponentIndexType.values().find { it.name == componentName } ?: ComponentIndexType.LEFT_OR_MAIN
+
+            // Thermal zoom typically supports 1x, 2x, 4x, 8x
+            val allowedLevels = listOf(1.0, 2.0, 4.0, 8.0)
+            val targetRatio = allowedLevels.minByOrNull { kotlin.math.abs(it - ratio) } ?: ratio
+
+            val key = KeyTools.createCameraKey<Double>(
+                CameraKey.KeyThermalZoomRatios,
+                component,
+                CameraLensType.CAMERA_LENS_THERMAL,
+            )
+            KeyManager.getInstance().setValue(key, targetRatio, null)
+
+            val response = mapOf(
+                "thermal_zoom" to mapOf(
+                    "ratio" to targetRatio,
+                    "camera_index" to component.name,
+                )
+            )
+            val message = createMessage(MessageType.CAMERA_STATUS, response)
+            clients[clientId]?.let { sendWebSocketTextFrame(it, message) }
+            Log.i(TAG, "Thermal zoom set to $targetRatio for client $clientId")
+        } catch (e: Exception) {
+            Log.e(TAG, "camera_thermal_zoom error: ${e.message}", e)
+            clients[clientId]?.let { sendErrorResponse(it, "camera_thermal_zoom failed: ${e.message}") }
+        }
+    }
+
+    private fun handleCameraThermalSuperResolution(clientId: String, command: JSONObject) {
+        Log.w(TAG, "camera_thermal_super_resolution not supported on this firmware")
+        clients[clientId]?.let { sendErrorResponse(it, "camera_thermal_super_resolution not supported") }
+    }
+
+    private fun handleCameraCapabilitiesProbe(clientId: String, command: JSONObject) {
+        try {
+            val keyManager = KeyManager.getInstance()
+            val component = ComponentIndexType.LEFT_OR_MAIN
+
+            val response = mutableMapOf<String, Any?>()
+
+            // Optical zoom data
+            val opticalInfo = mutableMapOf<String, Any?>()
+            try {
+                val zoomKey = KeyTools.createCameraKey<Double>(
+                    CameraKey.KeyCameraZoomRatios,
+                    component,
+                    CameraLensType.CAMERA_LENS_ZOOM,
+                )
+                val zoomRatio = keyManager.getValue(zoomKey) as? Double
+                if (zoomRatio != null) {
+                    opticalInfo["current"] = zoomRatio
+                }
+                val rangeKey = KeyTools.createCameraKey<ZoomRatiosRange>(
+                    CameraKey.KeyCameraZoomRatiosRange,
+                    component,
+                    CameraLensType.CAMERA_LENS_ZOOM,
+                )
+                val rangeValue = try { keyManager.getValue(rangeKey) } catch (_: Exception) { null }
+                val rangeMap = extractZoomRange(rangeValue)
+                if (rangeMap != null) {
+                    opticalInfo["range"] = rangeMap
+                }
+            } catch (e: Exception) {
+                opticalInfo["error"] = e.message ?: "unknown"
+            }
+            if (opticalInfo.isNotEmpty()) {
+                response["optical"] = opticalInfo
+            }
+
+            // Thermal zoom data
+            val thermalInfo = mutableMapOf<String, Any?>()
+            var thermalSupported = false
+            try {
+                val thermalZoomKey = KeyTools.createCameraKey<Double>(
+                    CameraKey.KeyThermalZoomRatios,
+                    component,
+                    CameraLensType.CAMERA_LENS_THERMAL,
+                )
+                val thermalRatio = keyManager.getValue(thermalZoomKey) as? Double
+                if (thermalRatio != null) {
+                    thermalInfo["current"] = thermalRatio
+                }
+                thermalInfo["range"] = mapOf("min" to 1.0, "max" to 8.0)
+                thermalInfo["levels"] = listOf(1, 2, 4, 8)
+                thermalSupported = true
+            } catch (e: Exception) {
+                thermalInfo["error"] = e.message ?: "unknown"
+            }
+            thermalInfo["supported"] = thermalSupported
+            response["thermal"] = thermalInfo
+
+            // Thermal super-resolution
+            val superResInfo = mutableMapOf<String, Any?>()
+            superResInfo["supported"] = false
+            superResInfo["enabled"] = false
+            response["thermal_super_resolution"] = superResInfo
+
+            val message = createMessage(MessageType.CAMERA_CAPABILITIES, response)
+            clients[clientId]?.let { sendWebSocketTextFrame(it, message) }
+            Log.i(TAG, "Camera capabilities probe delivered to $clientId")
+        } catch (e: Exception) {
+            Log.e(TAG, "camera_capabilities probe error: ${e.message}", e)
+            clients[clientId]?.let { sendErrorResponse(it, "camera_capabilities probe failed: ${e.message}") }
         }
     }
 

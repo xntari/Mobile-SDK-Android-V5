@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useSyncExternalStore } from "react";
 import { useStableBridgeData } from "../hooks/useStableBridgeData";
 import { TopBar } from "./TopBar";
 import { FPVDisplay, FPVDisplayRef } from "./FPVDisplay";
@@ -29,11 +29,14 @@ import { ProjectionControls } from "./ProjectionControls";
 import { FlightCommandsPanel } from "./FlightCommandsPanel";
 import { PreflightPanel } from "./PreflightPanel";
 import { FlyToPanel } from "./FlyToPanel";
+import CameraControlDock from "./CameraControlDock";
 import {
   ManualControlProvider,
   useManualControl,
 } from "../context/ManualControlContext";
 import type { ControllerData, FlightCommandAck, TelemetryData } from "../types";
+import { cameraControlStore } from "../state/cameraControls";
+import type { CameraControlSnapshot } from "../state/cameraControls";
 
 const formatPercent = (value: number) => {
   const percent = Math.round(value * 100);
@@ -221,7 +224,11 @@ export const App: React.FC = () => {
   const { bridgeData, connectionStatus } = useStableBridgeData();
 
   // Camera selection for snapshot functionality
-  const [selectedCamera, setSelectedCamera] = useState<"fpv" | "h20n">("fpv");
+  const cameraControl = useSyncExternalStore<CameraControlSnapshot>(
+    cameraControlStore.subscribe.bind(cameraControlStore),
+    cameraControlStore.getSnapshot.bind(cameraControlStore),
+  );
+  const selectedCamera = cameraControl.snapshotCamera;
 
   // Shared detection state for vision/agent integration
   const [visionDetections, setVisionDetections] = useState<any[]>([]);
@@ -469,35 +476,6 @@ export const App: React.FC = () => {
               telemetry={bridgeData.telemetry}
             />
 
-            {/* Camera Selector for Vision/Agent */}
-            <div className="absolute top-4 right-4 z-30">
-              <div className="glass-panel p-2">
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="text-gray-400">Snapshot Camera:</span>
-                  <button
-                    onClick={() => setSelectedCamera("fpv")}
-                    className={`px-3 py-1 rounded ${
-                      selectedCamera === "fpv"
-                        ? "bg-dji-blue text-white"
-                        : "bg-gray-700 text-gray-300 hover:bg-gray-600"
-                    }`}
-                  >
-                    FPV
-                  </button>
-                  <button
-                    onClick={() => setSelectedCamera("h20n")}
-                    className={`px-3 py-1 rounded ${
-                      selectedCamera === "h20n"
-                        ? "bg-dji-blue text-white"
-                        : "bg-gray-700 text-gray-300 hover:bg-gray-600"
-                    }`}
-                  >
-                    H20N
-                  </button>
-                </div>
-              </div>
-            </div>
-
             {/* Global panels - persist across camera switching */}
             <VisionPanel
               getSnapshot={getSnapshot}
@@ -545,6 +523,8 @@ export const App: React.FC = () => {
             />
 
             <ProjectionControls />
+
+            <CameraControlDock />
           </div>
         </div>
       </ManualControlProvider>

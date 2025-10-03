@@ -1,5 +1,6 @@
 // Global bridge state manager - survives React re-mounts
 import { BridgeDataState, ConnectionStatus, ControllerData, TelemetryData, BatteryData, FlightCommandAck, PreflightStatus, TelemetryDiagnosticEntry, DeviceStatusInfo, WaypointTimelineEntry, SimulatorTelemetry, SimulatorConfigurationSnapshot, SimulatorErrorSnapshot, PreflightFlightSettings, PreflightPowerStatus, PreflightControllerSettings, RemoteIDSnapshot } from './types';
+import { cameraControlStore } from './state/cameraControls';
 
 const hasWindow = typeof window !== 'undefined';
 const requestFrame: (callback: FrameRequestCallback) => number = hasWindow && typeof window.requestAnimationFrame === 'function'
@@ -473,6 +474,122 @@ class BridgeManager {
           telemetry: mappedTelemetry,
           lastUpdated: { ...this.bridgeData.lastUpdated, telemetry: timestamp }
         };
+        break;
+
+      case 'camera_status':
+        if (message.zoom_range && typeof message.zoom_range === 'object') {
+          cameraControlStore.setZoomRange({
+            min: typeof message.zoom_range.min === 'number' ? message.zoom_range.min : undefined,
+            max: typeof message.zoom_range.max === 'number' ? message.zoom_range.max : undefined,
+          });
+        }
+        if (typeof message.zoom_ratio === 'number' && Number.isFinite(message.zoom_ratio)) {
+          cameraControlStore.setZoomRatio(message.zoom_ratio);
+        }
+        if (typeof message.selected_lens === 'string') {
+          const rawLens = message.selected_lens.toLowerCase();
+          const normalized = rawLens.includes('zoom')
+            ? 'zoom'
+            : rawLens.includes('infrared') || rawLens.includes('thermal')
+              ? 'infrared'
+              : 'wide';
+          cameraControlStore.setSelectedLens(normalized as any);
+        }
+        if (typeof message.laser_enabled === 'boolean') {
+          cameraControlStore.setLaserEnabled(Boolean(message.laser_enabled));
+        }
+        const thermalZoomPayload = message.thermal_zoom;
+        if (thermalZoomPayload && typeof thermalZoomPayload === 'object') {
+          const ratio = typeof thermalZoomPayload.ratio === 'number' ? thermalZoomPayload.ratio : undefined;
+          if (ratio !== undefined && Number.isFinite(ratio)) {
+            const allowed = [1, 2, 4, 8];
+            const closest = allowed.reduce((prev, curr) => (Math.abs(curr - ratio) < Math.abs(prev - ratio) ? curr : prev));
+            cameraControlStore.setThermalZoom(closest as any);
+          }
+          if (thermalZoomPayload.range && typeof thermalZoomPayload.range === 'object') {
+            cameraControlStore.setThermalZoomRange({
+              min: typeof thermalZoomPayload.range.min === 'number' ? thermalZoomPayload.range.min : undefined,
+              max: typeof thermalZoomPayload.range.max === 'number' ? thermalZoomPayload.range.max : undefined,
+            });
+          }
+        }
+        const superResPayload = message.thermal_super_resolution;
+        if (superResPayload && typeof superResPayload === 'object' && typeof superResPayload.enabled === 'boolean') {
+          cameraControlStore.setThermalSuperResolution(Boolean(superResPayload.enabled));
+        }
+        break;
+
+      case 'camera_capabilities':
+        (() => {
+          const data = message.data && typeof message.data === 'object' ? message.data : message;
+          const capabilityEntries: { key: string; label?: string; value: unknown }[] = [];
+
+          const optical = data.optical;
+          if (optical && typeof optical === 'object') {
+            if (optical.range && typeof optical.range === 'object') {
+              const min = typeof optical.range.min === 'number' ? optical.range.min : undefined;
+              const max = typeof optical.range.max === 'number' ? optical.range.max : undefined;
+              cameraControlStore.setZoomRange({ min, max });
+              capabilityEntries.push({ key: 'optical.range.min', label: 'Optical min', value: min });
+              capabilityEntries.push({ key: 'optical.range.max', label: 'Optical max', value: max });
+            }
+            if (typeof optical.current === 'number') {
+              cameraControlStore.setZoomRatio(optical.current);
+              capabilityEntries.push({ key: 'optical.current', label: 'Optical current', value: optical.current });
+            }
+          }
+
+          const thermal = data.thermal;
+          if (thermal && typeof thermal === 'object') {
+            if (thermal.range && typeof thermal.range === 'object') {
+              cameraControlStore.setThermalZoomRange({
+                min: typeof thermal.range.min === 'number' ? thermal.range.min : undefined,
+                max: typeof thermal.range.max === 'number' ? thermal.range.max : undefined,
+              });
+              capabilityEntries.push({ key: 'thermal.range.min', label: 'Thermal min', value: thermal.range.min });
+              capabilityEntries.push({ key: 'thermal.range.max', label: 'Thermal max', value: thermal.range.max });
+            }
+            if (typeof thermal.current === 'number') {
+              const allowed = [1, 2, 4, 8];
+              const closest = allowed.reduce((prev, curr) => (Math.abs(curr - thermal.current) < Math.abs(prev - thermal.current) ? curr : prev));
+              cameraControlStore.setThermalZoom(closest as any);
+              capabilityEntries.push({ key: 'thermal.current', label: 'Thermal current', value: thermal.current });
+            }
+            if (Array.isArray(thermal.levels)) {
+              capabilityEntries.push({ key: 'thermal.levels', label: 'Thermal levels', value: thermal.levels });
+            }
+            if (typeof thermal.supported === 'boolean') {
+              capabilityEntries.push({ key: 'thermal.supported', label: 'Thermal supported', value: thermal.supported });
+            }
+          }
+
+          const superRes = data.thermal_super_resolution;
+          if (superRes && typeof superRes === 'object') {
+            if (typeof superRes.enabled === 'boolean') {
+              cameraControlStore.setThermalSuperResolution(superRes.enabled);
+            }
+            if (typeof superRes.supported === 'boolean') {
+              capabilityEntries.push({ key: 'thermal.super_resolution.supported', label: 'Thermal SR supported', value: superRes.supported });
+            }
+            if (superRes.enabled !== undefined) {
+              capabilityEntries.push({ key: 'thermal.super_resolution.enabled', label: 'Thermal SR enabled', value: superRes.enabled });
+            }
+          }
+
+          if (Array.isArray(data.entries)) {
+            data.entries.forEach((entry: any, index: number) => {
+              if (entry && typeof entry === 'object') {
+                capabilityEntries.push({
+                  key: entry.key ? String(entry.key) : `entry_${index}`,
+                  label: typeof entry.label === 'string' ? entry.label : undefined,
+                  value: entry.value,
+                });
+              }
+            });
+          }
+
+          cameraControlStore.setCameraCapabilities(capabilityEntries);
+        })();
         break;
 
       case 'battery_status':

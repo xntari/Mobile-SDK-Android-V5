@@ -573,7 +573,7 @@ export const TopBar: React.FC<TopBarProps> = ({
         <div className="relative">
           <button className="px-2 py-1 text-xs rounded bg-gray-700 text-gray-200 hover:bg-gray-600" onClick={()=>setMenuOpen(v=>!v)}>Settings ▾</button>
           {menuOpen && (
-            <div className="absolute right-0 mt-1 w-40 bg-gray-900 border border-gray-700 rounded shadow-lg text-xs z-50" onMouseLeave={()=>setMenuOpen(false)}>
+            <div className="absolute right-0 mt-1 w-40 bg-gray-900 border border-gray-700 rounded shadow-lg text-xs z-[2000]" onMouseLeave={()=>setMenuOpen(false)}>
               <button className="block w-full text-left px-3 py-2 hover:bg-gray-800" onClick={()=>{ setMenuOpen(false); setSettingsTab('models'); setOpenSettings(true); }}>Models</button>
               <button className="block w-full text-left px-3 py-2 hover:bg-gray-800" onClick={()=>{ setMenuOpen(false); setSettingsTab('endpoints'); setOpenSettings(true); }}>Endpoints</button>
             </div>

@@ -10,3 +10,4 @@ export const flightCommandsPanelControls = createPanelControls('flight.commands.
 export const objectMemoryPanelControls = createPanelControls('objectMemory.panel', 'objectMemoryPanelVisibilityChange');
 export const preflightPanelControls = createPanelControls('preflight.panel', 'preflightPanelVisibilityChange');
 export const missionControlPanelControls = createPanelControls('flyto.panel', 'flyToPanelVisibilityChange');
+export const cameraControlPanelControls = createPanelControls('cameraControls.panel', 'cameraControlsPanelVisibilityChange');

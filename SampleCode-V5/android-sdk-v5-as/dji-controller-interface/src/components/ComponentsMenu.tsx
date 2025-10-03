@@ -3,7 +3,7 @@ import { visionPanelControls } from './VisionPanel';
 import { visionRTPanelControls } from './VisionRealtimePanel';
 import { agentPanelControls } from './AgentPanel';
 import { fpvCameraPanelControls, h20nCameraPanelControls } from './CameraPanel';
-import { mapPanelControls, hsiPanelControls, controllerPanelControls, orientationPanelControls, projectionPanelControls, flightCommandsPanelControls, objectMemoryPanelControls, preflightPanelControls, missionControlPanelControls } from './panelControls';
+import { mapPanelControls, hsiPanelControls, controllerPanelControls, orientationPanelControls, projectionPanelControls, flightCommandsPanelControls, objectMemoryPanelControls, preflightPanelControls, missionControlPanelControls, cameraControlPanelControls } from './panelControls';
 import {
   getSavedLayouts,
   saveLayout,
@@ -107,6 +107,12 @@ const panelControls: PanelControl[] = [
     title: 'Mission Control',
     isVisible: missionControlPanelControls.isVisible,
     setVisible: missionControlPanelControls.setVisible
+  },
+  {
+    id: 'cameraControls',
+    title: 'Camera Controls',
+    isVisible: cameraControlPanelControls.isVisible,
+    setVisible: cameraControlPanelControls.setVisible
   }
 ];
 
@@ -224,7 +230,7 @@ export const ComponentsMenu: React.FC = () => {
 
       {menuOpen && (
         <div
-          className="absolute right-0 mt-1 w-64 bg-gray-900 border border-gray-700 rounded shadow-lg text-xs z-[100]"
+          className="absolute right-0 mt-1 w-64 bg-gray-900 border border-gray-700 rounded shadow-lg text-xs z-[2000]"
           onMouseLeave={() => setMenuOpen(false)}
         >
           {/* Panel toggles */}

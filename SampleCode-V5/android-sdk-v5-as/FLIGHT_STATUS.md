@@ -7,15 +7,17 @@ Use only standard ascii characters here - don't use ✅  or similar
 > **Transcript logging** - Append the user's instructions and your thought process (with ISO 8601 timestamps) to transcript.txt after every working session so we can reconstruct decision history later.
 ---
 
-## TL;DR (Sep 29 2025 20:24 - workspace, HEAD a9dac908f66c7a5533ebadd768efcb85aac58a97)
+## TL;DR (Oct 03 2025 10:15 - workspace, HEAD a9dac908f66c7a5533ebadd768efcb85aac58a97)
 
 - **Document discipline** - Update this file after every bridge/desktop change. Status, safety checklists, operator notes, and backlog items must always reflect the running code. Never mark a feature complete without field verification.
 - **Transcript discipline** - Keep transcript.txt current: append the latest user instructions and your thought process with ISO 8601 timestamps whenever you touch the project.
+- **Field validation** - Mission Control and gimbal tracking passed bench and field checks; the next focus is Section 2.1 (faster manual tracking, camera dock, collapsible panels, top-bar reflow, latency widget, and 3D terrain groundwork) with fallbacks captured for each workstream.
 - **Mission planner** - The shared mission planner store feeds the main map, Fly-To panel, Orientation, and HSI; map clicks (stage/waypoint/orbit) auto-populate targets, default altitudes come from set-height or the safety floor, and multi-waypoint plans now execute through the waypoint fallback backend with logging.
 - **Mission plan semantics** - Land steps now keep their mission coordinates, the Mission Control panel exposes “Add Home Waypoint” and “Add Origin (W1)” helpers, and finish actions only trigger when explicit return-home/land entries exist.
 - **Mission control editor** - Each waypoint now exposes turn mode/damping, heading (angle/POI/path base), gimbal heading, POI targets, and action groups; exports patch the WPML _and_ embed `mission-metadata.json`, and the loader hydrates those fields when reopening DJI Pilot or desktop plans.
 - **Realtime map & video pacing** - Map telemetry now batches through a single requestAnimationFrame cycle (no more per-update `easeTo`), skips recentering while the operator drags, and keeps manual pan smooth; FPV/H20N decoders only throttle when the simulator is running or the panel is hidden so visible feeds stay at full speed.
 - **Panel visibility** - Orientation panel unsubscribes from mission/object stores when hidden, and the shared visibility bus now drives the camera throttles—closing a panel tears subscriptions down immediately.
+- **Camera control dock** - The new floating dock consolidates gimbal/LookAt controls, manual-track presets, lens-specific zoom selectors (optical + thermal), capability probing, and FPV HUD/snapshot settings; thermal super-resolution toggles currently persist UI intent while we confirm SDK key support.
 - **Fly-To refactor** - Fly-To now fronts the mission planner (defaults, target staging, KMZ import/export). Multi-waypoint runs with RTH/Land finish actions were validated; orbit execution/export still needs work.
 - **Map controls** - Map auto-center now has a manual toggle beside auto-rotate; click drops a waypoint, Ctrl/⌘+click stages a target, and Option+click adds an orbit without breaking drag-to-pan.
 - **Manual mission tooling** - Desktop Fly-To panel supports map clicks, laser fixes, manual lat/lon entry, mission-wide simulation, and timeline export; validate on hardware before relying on it in the field.
@@ -44,9 +46,9 @@ Use only standard ascii characters here - don't use ✅  or similar
   13. 2025-09-23 - Manual control presets, kill/override audio cues, and keyboard session exports landed.
   14. 2025-09-08 - Simulator research documented (requires real aircraft, motors stay off, full API surface available for bench validation).
 
-  Next
-
-  1. **Mission Control (POI/orbit + LookAt integration)** - Curved fly-through uploads are stable; next we need to validate and refine the new POI/orbit workflow (global POI marker, orbit-mode defaults, and LookAt tooling). Upcoming work:
+Most recent verified features (2025-10-01):
+=====================================================
+  **Mission Control (POI/orbit + LookAt integration)** - Curved fly-through uploads are stable; next we need to validate and refine the new POI/orbit workflow (global POI marker, orbit-mode defaults, and LookAt tooling). Upcoming work:
      - Field-verify drift and gimbal modes (sim + hardware) to confirm headings, LookAt start/stop, and telemetry all stay in sync; capture logs/ack payloads for both success and failure cases.
      - Harden POI lifecycle (altitude persistence, reset semantics) and surface LookAt command status in Mission Control/H20N so operators see when tracking fails.
      - Wire LookAt state into mission telemetry/extra fields so the desktop timeline shows when we requested/stopped tracking (and highlight any DJI errors).
@@ -54,25 +56,16 @@ Use only standard ascii characters here - don't use ✅  or similar
      - Validate the dedicated `LOOK_AT_GIMBAL_FREE` control path in both H20N and Mission Control – the desktop now sets the gimbal attitude mode to FREE before dispatching LookAt, and Mission uploads pick `gimbal_free` vs `gimbal_following`; verify aircraft yaw behaviour matches expectations.
      - Document the operator flow (map click, staged target, LRF set, H20N panel) and update training notes once bench validation is complete.
 
-Plan:
------------------------------
   - Sample analysis - Keep diffing the DJI Pilot KMZ files under tmp_missions/pilot_generated/ to confirm how POI yaw lock, gimbal look-at, and orbit metadata are encoded.
   - Bridge updates - Introduce LookAt helpers (free, following, zoom circle) in the gimbal bridge, repoint orbit marker telemetry to the shared POI store, and ensure mission uploads toggle between aircraft-yaw control and LookAt gimbal control based on the selected orbit mode.
   - Geoid conversions - Audit DJI SDK helpers for geoid offsets (so far only `GpsUtils.egm96Altitude` is exposed; we backfilled EGM96→WGS84 via `GeoidModel.mslToEllipsoid`). Identify whether DJI ships an inverse helper before we rely on the bespoke model outside the West Coast.
   - Desktop planner - Update Mission Control state types and UI to surface the orbit mode selector, treat the orbit marker as the POI indicator, and round-trip the chosen mode through KMZ export/import without reintroducing legacy orbit actions.
   - Camera panel - Extend the H20N gimbal mode component with the new LookAt options plus manual target entry so operators can validate POI tracking outside of missions.
   - Verification - Bench test look-at commands (simulator + hardware) capturing yaw, gimbal pitch, and LookAt state telemetry; then run curved missions in `drift` and `gimbal` modes to confirm the aircraft or gimbal tracks the POI as expected.
-------------------------------
-  - **Object memory POI integration** – Promote named clusters from the Object Memory service into the Mission Control POI picker so a persistent cluster can seed LookAt/mission orbit runs (cluster CRUD + coordinate provenance needs to flow through `missionPlannerStore`). Bench-test with stored cluster coordinates and ensure LookAt altitude references stay consistent.
-  2. **3D mapping** – Introduce a 3D planning view (layers for street/satellite/topo) for waypoint editing and mission visualization; evaluate MapLibre plugins vs alternative basemaps.
-  3. Identify why the app crashes sometimes:
 
-```
- - sysctlbyname for kern.hv_vmm_present failed with status -1[33455:0929/164428.308724:ERROR:tile_manager.cc(835)] WARNING: tile memory limits exceeded, some content may 
-not draw                                                                           
-[33455:0929/164428.310136:ERROR:tile_manager.cc(835)] WARNING: tile memory limits exceeded, some content may not draw                                                  
-[33455:0929/164428.310772:ERROR:tile_manager.cc(835)] WARNING: tile memory limits exceeded, some content may not draw
-```
+  - **Object memory POI integration** – Promote named clusters from the Object Memory service into the Mission Control POI picker so a persistent cluster can seed LookAt/mission orbit runs (cluster CRUD + coordinate provenance needs to flow through `missionPlannerStore`). Bench-test with stored cluster coordinates and ensure LookAt altitude references stay consistent.
+=====================================================
+
 ## Completed backlog items
 
 - Components menu once again exposes Object Memory and Preflight, and clicking the SYSTEM badge in the top bar opens the Preflight checklist.
@@ -159,13 +152,65 @@ not draw
 
 ---
 
-## 2. Immediate Next Steps (Waypoint Mission Backend)
+## 2. Immediate Next Steps
+
+### 2.1 UI/UX and Gimbal Enhancements (Oct 2025)
+
+1. **Accelerate manual gimbal tracking loop**
+   Status: Adjustable yaw/pitch gains, deadband, smoothing, and loop-rate presets now live in the camera control dock and persist per payload. Next step is to capture field feedback (real aircraft + sim) to tune preset defaults and confirm we stay clear of ±300° yaw saturation.
+   Risks: Over-aggressive presets may still oscillate on specific payload firmware; loop-rate increases can collide with bridge latency during poor links.
+   Alternatives: Provide a “stability” preset that clamps rates and widen documentation on how to revert to SDK LookAt if oscillations appear.
+
+2. **Unified camera control dock follow-ups**
+   Status: First pass dock is shipping (gimbal/LookAt controls, manual-track tuning, lens selectors, FPV HUD, capability probe). Follow-ups include wiring remaining payload widgets (object memory staging, orientation debug), refining resize handles, and expanding telemetry readouts.
+   Risks: Additional modules may bloat the dock or reintroduce heavy render costs; dragging over video feeds still needs focus/keyboard QA.
+   Next: Audit hover/focus behaviour, add keyboard shortcuts, and document layout import/export conventions before broader rollout.
+
+3. **Collapsible architecture across major panels**
+   Plan: Extend the new collapsible pattern to Flight Commands, Mission Control, Object Memory, Preflight, and Orientation/HSI (including merging HSI visuals into Orientation with obstacle cues and vertical clearance). Persist open states, auto-expand when warnings are present, and ensure telemetry subscriptions tear down when sections collapse.
+   Risks: Legacy layouts depend on fixed heights; hiding warnings behind collapsed headings could mask critical alerts.
+   Alternatives: Keep legacy HSI as optional component until merged view proves reliable; badge collapsed headings with warning counts to avoid silent failures.
+
+4. **Style presets and tokenisation**
+   Plan: Define theme tokens (default, minimal, jet-fighter, tight spacing) and expose a style preset picker in Settings. Persist preset + custom overrides via localStore/layouts while keeping accessibility contrast thresholds. Provide one-click resets for new operators.
+   Risks: Token refactor may conflict with bespoke CSS in existing panels; older saved layouts might require migration shims.
+   Alternatives: Ship presets gradually (default + experimental) and maintain a compatibility layer that maps legacy class names until users migrate.
+
+5. **Top bar density, simulator badge, and latency widget**
+   Plan: Reflow the top bar to remove macOS window dots, group status blocks on the left, push hotkeys mid-bar, and anchor GPS/battery/time/right. Add a simulator mode indicator with quick toggles and surface a latency badge (UI→bridge ping or health timestamp delta) with alert thresholds.
+   Risks: Narrow viewports and localisation may overflow; naive ping loops could contend with command traffic.
+   Alternatives: If active probing is too noisy, reuse telemetry timestamps and only display delta; offer a “classic bar” toggle until responsive layout stabilises.
+
+6. **Latency + bandwidth diagnostics widget**
+   Plan: Build a collapsible diagnostics strip (likely adjacent to the new dock) that shows UI↔bridge RTT, WebSocket backlog, and optional command retry counts. Persist sampling rate and history depth per user.
+   Risks: Extra instrumentation may consume bandwidth on weak links; inaccurate RTT during heavy traffic could mislead operators.
+   Alternatives: Allow operators to throttle/disable probes and rely on existing logbook entries if the widget proves noisy.
+
+7. **3D terrain-aware mission planning**
+   Plan: Prototype MapLibre GL JS terrain (Terrain-RGB) with offline caching, overlay 2D/3D mission paths, and tie probes back into the EGM96 workflow. Document fallback options (CesiumJS, Mapbox GL JS, Google Maps) with cost/performance comparisons.
+   Risks: Terrain tiles may blow through cache budgets; differing geoid models can confuse altitude previews; older GPUs might stutter under 3D load.
+   Alternatives: Fall back to hybrid 2D map plus terrain cross-section while we validate caching; gate 3D mode behind a beta toggle if geoid alignment remains suspect.
+
+8. **Mission planning UX groundwork for agent-driven flows**
+   Plan: Streamline object-memory/POI selection to a guided, two-click experience, unify layout export/import so agent services can choose presets, and align data structures with upcoming natural-language planner APIs.
+   Risks: Simplifying the UI may hide expert features; designing around unfinalised agent APIs could cause rework.
+   Alternatives: Provide “basic” and “pro” modes while we iterate with the agent team; keep manual controls accessible via the Components menu until automation stabilises.
+
+### 2.2 Waypoint Mission Backend (backlog)
 
 1. **Field validation package** – Exercise the map/laser/manual targeting + simulation flow and the new external-KMZ loader on hardware (or simulator). Capture screenshots, ack JSON, selection metadata, KMZ paths, and exported timelines for the status archive.
 2. **Waypoint authoring expansion** – Extend mission authoring toward multi-point paths (climb legs, loiter/orbit primitives) while preserving the conservative safety defaults.
 3. **KMZ lifecycle & logging** – Surface generated KMZ metadata (download link + checksum) in the desktop logbook and add cache rotation on the bridge so `fly_to_waypoints/` does not grow indefinitely.
 4. **Operator guidance & validation** – Document the waypoint fallback checklist, collect field evidence (KMZ + telemetry) across firmware variants, and update UI messaging so pilots know when they are flying an intelligent vs. waypoint backend.
 
+### 3. Identify why the app crashes sometimes:
+
+```
+ - sysctlbyname for kern.hv_vmm_present failed with status -1[33455:0929/164428.308724:ERROR:tile_manager.cc(835)] WARNING: tile memory limits exceeded, some content may 
+not draw                                                                           
+[33455:0929/164428.310136:ERROR:tile_manager.cc(835)] WARNING: tile memory limits exceeded, some content may not draw                                                  
+[33455:0929/164428.310772:ERROR:tile_manager.cc(835)] WARNING: tile memory limits exceeded, some content may not draw
+```
 ---
 
 ## 3. Safety & Core Validation Checklist

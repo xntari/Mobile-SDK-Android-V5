@@ -1,4 +1,7 @@
 node_modules/
+Trace*.json
+tools/*.pt
+*.pt
 tools/data/*
 package-lock.json
 # Ignore vim files:

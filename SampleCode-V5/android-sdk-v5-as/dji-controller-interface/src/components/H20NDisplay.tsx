@@ -7,7 +7,7 @@ import React, {
   useCallback,
 } from "react";
 import { H20NDisplayProps, TelemetryData } from "../types";
-import { GimbalModeToggle, GimbalMode, GimbalAttitudeMode } from "./GimbalModeToggle";
+import type { GimbalMode, GimbalAttitudeMode } from "./GimbalModeToggle";
 import type { Detection, Mask } from "../agent/visionClient";
 import { CameraDisplay } from "./CameraDisplay";
 import {
@@ -30,12 +30,25 @@ import { usePanelVisibility } from "../hooks/usePanelVisibility";
 import { h20nCameraPanelControls } from "./CameraPanel";
 import { missionPlannerStore } from "../state/missionPlanner";
 import type { ManualTargetState, PoiTarget } from "../types/missionPlanner";
+import type { LookAtCommandMode } from "../camera/types";
+import { cameraControlStore } from "../state/cameraControls";
+import { ManualTrackControls } from "./ManualTrackControls";
+import {
+  manualTrackPresets,
+  type ManualTrackPresetId,
+  type ManualTrackSettings,
+  sanitizeManualTrackSettings,
+  detectManualTrackPreset,
+  loadManualTrackSettings,
+  loadManualTrackPreset,
+  DEFAULT_MANUAL_TRACK_SETTINGS,
+  MANUAL_TRACK_SETTINGS_STORAGE_KEY,
+  MANUAL_TRACK_PRESET_STORAGE_KEY,
+} from "../camera/manualTrack";
 
 const clampLat = (value: number) => Math.max(-90, Math.min(90, value));
 const clampLon = (value: number) => Math.max(-180, Math.min(180, value));
-type LookAtCommandMode = 'GIMBAL_FREE' | 'GIMBAL_FOLLOWING' | 'ZOOM_CIRCLE' | 'MANUAL_TRACK';
 
-const LOOK_AT_MODE_STORAGE_KEY = 'lookAt.defaultMode';
 
 export interface H20NDisplayRef {
   getSnapshot: () => Promise<string>;
@@ -124,50 +137,106 @@ const H20NDisplayComponent = (
     const [clickIndicators, setClickIndicators] = useState<ClickIndicator[]>(
       [],
     );
-    const [lastGimbalCommand, setLastGimbalCommand] = useState<{
+    const [lastGimbalCommand, setLastGimbalCommandInternal] = useState<{
       coordinates: { x: number; y: number };
       status: string;
       message: string;
       timestamp: number;
     } | null>(null);
+    const setLastGimbalCommand = useCallback((entry: {
+      coordinates: { x: number; y: number };
+      status: string;
+      message: string;
+      timestamp: number;
+    } | null) => {
+      setLastGimbalCommandInternal(entry);
+      cameraControlStore.setLastGimbalCommand(
+        entry
+          ? {
+              status: entry.status,
+              message: entry.message,
+              timestamp: entry.timestamp,
+              coordinates: entry.coordinates,
+            }
+          : null,
+      );
+    }, []);
     const [droppedFrameCount, setDroppedFrameCount] = useState<number>(0);
     const [missionPoiTarget, setMissionPoiTarget] = useState<PoiTarget | null>(() => missionPlannerStore.getSnapshot().poiTarget ?? null);
     const [missionManualTarget, setMissionManualTarget] = useState<ManualTargetState | null>(() => missionPlannerStore.getSnapshot().manualTarget);
-    const [lookAtSelection, setLookAtSelection] = useState<LookAtCommandMode>(() => {
-      if (typeof window === 'undefined') {
-        return 'GIMBAL_FOLLOWING';
-      }
-      try {
-        const stored = window.localStorage.getItem(LOOK_AT_MODE_STORAGE_KEY);
-        if (stored === 'GIMBAL_FREE' || stored === 'GIMBAL_FOLLOWING' || stored === 'ZOOM_CIRCLE' || stored === 'MANUAL_TRACK') {
-          return stored;
-        }
-      } catch {
-        // ignore
-      }
-      return 'GIMBAL_FOLLOWING';
-    });
-    const [lookAtStatus, setLookAtStatus] = useState<string | null>(null);
-    const [lookAtBusy, setLookAtBusy] = useState(false);
+    const [lookAtSelection, setLookAtSelectionState] = useState<LookAtCommandMode>(() => cameraControlStore.getSnapshot().lookAtMode);
+    const [lookAtStatus, setLookAtStatusState] = useState<string | null>(() => cameraControlStore.getSnapshot().lookAtStatus);
+    const [lookAtBusy, setLookAtBusyState] = useState(() => cameraControlStore.getSnapshot().lookAtBusy);
     const lookAtIntervalRef = useRef<number | null>(null);
-    const [gimbalAttitudeMode, setGimbalAttitudeMode] = useState<GimbalAttitudeMode>('YAW_FOLLOW');
+    const [gimbalAttitudeMode, setGimbalAttitudeMode] = useState<GimbalAttitudeMode>(() => cameraControlStore.getSnapshot().gimbalAttitudeMode);
     const lookAtModeRef = useRef<LookAtCommandMode>(lookAtSelection);
     const dispatchLookAtRef = useRef<((mode: LookAtCommandMode, options?: { silent?: boolean }) => Promise<boolean>) | null>(null);
     const lookAtLoopActiveRef = useRef<boolean>(false);
-    const lookAtBusyRef = useRef<boolean>(false);
+    const lookAtBusyRef = useRef<boolean>(lookAtBusy);
     const latestLookAtTargetRef = useRef<PoiTarget | null>(null);
+    const manualTrackInitialSettingsRef = useRef<ManualTrackSettings | null>(cameraControlStore.getSnapshot().manualTrackSettings);
+    const [manualTrackSettings, setManualTrackSettings] = useState<ManualTrackSettings>(() => {
+      const initial = manualTrackInitialSettingsRef.current ?? loadManualTrackSettings();
+      manualTrackInitialSettingsRef.current = initial;
+      return initial;
+    });
+    const [manualTrackPreset, setManualTrackPreset] = useState<ManualTrackPresetId | 'custom'>(() =>
+      loadManualTrackPreset(manualTrackInitialSettingsRef.current ?? DEFAULT_MANUAL_TRACK_SETTINGS),
+    );
+    const manualTrackVelocityRef = useRef<{ vx: number; vy: number }>({ vx: 0, vy: 0 });
+
+    const setLookAtSelection = useCallback((mode: LookAtCommandMode) => {
+      setLookAtSelectionState(mode);
+      cameraControlStore.setLookAtMode(mode);
+      lookAtModeRef.current = mode;
+    }, []);
+
+    const setLookAtStatus = useCallback((status: string | null) => {
+      setLookAtStatusState(status);
+      cameraControlStore.setLookAtStatus(status);
+    }, []);
+
+    const setLookAtBusy = useCallback((busy: boolean) => {
+      setLookAtBusyState(busy);
+      cameraControlStore.setLookAtBusy(busy);
+      lookAtBusyRef.current = busy;
+    }, []);
 
     // Gimbal Free Look state
-    const [gimbalMode, setGimbalMode] = useState<GimbalMode>("look_at");
-    const [selectedLens, setSelectedLens] = useState<
+    const [gimbalMode, setGimbalModeInternal] = useState<GimbalMode>(() => cameraControlStore.getSnapshot().gimbalMode);
+    const setGimbalMode = useCallback((mode: GimbalMode) => {
+      setGimbalModeInternal(mode);
+      cameraControlStore.setGimbalMode(mode);
+    }, []);
+    const [selectedLens, setSelectedLensInternal] = useState<
       "wide" | "zoom" | "infrared"
     >("wide");
-    const [laserOn, setLaserOn] = useState<boolean>(false);
+    const setSelectedLens = useCallback((lens: "wide" | "zoom" | "infrared") => {
+      setSelectedLensInternal(lens);
+      cameraControlStore.setSelectedLens(lens);
+    }, []);
+    const [laserOn, setLaserOnInternal] = useState<boolean>(() => cameraControlStore.getSnapshot().laserEnabled);
+    const setLaserOn = useCallback((enabled: boolean) => {
+      setLaserOnInternal(enabled);
+      cameraControlStore.setLaserEnabled(enabled);
+    }, []);
+    useEffect(() => {
+      const unsubscribe = cameraControlStore.subscribe(() => {
+        const { laserEnabled } = cameraControlStore.getSnapshot();
+        setLaserOnInternal((prev) => (prev === laserEnabled ? prev : laserEnabled));
+      });
+      return unsubscribe;
+    }, []);
+
     const [laserReadout, setLaserReadout] = useState<{
       text: string;
       timestamp: number;
     } | null>(null);
-    const [lastLaserResult, setLastLaserResult] = useState<any | null>(null);
+    const [lastLaserResult, setLastLaserResultInternal] = useState<any | null>(null);
+    const setLastLaserResult = useCallback((result: any | null) => {
+      setLastLaserResultInternal(result);
+      cameraControlStore.setLastLaserResult(result);
+    }, []);
     const laserHideTimerRef = useRef<number | null>(null);
     const [isFreeLookActive, setIsFreeLookActive] = useState(false);
     const freeLookUpdateInterval = useRef<NodeJS.Timeout | null>(null);
@@ -184,16 +253,28 @@ const H20NDisplayComponent = (
     const isFreeLookActiveRef = useRef<boolean>(false);
     const freeLookSessionOwnerRef = useRef<'pointer' | 'manual' | null>(null);
     const manualTrackActiveRef = useRef<boolean>(false);
-    const MANUAL_TRACK_INTERVAL_MS = 100;
     const FREE_LOOK_MAX_RATE_DEG = 120;
-    const MANUAL_TRACK_MAX_YAW_RATE = 90;
-    const MANUAL_TRACK_MAX_PITCH_RATE = 60;
-    const MANUAL_TRACK_YAW_GAIN = 1.2;
-    const MANUAL_TRACK_PITCH_GAIN = 1.0;
-    const MANUAL_TRACK_DEADBAND_DEG = 0.4;
+    const manualTrackYawGain = manualTrackSettings.yawGain;
+    const manualTrackPitchGain = manualTrackSettings.pitchGain;
+    const manualTrackYawRateLimit = manualTrackSettings.yawRateLimit;
+    const manualTrackPitchRateLimit = manualTrackSettings.pitchRateLimit;
+    const manualTrackDeadbandDeg = manualTrackSettings.deadband;
+    const manualTrackIntervalMs = manualTrackSettings.intervalMs;
+    const manualTrackSmoothing = manualTrackSettings.smoothing;
     const MANUAL_TRACK_LIMIT_DEG = 300;
     const MANUAL_TRACK_LIMIT_MARGIN_DEG = MANUAL_TRACK_LIMIT_DEG - 5;
     const MANUAL_TRACK_FLIP_THRESHOLD_DEG = 288;
+
+    useEffect(() => {
+      manualTrackVelocityRef.current = { vx: 0, vy: 0 };
+    }, [
+      manualTrackDeadbandDeg,
+      manualTrackPitchGain,
+      manualTrackPitchRateLimit,
+      manualTrackSmoothing,
+      manualTrackYawGain,
+      manualTrackYawRateLimit,
+    ]);
 
     const bridgeHasSendCommand = Boolean(
       typeof window !== 'undefined' &&
@@ -226,6 +307,7 @@ const H20NDisplayComponent = (
       manualTrackActiveRef.current = false;
       freeLookSessionOwnerRef.current = null;
       manualTrackCurrentYawRef.current = null;
+      manualTrackVelocityRef.current = { vx: 0, vy: 0 };
 
       if (!bridgeHasSendCommand) {
         return;
@@ -277,6 +359,7 @@ const H20NDisplayComponent = (
           manualTrackActiveRef.current = true;
           freeLookSessionOwnerRef.current = 'manual';
           manualTrackCurrentYawRef.current = null;
+          manualTrackVelocityRef.current = { vx: 0, vy: 0 };
         } catch (error) {
           manualTrackActiveRef.current = false;
           if (!(options?.silent ?? false)) {
@@ -314,15 +397,28 @@ const H20NDisplayComponent = (
 
     useEffect(() => {
       lookAtModeRef.current = lookAtSelection;
-      if (typeof window === 'undefined') {
-        return;
-      }
+    }, [lookAtSelection]);
+
+    useEffect(() => {
       try {
-        window.localStorage.setItem(LOOK_AT_MODE_STORAGE_KEY, lookAtSelection);
+        window.localStorage.setItem(
+          MANUAL_TRACK_SETTINGS_STORAGE_KEY,
+          JSON.stringify(manualTrackSettings),
+        );
       } catch {
         // ignore storage errors
       }
-    }, [lookAtSelection]);
+    }, [manualTrackSettings]);
+
+    useEffect(() => {
+      if (manualTrackPreset === 'custom' || manualTrackPreset === 'smooth' || manualTrackPreset === 'balanced' || manualTrackPreset === 'aggressive') {
+        try {
+          window.localStorage.setItem(MANUAL_TRACK_PRESET_STORAGE_KEY, manualTrackPreset);
+        } catch {
+          // ignore storage errors
+        }
+      }
+    }, [manualTrackPreset]);
 
     const clearLookAtInterval = useCallback(() => {
       if (lookAtIntervalRef.current !== null) {
@@ -426,21 +522,111 @@ const H20NDisplayComponent = (
     const minZoom = typeof zoomRange?.min === "number" ? zoomRange.min : 1;
     const maxZoom = typeof zoomRange?.max === "number" ? zoomRange.max : 30;
 
-    const sendZoomCommand = React.useCallback((ratio: number) => {
+    useEffect(() => {
+      cameraControlStore.setZoomRange({ min: minZoom, max: maxZoom });
+    }, [minZoom, maxZoom]);
+
+    const sendZoomCommand = React.useCallback((ratio: number): Promise<void> | void => {
       const api = (window as any)?.electronAPI;
       if (!api?.sendBridgeCommand) {
         console.warn("camera_zoom unavailable: bridge command channel missing");
         return;
       }
-      api
+      return api
         .sendBridgeCommand({
           type: "camera_zoom",
           data: { ratio },
         })
+        .then(() => {
+          cameraControlStore.setZoomRatio(ratio);
+        })
         .catch((error: any) => {
           console.error("camera_zoom error", error);
         });
-    }, [simulatorActive]);
+    }, []);
+
+    const sendThermalZoomCommand = useCallback(async (ratio: number) => {
+      if (!bridgeHasSendCommand) {
+        setLookAtStatus('Bridge command channel unavailable');
+        return;
+      }
+      try {
+        await (window as any)?.electronAPI?.sendBridgeCommand({
+          type: 'camera_thermal_zoom',
+          data: { ratio },
+        });
+        cameraControlStore.setThermalZoom(ratio as any);
+        setLookAtStatus(`Thermal zoom set to ${ratio.toFixed(1)}×`);
+      } catch (error) {
+        setLookAtStatus(error instanceof Error ? error.message : 'Thermal zoom update failed');
+      }
+    }, [bridgeHasSendCommand, setLookAtStatus]);
+
+    const sendThermalSuperResolutionCommand = useCallback(async (enabled: boolean) => {
+      if (!bridgeHasSendCommand) {
+        setLookAtStatus('Bridge command channel unavailable');
+        return;
+      }
+      try {
+        await (window as any)?.electronAPI?.sendBridgeCommand({
+          type: 'camera_thermal_super_resolution',
+          data: { enabled },
+        });
+        cameraControlStore.setThermalSuperResolution(enabled);
+        setLookAtStatus(`Thermal SR ${enabled ? 'enabled' : 'disabled'}`);
+      } catch (error) {
+        setLookAtStatus(error instanceof Error ? error.message : 'Thermal SR update failed');
+      }
+    }, [bridgeHasSendCommand, setLookAtStatus]);
+
+    const sendLensSelectCommand = useCallback(async (lens: 'wide' | 'zoom' | 'infrared') => {
+      if (!bridgeHasSendCommand) {
+        setLookAtStatus('Bridge command channel unavailable');
+        return;
+      }
+      try {
+        await (window as any)?.electronAPI?.sendBridgeCommand({
+          type: 'camera_select',
+          data: { lens },
+        });
+        setSelectedLens(lens);
+        setLookAtStatus(`Switched to ${lens}`);
+      } catch (error) {
+        setLookAtStatus(error instanceof Error ? error.message : 'Camera select failed');
+      }
+    }, [bridgeHasSendCommand, setSelectedLens, setLookAtStatus]);
+
+    const sendLaserEnableCommand = useCallback(async (enabled: boolean) => {
+      if (!bridgeHasSendCommand) {
+        setLookAtStatus('Bridge command channel unavailable');
+        return;
+      }
+      try {
+        await (window as any)?.electronAPI?.sendBridgeCommand({
+          type: 'camera_laser_enable',
+          data: { enabled },
+        });
+        setLaserOn(enabled);
+        setLookAtStatus(`Laser ${enabled ? 'enabled' : 'disabled'}`);
+      } catch (error) {
+        setLookAtStatus(error instanceof Error ? error.message : 'Laser toggle failed');
+      }
+    }, [bridgeHasSendCommand, setLaserOn, setLookAtStatus]);
+
+    const requestCameraCapabilities = useCallback(async () => {
+      if (!bridgeHasSendCommand) {
+        cameraControlStore.setCameraCapabilitiesError('Bridge command channel unavailable');
+        cameraControlStore.setCameraCapabilitiesLoading(false);
+        return;
+      }
+      try {
+        await (window as any)?.electronAPI?.sendBridgeCommand({
+          type: 'camera_capabilities',
+        });
+      } catch (error) {
+        cameraControlStore.setCameraCapabilitiesError(error instanceof Error ? error.message : 'Probe failed');
+      }
+    }, [bridgeHasSendCommand]);
 
     const handleZoomSliderChange = React.useCallback(
       (ratio: number) => {
@@ -493,7 +679,6 @@ const H20NDisplayComponent = (
     }, []);
 
     const handleSetGimbalAttitudeMode = useCallback(async (mode: GimbalAttitudeMode) => {
-      setGimbalAttitudeMode(mode);
       if (!bridgeHasSendCommand) {
         setLookAtStatus('Bridge command channel unavailable');
         return;
@@ -503,11 +688,30 @@ const H20NDisplayComponent = (
           type: 'gimbal_set_mode',
           data: { mode },
         });
+        setGimbalAttitudeMode(mode);
+        cameraControlStore.setGimbalAttitudeMode(mode);
         setLookAtStatus(`Gimbal mode set to ${mode.replace('_', ' ').toLowerCase()}`);
       } catch (error) {
         setLookAtStatus(error instanceof Error ? error.message : 'Failed to set gimbal mode');
       }
-    }, [bridgeHasSendCommand]);
+    }, [bridgeHasSendCommand, setLookAtStatus]);
+
+    const handleManualTrackSettingsChange = useCallback((updates: Partial<ManualTrackSettings>) => {
+      setManualTrackSettings((prev) => {
+        const next = sanitizeManualTrackSettings({ ...prev, ...updates });
+        const nextPreset = detectManualTrackPreset(next);
+        setManualTrackPreset(nextPreset);
+        cameraControlStore.setManualTrackSettings(next);
+        return next;
+      });
+    }, []);
+
+    const handleManualTrackPresetSelect = useCallback((preset: ManualTrackPresetId) => {
+      const template = sanitizeManualTrackSettings(manualTrackPresets[preset]);
+      setManualTrackSettings(template);
+      setManualTrackPreset(preset);
+      cameraControlStore.applyManualTrackPreset(preset);
+    }, []);
 
     const dispatchManualTrack = useCallback(async (options?: { silent?: boolean }): Promise<boolean> => {
       const silent = options?.silent ?? false;
@@ -643,26 +847,47 @@ const H20NDisplayComponent = (
       const yawError = bestYaw - gimbalContinuousYaw;
       const pitchError = pitchTarget - gimbalPitch;
 
-      const yawRate = clamp(yawError * MANUAL_TRACK_YAW_GAIN, -MANUAL_TRACK_MAX_YAW_RATE, MANUAL_TRACK_MAX_YAW_RATE);
-      const pitchRate = clamp(pitchError * MANUAL_TRACK_PITCH_GAIN, -MANUAL_TRACK_MAX_PITCH_RATE, MANUAL_TRACK_MAX_PITCH_RATE);
+      const yawRate = clamp(
+        yawError * manualTrackYawGain,
+        -manualTrackYawRateLimit,
+        manualTrackYawRateLimit,
+      );
+      const pitchRate = clamp(
+        pitchError * manualTrackPitchGain,
+        -manualTrackPitchRateLimit,
+        manualTrackPitchRateLimit,
+      );
 
       let vx = yawRate / FREE_LOOK_MAX_RATE_DEG;
       let vy = -pitchRate / FREE_LOOK_MAX_RATE_DEG;
 
-      if (Math.abs(yawError) < MANUAL_TRACK_DEADBAND_DEG) {
+      if (Math.abs(yawError) < manualTrackDeadbandDeg) {
         vx = 0;
       }
-      if (Math.abs(pitchError) < MANUAL_TRACK_DEADBAND_DEG) {
+      if (Math.abs(pitchError) < manualTrackDeadbandDeg) {
         vy = 0;
       }
 
-      vx = clamp(vx, -1, 1);
-      vy = clamp(vy, -1, 1);
+      if (Math.abs(vx) < 1e-4 && Math.abs(vy) < 1e-4) {
+        manualTrackVelocityRef.current = { vx: 0, vy: 0 };
+      } else {
+        const smoothingAlpha = Math.min(0.95, Math.max(0, manualTrackSmoothing));
+        if (smoothingAlpha > 0) {
+          const prev = manualTrackVelocityRef.current;
+          vx = smoothingAlpha * prev.vx + (1 - smoothingAlpha) * vx;
+          vy = smoothingAlpha * prev.vy + (1 - smoothingAlpha) * vy;
+        }
+        vx = clamp(vx, -1, 1);
+        vy = clamp(vy, -1, 1);
+        manualTrackVelocityRef.current = { vx, vy };
+      }
+
+      const commandVelocity = manualTrackVelocityRef.current;
 
       try {
         await (window as any)?.electronAPI?.sendBridgeCommand({
           type: 'gimbal_free_look_update',
-          data: { vx, vy },
+          data: { vx: commandVelocity.vx, vy: commandVelocity.vy },
         });
         if (!silent) {
           setLookAtStatus(`Manual track Δyaw ${yawError.toFixed(1)}° · Δpitch ${pitchError.toFixed(1)}°`);
@@ -678,11 +903,12 @@ const H20NDisplayComponent = (
       clamp,
       ensureManualFreeLookSession,
       FREE_LOOK_MAX_RATE_DEG,
-      MANUAL_TRACK_DEADBAND_DEG,
-      MANUAL_TRACK_MAX_PITCH_RATE,
-      MANUAL_TRACK_MAX_YAW_RATE,
-      MANUAL_TRACK_PITCH_GAIN,
-      MANUAL_TRACK_YAW_GAIN,
+      manualTrackDeadbandDeg,
+      manualTrackPitchGain,
+      manualTrackPitchRateLimit,
+      manualTrackSmoothing,
+      manualTrackYawGain,
+      manualTrackYawRateLimit,
       normalizeAngle180,
       normalizeAngle360,
       resolveLookAtTarget,
@@ -723,7 +949,6 @@ const H20NDisplayComponent = (
       if (!options?.silent) {
         setLookAtBusy(true);
       }
-      lookAtBusyRef.current = true;
 
       try {
         await gimbalLookAt({
@@ -746,7 +971,6 @@ const H20NDisplayComponent = (
         if (!options?.silent) {
           setLookAtBusy(false);
         }
-        lookAtBusyRef.current = false;
       }
     }, [
       asStatusLabel,
@@ -756,6 +980,20 @@ const H20NDisplayComponent = (
       telemetryData?.location,
       telemetryData,
     ]);
+
+    const restartLookAtLoop = useCallback(
+      (mode: LookAtCommandMode) => {
+        clearLookAtInterval();
+        const intervalMs = mode === 'MANUAL_TRACK' ? manualTrackIntervalMs : 1000;
+        lookAtIntervalRef.current = window.setInterval(() => {
+          const loopDispatch = dispatchLookAtRef.current;
+          if (loopDispatch) {
+            void loopDispatch(lookAtModeRef.current, { silent: true });
+          }
+        }, intervalMs);
+      },
+      [clearLookAtInterval, manualTrackIntervalMs],
+    );
 
     const handleLookAtCommand = useCallback(async (mode: LookAtCommandMode) => {
       if (!bridgeHasSendCommand) {
@@ -769,7 +1007,6 @@ const H20NDisplayComponent = (
         console.warn('Failed to set gimbal attitude mode to FREE before LookAt', error);
       }
 
-      clearLookAtInterval();
       lookAtLoopActiveRef.current = false;
       if (mode !== 'MANUAL_TRACK') {
         await stopManualTrackSession({ silent: true });
@@ -785,19 +1022,14 @@ const H20NDisplayComponent = (
       }
 
       lookAtLoopActiveRef.current = true;
-      const intervalMs = mode === 'MANUAL_TRACK' ? MANUAL_TRACK_INTERVAL_MS : 1000;
-      lookAtIntervalRef.current = window.setInterval(() => {
-        const loopDispatch = dispatchLookAtRef.current;
-        if (loopDispatch) {
-          void loopDispatch(lookAtModeRef.current, { silent: true });
-        }
-      }, intervalMs);
+      restartLookAtLoop(mode);
     }, [
-      MANUAL_TRACK_INTERVAL_MS,
       bridgeHasSendCommand,
       clearLookAtInterval,
       dispatchLookAt,
       handleSetGimbalAttitudeMode,
+      manualTrackIntervalMs,
+      restartLookAtLoop,
       stopManualTrackSession,
     ]);
 
@@ -827,7 +1059,6 @@ const H20NDisplayComponent = (
         : telemetryData?.location?.altitude ?? 0;
 
       setLookAtBusy(true);
-      lookAtBusyRef.current = true;
       try {
         await gimbalLookAt({
           latitude: clampLat(target.latitude),
@@ -841,7 +1072,6 @@ const H20NDisplayComponent = (
         setLookAtStatus(error instanceof Error ? error.message : 'Failed to stop LookAt');
       } finally {
         setLookAtBusy(false);
-        lookAtBusyRef.current = false;
       }
     }, [
       bridgeHasSendCommand,
@@ -871,6 +1101,71 @@ const H20NDisplayComponent = (
     useEffect(() => {
       dispatchLookAtRef.current = dispatchLookAt;
     }, [dispatchLookAt]);
+
+    useEffect(() => {
+      if (!lookAtLoopActiveRef.current) {
+        return;
+      }
+      if (lookAtModeRef.current !== 'MANUAL_TRACK') {
+        return;
+      }
+      restartLookAtLoop('MANUAL_TRACK');
+    }, [manualTrackIntervalMs, restartLookAtLoop]);
+
+    useEffect(() => {
+      cameraControlStore.registerHandlers({
+        setGimbalMode: async (mode) => {
+          setGimbalMode(mode);
+        },
+        setGimbalAttitudeMode: async (mode) => {
+          await handleSetGimbalAttitudeMode(mode);
+        },
+        setLookAtMode: async (mode) => {
+          setLookAtSelection(mode);
+        },
+        startLookAt: async (mode) => {
+          await handleLookAtCommand(mode);
+        },
+        stopLookAt: async () => {
+          await handleStopLookAt();
+        },
+        setThermalZoom: async (level) => {
+          if (typeof level === 'number') {
+            await sendThermalZoomCommand(level);
+          }
+        },
+        setThermalSuperResolution: async (enabled) => {
+          await sendThermalSuperResolutionCommand(Boolean(enabled));
+        },
+        setLens: async (lens) => {
+          await sendLensSelectCommand((lens as 'wide' | 'zoom' | 'infrared') ?? 'wide');
+        },
+        setOpticalZoom: async (ratio) => {
+          const result = sendZoomCommand(Number(ratio));
+          if (result && typeof (result as Promise<void>).then === 'function') {
+            await result;
+          }
+        },
+        setLaserEnabled: async (enabled) => {
+          await sendLaserEnableCommand(Boolean(enabled));
+        },
+        refreshCapabilities: async () => {
+          await requestCameraCapabilities();
+        },
+      });
+    }, [
+      handleLookAtCommand,
+      handleSetGimbalAttitudeMode,
+      handleStopLookAt,
+      requestCameraCapabilities,
+      sendLaserEnableCommand,
+      sendLensSelectCommand,
+      sendThermalSuperResolutionCommand,
+      sendThermalZoomCommand,
+      setGimbalMode,
+      setLookAtSelection,
+      sendZoomCommand,
+    ]);
 
     const handleSetPoiFromManualTarget = useCallback(() => {
       const source = missionManualTarget;
@@ -912,6 +1207,32 @@ const H20NDisplayComponent = (
       missionPlannerStore.setPoiTarget(null);
       setLookAtStatus('POI cleared');
     }, []);
+
+    useEffect(() => {
+      cameraControlStore.registerHandlers({
+        setPoiFromManualTarget: async () => {
+          handleSetPoiFromManualTarget();
+        },
+        setPoiFromLaser: async () => {
+          handleSetPoiFromLaser();
+        },
+        clearPoi: async () => {
+          handleClearPoi();
+        },
+        updateManualTrackSettings: (updates) => {
+          handleManualTrackSettingsChange(updates);
+        },
+        applyManualTrackPreset: (preset) => {
+          handleManualTrackPresetSelect(preset);
+        },
+      });
+    }, [
+      handleClearPoi,
+      handleManualTrackPresetSelect,
+      handleManualTrackSettingsChange,
+      handleSetPoiFromLaser,
+      handleSetPoiFromManualTarget,
+    ]);
 
     // Helper: provide a snapshot of the current canvas as base64 JPEG
     const getSnapshot = async (): Promise<string> => {
@@ -2378,135 +2699,7 @@ const H20NDisplayComponent = (
           }}
         />
 
-        {/* Gimbal Mode Toggle - default bottom-left */}
-        <div className="absolute bottom-4 left-4 z-30 pointer-events-auto">
-          <GimbalModeToggle
-            mode={gimbalMode}
-            onModeChange={setGimbalMode}
-            isFreeLookActive={isFreeLookActive}
-            freeLookVelocity={freeLookVelocity}
-            sensitivity={sensitivity}
-            smoothing={smoothing}
-            onSensitivityChange={setSensitivity}
-            onSmoothingChange={setSmoothing}
-            selectedLens={selectedLens}
-            onLensChange={(lens) => {
-              setSelectedLens(lens);
-              if ((window as any).electronAPI) {
-                (window as any).electronAPI
-                  .sendBridgeCommand({
-                    type: "camera_select",
-                    data: { lens },
-                  })
-                  .catch(() => {});
-              }
-            }}
-            laserOn={laserOn}
-            onToggleLaser={(on) => {
-              setLaserOn(on);
-              if ((window as any).electronAPI) {
-                (window as any).electronAPI
-                  .sendBridgeCommand({
-                    type: "camera_laser_enable",
-                    data: { enabled: on },
-                  })
-                  .catch(() => {});
-              }
-            }}
-            zoomRatio={zoomValue}
-            zoomRange={telemetryData?.camera_optics?.zoom_range}
-            zoomEnabled={bridgeHasSendCommand}
-            onZoomChange={handleZoomSliderChange}
-            gimbalAttitudeMode={gimbalAttitudeMode}
-            onGimbalAttitudeModeChange={handleSetGimbalAttitudeMode}
-          />
-        </div>
-
-        <div className="absolute top-4 right-4 z-30 pointer-events-auto w-72">
-          <div className="glass-panel p-3 text-xs text-gray-200 space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-gray-400 uppercase text-[11px]">LookAt / POI</span>
-              {lookAtBusy && <span className="text-[10px] text-yellow-400">sending…</span>}
-            </div>
-            <div className="text-[11px] text-gray-300">
-              <div>
-                <span className="text-gray-500">POI:</span>{' '}
-                {missionPoiTarget
-                  ? `${missionPoiTarget.latitude.toFixed(6)}, ${missionPoiTarget.longitude.toFixed(6)}`
-                  : 'None'}
-              </div>
-              {missionPoiTarget?.altitude != null && Number.isFinite(missionPoiTarget.altitude) && (
-                <div className="text-[10px] text-gray-500">
-                  Alt {missionPoiTarget.altitude.toFixed(1)} m
-                </div>
-              )}
-              {missionManualTarget?.latitude != null && missionManualTarget.longitude != null && (
-                <div className="text-[10px] text-gray-500 mt-1">
-                  Staged target {missionManualTarget.latitude.toFixed(6)},{' '}
-                  {missionManualTarget.longitude.toFixed(6)}
-                </div>
-              )}
-            </div>
-            <div className="flex flex-wrap gap-1">
-              <button
-                type="button"
-                onClick={handleSetPoiFromManualTarget}
-                className="px-2 py-1 rounded border border-sky-500/60 bg-sky-500/15 text-sky-200 disabled:opacity-40 disabled:cursor-not-allowed"
-                disabled={!(missionManualTarget && missionManualTarget.latitude != null && missionManualTarget.longitude != null)}
-              >
-                Use staged target
-              </button>
-              <button
-                type="button"
-                onClick={handleSetPoiFromLaser}
-                className="px-2 py-1 rounded border border-emerald-500/60 bg-emerald-500/15 text-emerald-200 disabled:opacity-40 disabled:cursor-not-allowed"
-                disabled={!lastLaserResult}
-              >
-                Use last LRF
-              </button>
-              <button
-                type="button"
-                onClick={handleClearPoi}
-                className="px-2 py-1 rounded border border-gray-600 bg-black/40 text-gray-200 disabled:opacity-40 disabled:cursor-not-allowed"
-                disabled={!missionPoiTarget}
-              >
-                Clear POI
-              </button>
-            </div>
-            <div className="flex flex-col gap-1">
-              <span className="text-[10px] text-gray-400">LookAt mode</span>
-              <select
-                value={lookAtSelection}
-                onChange={(event) => setLookAtSelection(event.target.value as LookAtCommandMode)}
-                className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200"
-              >
-                <option value="GIMBAL_FOLLOWING">Gimbal + aircraft follow</option>
-                <option value="GIMBAL_FREE">Gimbal only (keep aircraft attitude)</option>
-                <option value="ZOOM_CIRCLE">Zoom circle</option>
-                <option value="MANUAL_TRACK">Manual track (sim override)</option>
-              </select>
-            </div>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => handleLookAtCommand(lookAtSelection)}
-                className="flex-1 px-2 py-1 rounded border border-purple-500/60 bg-purple-500/15 text-purple-200 disabled:opacity-40 disabled:cursor-not-allowed"
-                disabled={lookAtBusy}
-              >
-                Start
-              </button>
-              <button
-                type="button"
-                onClick={() => handleStopLookAt()}
-                className="flex-1 px-2 py-1 rounded border border-gray-600 bg-black/40 text-gray-200 disabled:opacity-40 disabled:cursor-not-allowed"
-                disabled={lookAtBusy}
-              >
-                Stop
-              </button>
-            </div>
-            {lookAtStatus && <div className="text-[10px] text-gray-400">{lookAtStatus}</div>}
-          </div>
-        </div>
+        {/* Controls moved to CameraControlDock */}
 
         {/* Video content overlay area - matches actual video display rectangle */}
         <div
@@ -3222,56 +3415,6 @@ const H20NDisplayComponent = (
             </div>
           )}
 
-          {/* Gimbal debug panel */}
-          {lastGimbalCommand && (
-            <div className="absolute bottom-4 right-4 glass-panel p-3 text-xs font-mono">
-              <div className="flex items-center gap-2 mb-2">
-                <div
-                  className={`w-2 h-2 rounded-full ${
-                    lastGimbalCommand.status === "SUCCESS"
-                      ? "bg-green-500"
-                      : "bg-red-500"
-                  }`}
-                ></div>
-                <span className="text-white font-semibold">GIMBAL STATUS</span>
-              </div>
-
-              <div className="space-y-1 text-gray-300">
-                <div>
-                  <span className="text-gray-500">Status: </span>
-                  <span
-                    className={
-                      lastGimbalCommand.status === "SUCCESS"
-                        ? "text-green-400"
-                        : "text-red-400"
-                    }
-                  >
-                    {lastGimbalCommand.status}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-gray-500">Target: </span>
-                  <span className="text-blue-400">
-                    ({lastGimbalCommand.coordinates.x.toFixed(3)},{" "}
-                    {lastGimbalCommand.coordinates.y.toFixed(3)})
-                  </span>
-                </div>
-                <div>
-                  <span className="text-gray-500">Message: </span>
-                  <span className="text-white text-xs">
-                    {lastGimbalCommand.message}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-gray-500">Time: </span>
-                  <span className="text-gray-400">
-                    {new Date(lastGimbalCommand.timestamp).toLocaleTimeString()}
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
-
           {/* Camera settings overlay */}
           {false && (
             <div className="absolute bottom-4 left-4 glass-panel p-3 text-sm">
@@ -3316,6 +3459,18 @@ const H20NDisplayComponent = (
           {/* HUD Overlay - Center of camera view */}
           <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-30">
             <CameraDisplay />
+          </div>
+
+          {/* Center crosshair marker */}
+          <div className="absolute top-1/2 left-1/2 pointer-events-none z-40">
+            <div className="relative -translate-x-1/2 -translate-y-1/2 w-10 h-10">
+              <div className="absolute inset-0 border border-sky-300/60 rounded-sm" />
+              <div className="absolute left-1/2 top-[20%] -translate-x-1/2 w-px h-2 bg-sky-300/70" />
+              <div className="absolute left-1/2 bottom-[20%] -translate-x-1/2 w-px h-2 bg-sky-300/70" />
+              <div className="absolute top-1/2 left-[20%] -translate-y-1/2 h-px w-2 bg-sky-300/70" />
+              <div className="absolute top-1/2 right-[20%] -translate-y-1/2 h-px w-2 bg-sky-300/70" />
+              <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-1 h-1 bg-sky-100" />
+            </div>
           </div>
 
           {/* Custom overlays passed as children */}

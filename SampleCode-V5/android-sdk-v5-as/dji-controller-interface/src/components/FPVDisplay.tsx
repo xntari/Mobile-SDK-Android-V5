@@ -4,6 +4,7 @@ import React, {
   useState,
   forwardRef,
   useImperativeHandle,
+  useSyncExternalStore,
 } from "react";
 import { FPVDisplayProps, TelemetryData } from "../types";
 import type { Detection, Mask } from "../agent/visionClient";
@@ -25,6 +26,8 @@ import { spawnVideoRendererWorker } from "../utils/videoRendererWorker";
 import { telemetryShallowEqual } from "../utils/telemetryCompare";
 import { usePanelVisibility } from "../hooks/usePanelVisibility";
 import { fpvCameraPanelControls } from "./CameraPanel";
+import { cameraControlStore } from "../state/cameraControls";
+import type { CameraControlSnapshot } from "../state/cameraControls";
 
 export interface FPVDisplayRef {
   getSnapshot: () => Promise<string>;
@@ -103,77 +106,15 @@ const FPVDisplayComponent = (
     const rendererWorkerRef = useRef<Worker | null>(null);
     const workerReadyRef = useRef<boolean>(false);
 
-    // HUD toggle
-    const [hudEnabled, setHudEnabled] = useState<boolean>(() => {
-      try {
-        const raw = localStorage.getItem("fpv.hud.enabled");
-        if (raw) return JSON.parse(raw);
-      } catch {}
-      return true;
-    });
-    useEffect(() => {
-      try {
-        localStorage.setItem("fpv.hud.enabled", JSON.stringify(hudEnabled));
-      } catch {}
-    }, [hudEnabled]);
-    const [hudTheme, setHudTheme] = useState<"classic" | "contrast">(() => {
-      try {
-        const raw = localStorage.getItem("fpv.hud.theme");
-        if (raw === "contrast") return "contrast";
-      } catch {}
-      return "classic";
-    });
-    useEffect(() => {
-      try {
-        localStorage.setItem("fpv.hud.theme", hudTheme);
-      } catch {}
-    }, [hudTheme]);
-    const toggleHudTheme = () =>
-      setHudTheme((prev) => (prev === "contrast" ? "classic" : "contrast"));
-
-    const [hudOverlayMode, setHudOverlayMode] = useState<
-      "panel" | "inline" | "none"
-    >(() => {
-      try {
-        const raw = localStorage.getItem("fpv.hud.overlay.mode");
-        if (raw === "panel" || raw === "inline" || raw === "none") {
-          return raw;
-        }
-      } catch {}
-      return "inline";
-    });
-    useEffect(() => {
-      try {
-        localStorage.setItem("fpv.hud.overlay.mode", hudOverlayMode);
-      } catch {}
-    }, [hudOverlayMode]);
-
-    const [hudOverlayOpacity, setHudOverlayOpacity] = useState<number>(() => {
-      try {
-        const raw = localStorage.getItem("fpv.hud.overlay.opacity");
-        if (raw != null) {
-          const parsed = parseFloat(raw);
-          if (!Number.isNaN(parsed)) {
-            return Math.min(Math.max(parsed, 0), 1);
-          }
-        }
-      } catch {}
-      return 0.35;
-    });
-    useEffect(() => {
-      try {
-        localStorage.setItem(
-          "fpv.hud.overlay.opacity",
-          hudOverlayOpacity.toString(),
-        );
-      } catch {}
-    }, [hudOverlayOpacity]);
-
-    const cycleHudOverlayMode = () => {
-      setHudOverlayMode((prev) =>
-        prev === "panel" ? "inline" : prev === "inline" ? "none" : "panel",
-      );
-    };
+    const cameraControlSnapshot = useSyncExternalStore<CameraControlSnapshot>(
+      cameraControlStore.subscribe.bind(cameraControlStore),
+      cameraControlStore.getSnapshot.bind(cameraControlStore),
+    );
+    const hudSettings = cameraControlSnapshot.fpvHud;
+    const hudEnabled = hudSettings.enabled;
+    const hudTheme = hudSettings.theme;
+    const hudOverlayMode = hudSettings.overlayMode;
+    const hudOverlayOpacity = hudSettings.overlayOpacity;
 
     useEffect(() => {
       const unsubscribe = objectMemoryTargetStore.subscribe(setObjectTarget);
@@ -1892,80 +1833,6 @@ const FPVDisplayComponent = (
               </div>
             </div>
           )}
-
-          {/* Camera settings overlay */}
-          <div className="absolute bottom-4 left-4 glass-panel p-3 text-sm">
-            <div className="flex items-center gap-4">
-              <div>
-                <span className="text-gray-400">Mode: </span>
-                <span className="text-white">Video</span>
-              </div>
-              <div>
-                <span className="text-gray-400">Lens: </span>
-                <span className="text-white">Wide</span>
-              </div>
-              <div>
-                <span className="text-gray-400">ISO: </span>
-                <span className="text-white">AUTO</span>
-              </div>
-              <div>
-                <span className="text-gray-400">Quality: </span>
-                <span className="text-white">4K/60</span>
-              </div>
-              <div>
-                <span className="text-gray-400">HUD: </span>
-                <button
-                  className={`px-2 py-0.5 rounded text-xs ${hudEnabled ? "bg-dji-blue text-white" : "bg-gray-700 text-gray-200"}`}
-                  onClick={() => setHudEnabled((v) => !v)}
-                >
-                  {hudEnabled ? "On" : "Off"}
-                </button>
-              </div>
-              <div>
-                <span className="text-gray-400">Style: </span>
-                <button
-                  className={`px-2 py-0.5 rounded text-xs ${hudTheme === "contrast" ? "bg-status-good/20 text-status-good border border-status-good/60" : "bg-gray-700 text-gray-200"}`}
-                  onClick={toggleHudTheme}
-                >
-                  {hudTheme === "contrast" ? "High Contrast" : "Classic"}
-                </button>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-gray-400">Overlay:</span>
-                <button
-                  className={`px-2 py-0.5 rounded text-xs ${hudOverlayMode === "none" ? "bg-gray-700 text-gray-200" : "bg-dji-blue text-white"}`}
-                  onClick={cycleHudOverlayMode}
-                >
-                  {hudOverlayMode === "panel"
-                    ? "Panel"
-                    : hudOverlayMode === "inline"
-                      ? "Inline"
-                      : "None"}
-                </button>
-                <label
-                  className={`flex items-center gap-2 text-[11px] ${hudOverlayMode === "none" ? "text-gray-600" : "text-gray-300"}`}
-                >
-                  <span>Opacity</span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={80}
-                    step={5}
-                    value={Math.round(hudOverlayOpacity * 100)}
-                    disabled={hudOverlayMode === "none"}
-                    onChange={(event) => {
-                      const raw = Number(event.target.value) / 100;
-                      setHudOverlayOpacity(Math.min(Math.max(raw, 0), 1));
-                    }}
-                    className="h-1 w-24 accent-status-good"
-                  />
-                  <span className="w-10 text-right">
-                    {Math.round(hudOverlayOpacity * 100)}%
-                  </span>
-                </label>
-              </div>
-            </div>
-          </div>
 
           {/* HUD Overlay - Center of camera view */}
           {hudEnabled && (
