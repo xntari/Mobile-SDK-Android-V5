@@ -1,5 +1,6 @@
 import React from 'react';
 import { Panel } from './Panel';
+import { CollapsibleSection } from './CollapsibleSection';
 import {
   listClusters,
   getCluster,
@@ -378,42 +379,71 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
       storageKey="objectMemory.panel"
       visibilityEventType="objectMemoryPanelVisibilityChange"
     >
-      <div className="flex flex-col gap-2 text-xs text-gray-200 h-full overflow-hidden">
-        <div className="flex items-center gap-3">
-          <button className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded" onClick={refreshClusters} disabled={loading}>Refresh</button>
-          <label className="flex items-center gap-1 text-[10px] text-gray-400">
-            sort
-            <select className="bg-gray-800 text-xs px-2 py-1 rounded" value={sortMode} onChange={(e)=>setSortMode(e.target.value as any)}>
-              <option value="updated">recent</option>
-              <option value="alpha">name</option>
-              <option value="samples">samples</option>
-              <option value="cohesion">cohesion</option>
-              <option value="neighbor">nearest</option>
-              <option value="detect">det label</option>
-            </select>
-          </label>
-          <button
-            className="px-2 py-1 bg-gray-800 hover:bg-gray-700 rounded text-[10px]"
-            onClick={() => setSortDirection(dir => (dir === 'asc' ? 'desc' : 'asc'))}
-            title={`Sort ${sortDirection === 'asc' ? 'ascending' : 'descending'}`}
-          >
-            {sortDirection === 'asc' ? '↑' : '↓'}
-          </button>
-          {loading && <span className="text-gray-500">loading…</span>}
-          {message && <span className="text-gray-400 truncate max-w-[200px]">{message}</span>}
-        </div>
-        <div className="flex-1 flex gap-3 overflow-hidden">
-          <div className="w-48 overflow-y-auto border border-gray-700 rounded p-2">
+      <div className="space-y-3 text-xs text-gray-200 h-full overflow-y-auto pr-1">
+        <CollapsibleSection
+          title="Cluster Browser"
+          storageKey="objectMemory.section.browser"
+          summary={
+            loading
+              ? 'Loading…'
+              : clusters.length
+              ? `${clusters.length} clusters`
+              : 'No clusters'
+          }
+        >
+          <div className="flex flex-wrap items-center gap-2 text-[11px]">
+            <button
+              className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded"
+              onClick={refreshClusters}
+              disabled={loading}
+            >
+              Refresh
+            </button>
+            <label className="flex items-center gap-1 text-[10px] text-gray-400">
+              sort
+              <select
+                className="bg-gray-800 text-xs px-2 py-1 rounded"
+                value={sortMode}
+                onChange={(event) => setSortMode(event.target.value as any)}
+              >
+                <option value="updated">recent</option>
+                <option value="alpha">name</option>
+                <option value="samples">samples</option>
+                <option value="cohesion">cohesion</option>
+                <option value="neighbor">nearest</option>
+                <option value="detect">det label</option>
+              </select>
+            </label>
+            <button
+              className="px-2 py-1 bg-gray-800 hover:bg-gray-700 rounded text-[10px]"
+              onClick={() => setSortDirection((dir) => (dir === 'asc' ? 'desc' : 'asc'))}
+              title={`Sort ${sortDirection === 'asc' ? 'ascending' : 'descending'}`}
+            >
+              {sortDirection === 'asc' ? '↑' : '↓'}
+            </button>
+          </div>
+          {(loading || message) && (
+            <div className="text-[10px] text-gray-500 flex items-center gap-2">
+              {loading && <span>loading…</span>}
+              {message && <span className="truncate max-w-[240px]">{message}</span>}
+            </div>
+          )}
+          <div className="mt-2 border border-gray-700 rounded bg-black/30 max-h-72 overflow-y-auto">
             {clusters.map((cluster) => (
               <button
                 key={cluster.cluster_id}
-                className={`block w-full text-left text-[11px] px-2 py-1 rounded mb-1 ${selectedId === cluster.cluster_id ? 'bg-gray-700' : 'hover:bg-gray-800'}`}
+                className={`block w-full text-left text-[11px] px-2 py-1 border-b border-gray-800 last:border-b-0 ${selectedId === cluster.cluster_id ? 'bg-gray-800/70' : 'hover:bg-gray-900/70'}`}
                 onClick={() => void loadCluster(cluster.cluster_id)}
               >
                 <div className="font-semibold text-gray-100 flex items-center gap-1">
                   <span>{cluster.label || '(unlabeled)'}</span>
                   {cluster.object_map_anchor ? (
-                    <span className={`${activeTarget?.clusterId === cluster.cluster_id ? 'text-amber-400' : 'text-emerald-400'} text-[11px]`} title="Has laser telemetry anchor">📍</span>
+                    <span
+                      className={`${activeTarget?.clusterId === cluster.cluster_id ? 'text-amber-400' : 'text-emerald-400'} text-[11px]`}
+                      title="Has laser telemetry anchor"
+                    >
+                      📍
+                    </span>
                   ) : null}
                 </div>
                 <div className="text-gray-500">
@@ -428,38 +458,65 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
                 ) : null}
               </button>
             ))}
-            {!clusters.length && !loading && <div className="text-gray-500 text-[11px]">No clusters yet</div>}
+            {!clusters.length && !loading && (
+              <div className="px-2 py-3 text-[11px] text-gray-500">No clusters yet</div>
+            )}
           </div>
+        </CollapsibleSection>
 
-          <div className="flex-1 overflow-y-auto border border-gray-700 rounded p-3">
-            {selectedId && clusterDetail ? (
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center gap-2">
-                  <div className="text-[11px] text-gray-400">Cluster</div>
-                  <code className="text-[10px] bg-gray-800 px-2 py-0.5 rounded">{clusterDetail.cluster.cluster_id}</code>
-                  <div className="text-[10px] text-gray-500">
-                    {clusterDetail.cluster.sample_count} samples · max {clusterDetail.cluster.max_samples ?? maxSamplesInput}
-                    {typeof clusterDetail.cluster.mean_similarity === 'number' ? ` · μ ${clusterDetail.cluster.mean_similarity.toFixed(3)}` : ''}
-                    {typeof clusterDetail.cluster.nearest_neighbor_similarity === 'number' ? ` · ↔ ${clusterDetail.cluster.nearest_neighbor_similarity.toFixed(3)}` : ''}
+        <CollapsibleSection
+          title="Cluster Detail"
+          storageKey="objectMemory.section.detail"
+          summary={
+            clusterDetail
+              ? clusterDetail.cluster.label || clusterDetail.cluster.cluster_id
+              : selectedId || 'Not selected'
+          }
+        >
+          {selectedId && clusterDetail ? (
+            <div className="space-y-3">
+              <CollapsibleSection
+                title="Overview"
+                storageKey="objectMemory.detail.section.overview"
+              >
+                <div className="space-y-1 text-[11px] text-gray-300">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-gray-400 uppercase tracking-wide text-[10px]">Cluster</span>
+                    <code className="text-[10px] bg-gray-800 px-2 py-0.5 rounded">{clusterDetail.cluster.cluster_id}</code>
+                    <span className="text-[10px] text-gray-500">
+                      {clusterDetail.cluster.sample_count} samples · max {clusterDetail.cluster.max_samples ?? maxSamplesInput}
+                      {typeof clusterDetail.cluster.mean_similarity === 'number' ? ` · μ ${clusterDetail.cluster.mean_similarity.toFixed(3)}` : ''}
+                      {typeof clusterDetail.cluster.nearest_neighbor_similarity === 'number' ? ` · ↔ ${clusterDetail.cluster.nearest_neighbor_similarity.toFixed(3)}` : ''}
+                    </span>
                   </div>
+                  {clusterDetail.cluster.nearest_neighbor_id && (
+                    <div className="text-[10px] text-gray-500">
+                      nearest cluster: <code className="bg-gray-800 px-1 py-0.5 rounded">{clusterDetail.cluster.nearest_neighbor_id}</code>
+                      {typeof clusterDetail.cluster.nearest_neighbor_similarity === 'number' ? ` (${clusterDetail.cluster.nearest_neighbor_similarity.toFixed(3)})` : ''}
+                    </div>
+                  )}
+                  {clusterDetail.cluster.detect_label_stats?.length ? (
+                    <div className="text-[10px] text-gray-400">
+                      YOLO labels: {summarizeDetectLabels(clusterDetail.cluster.detect_label_stats, 5)}
+                    </div>
+                  ) : null}
                 </div>
-                {clusterDetail.cluster.nearest_neighbor_id && (
-                  <div className="text-[10px] text-gray-500">
-                    nearest cluster: <code className="bg-gray-800 px-1 py-0.5 rounded">{clusterDetail.cluster.nearest_neighbor_id}</code>
-                    {typeof clusterDetail.cluster.nearest_neighbor_similarity === 'number' ? ` (${clusterDetail.cluster.nearest_neighbor_similarity.toFixed(3)})` : ''}
-                  </div>
-                )}
-                {clusterDetail.cluster.detect_label_stats?.length ? (
-                  <div className="text-[10px] text-gray-400">
-                    YOLO labels: {summarizeDetectLabels(clusterDetail.cluster.detect_label_stats, 5)}
-                  </div>
-                ) : null}
+              </CollapsibleSection>
+
+              <CollapsibleSection
+                title="Anchor & Target"
+                storageKey="objectMemory.detail.section.anchor"
+                defaultOpen={Boolean(selectedClusterAnchor)}
+                summary={selectedClusterAnchor ? 'Anchor set' : 'No anchor'}
+              >
                 {selectedClusterAnchor ? (
                   <div className="bg-gray-900/70 border border-emerald-600/70 rounded p-2 text-[10px] text-gray-200 flex flex-col gap-1">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex items-center gap-2 text-emerald-300 font-semibold uppercase tracking-wide">
                         <span>Laser Anchor</span>
-                        {selectedAnchorIsActive && <span className="text-amber-300 text-[9px] font-normal uppercase">active</span>}
+                        {selectedAnchorIsActive && (
+                          <span className="text-amber-300 text-[9px] font-normal uppercase">active</span>
+                        )}
                       </div>
                       <div className="text-gray-500 font-mono">sample {selectedClusterAnchor.sample_id}</div>
                     </div>
@@ -492,11 +549,13 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
                       {!selectedAnchorIsActive ? (
                         <button
                           className="px-2 py-1 bg-emerald-700 hover:bg-emerald-600 rounded text-gray-100"
-                          onClick={() => objectMemoryTargetStore.set({
-                            clusterId: clusterDetail.cluster.cluster_id,
-                            clusterLabel: clusterDetail.cluster.label,
-                            anchor: selectedClusterAnchor,
-                          })}
+                          onClick={() =>
+                            objectMemoryTargetStore.set({
+                              clusterId: clusterDetail.cluster.cluster_id,
+                              clusterLabel: clusterDetail.cluster.label,
+                              anchor: selectedClusterAnchor,
+                            })
+                          }
                         >
                           Send to nav overlays
                         </button>
@@ -510,55 +569,112 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
                       )}
                     </div>
                   </div>
-                ) : null}
-                <div className="flex items-center gap-2">
+                ) : (
+                  <div className="text-[10px] text-gray-500">No anchor data for this cluster.</div>
+                )}
+              </CollapsibleSection>
+
+              <CollapsibleSection
+                title="Management"
+                storageKey="objectMemory.detail.section.management"
+              >
+                <div className="flex flex-wrap items-center gap-2">
                   <input
                     className="bg-gray-800 text-xs px-2 py-1 rounded w-40"
                     placeholder="label"
                     value={labelInput}
-                    onChange={(e)=>setLabelInput(e.target.value)}
+                    onChange={(event) => setLabelInput(event.target.value)}
                   />
                   <button className="px-2 py-1 bg-indigo-700 hover:bg-indigo-600 rounded" onClick={handleLabelSave}>Save Label</button>
-                  <select className="bg-gray-800 text-xs px-2 py-1 rounded" value={mergeSource} onChange={(e)=>setMergeSource(e.target.value)}>
+                  <select
+                    className="bg-gray-800 text-xs px-2 py-1 rounded"
+                    value={mergeSource}
+                    onChange={(event) => setMergeSource(event.target.value)}
+                  >
                     <option value="">merge source…</option>
-                    {clusters.filter(c=>c.cluster_id!==selectedId).map(c=> (
-                      <option key={c.cluster_id} value={c.cluster_id}>{c.label || c.cluster_id}</option>
-                    ))}
+                    {clusters
+                      .filter((cluster) => cluster.cluster_id !== selectedId)
+                      .map((cluster) => (
+                        <option key={cluster.cluster_id} value={cluster.cluster_id}>
+                          {cluster.label || cluster.cluster_id}
+                        </option>
+                      ))}
                   </select>
-                  <button className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded" onClick={handleMerge} disabled={!mergeSource}>Merge → current</button>
+                  <button
+                    className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded"
+                    onClick={handleMerge}
+                    disabled={!mergeSource}
+                  >
+                    Merge → current
+                  </button>
                   <button className="px-2 py-1 bg-red-700 hover:bg-red-600 rounded" onClick={handleDeleteCluster}>Delete Cluster</button>
                 </div>
-                <div className="flex flex-wrap items-center gap-3 text-[10px] text-gray-400">
-                  <label className="flex items-center gap-1">max samples
-                    <input type="range" min={5} max={200} step={1} value={maxSamplesInput} onChange={(e)=>setMaxSamplesInput(parseInt(e.target.value))} className="w-32" />
+                <div className="flex flex-wrap items-center gap-3 text-[10px] text-gray-400 mt-2">
+                  <label className="flex items-center gap-1">
+                    max samples
+                    <input
+                      type="range"
+                      min={5}
+                      max={200}
+                      step={1}
+                      value={maxSamplesInput}
+                      onChange={(event) => setMaxSamplesInput(parseInt(event.target.value, 10))}
+                      className="w-32"
+                    />
                     <span className="text-gray-300">{maxSamplesInput}</span>
                   </label>
-                  <label className="flex items-center gap-1">dedupe
-                    <input type="range" min={0.90} max={0.999} step={0.001} value={dedupeThresholdInput} onChange={(e)=>setDedupeThresholdInput(parseFloat(e.target.value))} className="w-32" />
+                  <label className="flex items-center gap-1">
+                    dedupe
+                    <input
+                      type="range"
+                      min={0.9}
+                      max={0.999}
+                      step={0.001}
+                      value={dedupeThresholdInput}
+                      onChange={(event) => setDedupeThresholdInput(parseFloat(event.target.value))}
+                      className="w-32"
+                    />
                     <span className="text-gray-300">{dedupeThresholdInput.toFixed(3)}</span>
                   </label>
                   <button className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded" onClick={handleConfigSave}>Apply</button>
-                  <label className="flex items-center gap-1">cleanup ≥
-                    <input type="range" min={0.90} max={0.999} step={0.001} value={pruneSimilarity} onChange={(e)=>setPruneSimilarity(parseFloat(e.target.value))} className="w-32" />
+                  <label className="flex items-center gap-1">
+                    cleanup ≥
+                    <input
+                      type="range"
+                      min={0.9}
+                      max={0.999}
+                      step={0.001}
+                      value={pruneSimilarity}
+                      onChange={(event) => setPruneSimilarity(parseFloat(event.target.value))}
+                      className="w-32"
+                    />
                     <span className="text-gray-300">{pruneSimilarity.toFixed(3)}</span>
                   </label>
                   <button className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded" onClick={handlePrune}>Prune</button>
                 </div>
                 {selectedCount > 0 && (
-                  <div className="flex flex-wrap items-center gap-2 text-[10px] text-gray-300 bg-gray-800/60 px-2 py-1 rounded">
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-gray-300 bg-gray-800/60 px-2 py-1 rounded">
                     <span>{selectedCount} selected</span>
-                    <select className="bg-gray-900 text-xs px-2 py-1 rounded" value={moveTargetId} onChange={(e)=>setMoveTargetId(e.target.value)}>
+                    <select
+                      className="bg-gray-900 text-xs px-2 py-1 rounded"
+                      value={moveTargetId}
+                      onChange={(event) => setMoveTargetId(event.target.value)}
+                    >
                       <option value="">→ existing…</option>
-                      {clusters.filter(c=>c.cluster_id !== selectedId).map(c=> (
-                        <option key={c.cluster_id} value={c.cluster_id}>{c.label || c.cluster_id}</option>
-                      ))}
+                      {clusters
+                        .filter((cluster) => cluster.cluster_id !== selectedId)
+                        .map((cluster) => (
+                          <option key={cluster.cluster_id} value={cluster.cluster_id}>
+                            {cluster.label || cluster.cluster_id}
+                          </option>
+                        ))}
                     </select>
                     <span>or</span>
                     <input
                       className="bg-gray-900 text-xs px-2 py-1 rounded w-32"
                       placeholder="new cluster label…"
                       value={moveNewLabel}
-                      onChange={(e)=>setMoveNewLabel(e.target.value)}
+                      onChange={(event) => setMoveNewLabel(event.target.value)}
                     />
                     <button
                       className="px-2 py-1 bg-indigo-700 hover:bg-indigo-600 rounded disabled:opacity-40 disabled:hover:bg-indigo-700"
@@ -570,6 +686,13 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
                     <button className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded" onClick={clearSelection}>Clear</button>
                   </div>
                 )}
+              </CollapsibleSection>
+
+              <CollapsibleSection
+                title="Samples"
+                storageKey="objectMemory.detail.section.samples"
+                summary={`${clusterDetail.samples.length} samples`}
+              >
                 <div className="grid grid-cols-3 gap-2">
                   {clusterDetail.samples.map((sample) => {
                     const thumb = thumbsRef.current.get(sample.sample_id)?.dataUrl;
@@ -590,20 +713,23 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
                             type="checkbox"
                             className="h-3 w-3 accent-indigo-500"
                             checked={isSelected}
-                            onChange={()=>toggleSampleSelection(sample.sample_id)}
+                            onChange={() => toggleSampleSelection(sample.sample_id)}
                           />
                         </div>
                         <div className="absolute top-1 right-1">
                           <button
                             className="bg-gray-900/70 hover:bg-gray-900 text-[9px] px-1 py-0.5 rounded"
-                            onClick={(event)=>{ event.stopPropagation(); void handleDeleteSample(sample.sample_id); }}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void handleDeleteSample(sample.sample_id);
+                            }}
                           >
                             ✕
                           </button>
                         </div>
                         <div
                           className="w-full h-24 bg-gray-900 flex items-center justify-center cursor-pointer"
-                          onClick={()=>toggleSampleSelection(sample.sample_id)}
+                          onClick={() => toggleSampleSelection(sample.sample_id)}
                         >
                           {thumb ? (
                             <img src={thumb} alt={sample.sample_id} className="max-h-full max-w-full object-contain" />
@@ -621,14 +747,16 @@ export const ObjectMemoryPanel: React.FC<ObjectMemoryPanelProps> = ({ defaultPos
                       </div>
                     );
                   })}
-                  {!clusterDetail.samples.length && <div className="text-gray-500 text-[11px]">No samples yet</div>}
+                  {!clusterDetail.samples.length && (
+                    <div className="text-gray-500 text-[11px]">No samples yet</div>
+                  )}
                 </div>
-              </div>
-            ) : (
-              <div className="text-gray-500 text-[11px]">Select a cluster to inspect</div>
-            )}
-          </div>
-        </div>
+              </CollapsibleSection>
+            </div>
+          ) : (
+            <div className="text-[11px] text-gray-500">Select a cluster to inspect</div>
+          )}
+        </CollapsibleSection>
       </div>
     </Panel>
   );

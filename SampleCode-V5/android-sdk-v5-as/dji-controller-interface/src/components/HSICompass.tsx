@@ -1,30 +1,56 @@
-import React, { useRef, useEffect, useState } from 'react';
-import { HSICompassProps } from '../types';
+import React, { useEffect, useState } from 'react';
+import { HSICompassProps, TelemetryData } from '../types';
 import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
 import { computeTargetMetrics } from '../utils/objectMemoryTarget';
 import { missionPlannerStore } from '../state/missionPlanner';
 import type { MissionWaypointTarget, PoiTarget } from '../types/missionPlanner';
+import { HSICanvas } from './HSICanvas';
+
+const STORAGE_KEYS = {
+  useRaw: 'hsi.useRaw360',
+  scale: 'hsi.scale',
+  logScale: 'hsi.useLog',
+};
+
+const clampScale = (value: number) => Math.min(Math.max(value, 0.5), 8);
 
 export const HSICompass: React.FC<HSICompassProps> = ({
   size = 'normal',
-  standalone = true
+  standalone = true,
 }) => {
-  const [useRawPerceptionData, setUseRawPerceptionData] = useState(true);
-  const [scaleRange, setScaleRange] = useState(8); // Default 8m range
-  const [useLogarithmicScale, setUseLogarithmicScale] = useState(true); // Logarithmic by default
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [useRawPerceptionData, setUseRawPerceptionData] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEYS.useRaw);
+      return stored != null ? stored === 'true' : true;
+    } catch {
+      return true;
+    }
+  });
+  const [scaleRange, setScaleRange] = useState<number>(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEYS.scale);
+      if (!stored) return 8;
+      const parsed = parseFloat(stored);
+      return Number.isFinite(parsed) ? clampScale(parsed) : 8;
+    } catch {
+      return 8;
+    }
+  });
+  const [useLogarithmicScale, setUseLogarithmicScale] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEYS.logScale);
+      return stored != null ? stored === 'true' : true;
+    } catch {
+      return true;
+    }
+  });
 
-  // Direct telemetry data state - updated via electronAPI listener like camera components
-  const [telemetryData, setTelemetryData] = useState<any>(null);
+  const [telemetryData, setTelemetryData] = useState<TelemetryData | null>(null);
   const [objectTarget, setObjectTarget] = useState<ObjectMemoryTargetSelection | null>(() => objectMemoryTargetStore.getCurrent());
   const [missionWaypoint, setMissionWaypoint] = useState<MissionWaypointTarget | null>(() => missionPlannerStore.getSnapshot().activeWaypoint ?? null);
   const [missionPoi, setMissionPoi] = useState<PoiTarget | null>(() => missionPlannerStore.getSnapshot().poiTarget ?? null);
 
-  useEffect(() => {
-    const unsubscribe = objectMemoryTargetStore.subscribe(setObjectTarget);
-    return unsubscribe;
-  }, []);
-
+  useEffect(() => objectMemoryTargetStore.subscribe(setObjectTarget), []);
   useEffect(() => missionPlannerStore.subscribeActiveWaypoint(setMissionWaypoint), []);
   useEffect(() => missionPlannerStore.subscribePoiTarget(setMissionPoi), []);
 
@@ -37,60 +63,10 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     if (!telemetryData?.location || !missionWaypoint) {
       return null;
     }
+
     const { latitude: lat1, longitude: lon1 } = telemetryData.location;
     const { latitude: lat2, longitude: lon2, altitude } = missionWaypoint;
-    if (
-      typeof lat1 !== 'number' || typeof lon1 !== 'number' ||
-      typeof lat2 !== 'number' || typeof lon2 !== 'number'
-    ) {
-      return null;
-    }
-
-    const toRad = (deg: number) => (deg * Math.PI) / 180;
-    const φ1 = toRad(lat1);
-    const φ2 = toRad(lat2);
-    const Δφ = toRad(lat2 - lat1);
-    const Δλ = toRad(lon2 - lon1);
-    const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
-    const distance = 6371e3 * c; // meters
-
-    const y = Math.sin(Δλ) * Math.cos(φ2);
-    const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
-    const bearing = ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
-
-    const aircraftAltitude =
-      typeof telemetryData?.location?.altitude === 'number'
-        ? telemetryData.location.altitude
-        : typeof telemetryData?.altitude === 'number'
-          ? telemetryData.altitude
-          : null;
-
-    const altitudeDelta = typeof altitude === 'number' && typeof aircraftAltitude === 'number'
-      ? altitude - aircraftAltitude
-      : null;
-
-    return { distance, bearing, altitudeDelta };
-  }, [
-    telemetryData?.location?.latitude,
-    telemetryData?.location?.longitude,
-    telemetryData?.location?.altitude,
-    telemetryData?.altitude,
-    missionWaypoint?.latitude,
-    missionWaypoint?.longitude,
-    missionWaypoint?.altitude,
-  ]);
-
-  const poiMetrics = React.useMemo(() => {
-    if (!telemetryData?.location || !missionPoi) {
-      return null;
-    }
-    const { latitude: lat1, longitude: lon1 } = telemetryData.location;
-    const { latitude: lat2, longitude: lon2, altitude } = missionPoi;
-    if (
-      typeof lat1 !== 'number' || typeof lon1 !== 'number' ||
-      typeof lat2 !== 'number' || typeof lon2 !== 'number'
-    ) {
+    if (typeof lat1 !== 'number' || typeof lon1 !== 'number' || typeof lat2 !== 'number' || typeof lon2 !== 'number') {
       return null;
     }
 
@@ -108,9 +84,9 @@ export const HSICompass: React.FC<HSICompassProps> = ({
     const bearing = ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 
     const aircraftAltitude =
-      typeof telemetryData?.location?.altitude === 'number'
+      typeof telemetryData.location.altitude === 'number'
         ? telemetryData.location.altitude
-        : typeof telemetryData?.altitude === 'number'
+        : typeof telemetryData.altitude === 'number'
           ? telemetryData.altitude
           : null;
 
@@ -118,479 +94,50 @@ export const HSICompass: React.FC<HSICompassProps> = ({
       ? altitude - aircraftAltitude
       : null;
 
-    const pitch = altitudeDelta != null
-      ? (Math.atan2(altitudeDelta, distance) * 180) / Math.PI
+    return { distance, bearing, altitudeDelta };
+  }, [telemetryData, missionWaypoint]);
+
+  const poiMetrics = React.useMemo(() => {
+    if (!telemetryData?.location || !missionPoi) {
+      return null;
+    }
+
+    const { latitude: lat1, longitude: lon1 } = telemetryData.location;
+    const { latitude: lat2, longitude: lon2, altitude } = missionPoi;
+    if (typeof lat1 !== 'number' || typeof lon1 !== 'number' || typeof lat2 !== 'number' || typeof lon2 !== 'number') {
+      return null;
+    }
+
+    const toRad = (deg: number) => (deg * Math.PI) / 180;
+    const φ1 = toRad(lat1);
+    const φ2 = toRad(lat2);
+    const Δφ = toRad(lat2 - lat1);
+    const Δλ = toRad(lon2 - lon1);
+    const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
+    const distance = 6371e3 * c;
+
+    const y = Math.sin(Δλ) * Math.cos(φ2);
+    const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+    const bearing = ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+
+    const aircraftAltitude =
+      typeof telemetryData.location.altitude === 'number'
+        ? telemetryData.location.altitude
+        : typeof telemetryData.altitude === 'number'
+          ? telemetryData.altitude
+          : null;
+
+    const altitudeDelta = typeof altitude === 'number' && typeof aircraftAltitude === 'number'
+      ? altitude - aircraftAltitude
       : null;
 
+    const pitch = altitudeDelta != null ? (Math.atan2(altitudeDelta, distance) * 180) / Math.PI : null;
     const slantDistance = altitudeDelta != null ? Math.sqrt(distance ** 2 + altitudeDelta ** 2) : distance;
 
     return { distance, bearing, altitudeDelta, pitch, slantDistance };
-  }, [
-    telemetryData?.location?.latitude,
-    telemetryData?.location?.longitude,
-    telemetryData?.location?.altitude,
-    telemetryData?.altitude,
-    missionPoi?.latitude,
-    missionPoi?.longitude,
-    missionPoi?.altitude,
-  ]);
+  }, [telemetryData, missionPoi]);
 
-  // Convert distance to visual radius using linear or logarithmic scale
-  const distanceToRadius = (distance: number, maxDistance: number, radius: number): number => {
-    if (useLogarithmicScale) {
-      // Logarithmic scale: log(1 + distance) / log(1 + maxDistance)
-      // This exaggerates small distances and compresses large ones
-      const normalizedLog = Math.log(1 + distance) / Math.log(1 + maxDistance);
-      return normalizedLog * radius;
-    } else {
-      // Linear scale: distance / maxDistance
-      return (distance / maxDistance) * radius;
-    }
-  };
-
-  // Draw obstacle paths based on raw distance arrays (like official DJI HSI)
-  const drawObstacleDistances = (
-    ctx: CanvasRenderingContext2D,
-    centerX: number,
-    centerY: number,
-    radius: number,
-    obstacleData: any
-  ) => {
-    if (!obstacleData) return;
-    
-    // Use raw distance arrays from bridge (radar_distances or perception_distances)
-    const radarDistances = obstacleData.radar_distances;
-    const perceptionDistances = obstacleData.perception_distances;
-    
-    // console.log(`🎨 Drawing obstacle paths:`, {
-    //   radar_distances: radarDistances?.length || 0,
-    //   perception_distances: perceptionDistances?.length || 0,
-    //   closest_distance: obstacleData.closest_distance
-    // });
-    
-    // Draw radar obstacles (like official HSI does)
-    if (radarDistances && Array.isArray(radarDistances) && radarDistances.length > 0) {
-      drawDistanceArray(ctx, centerX, centerY, radius, radarDistances, 'radar');
-    }
-    
-    // Draw perception obstacles (like official HSI does)  
-    if (perceptionDistances && Array.isArray(perceptionDistances) && perceptionDistances.length > 0) {
-      drawDistanceArray(ctx, centerX, centerY, radius, perceptionDistances, 'perception');
-    }
-    
-    // Use toggle to decide between raw perception data and processed sectors
-    if (useRawPerceptionData && perceptionDistances && Array.isArray(perceptionDistances) && perceptionDistances.length > 0) {
-      // console.log('🎨 Using raw perception distances (360° array) for infrared obstacles');
-      drawDistanceArray(ctx, centerX, centerY, radius, perceptionDistances, 'perception');
-    }
-    else if (!useRawPerceptionData && obstacleData.sectors && Array.isArray(obstacleData.sectors)) {
-      // console.log('🎨 Using processed sectors for', obstacleData.sectors.length, 'obstacles');
-      drawObstacleSectors(ctx, centerX, centerY, radius, obstacleData.sectors);
-    }
-    // Fallback when preferred mode data is not available
-    else if (obstacleData.sectors && Array.isArray(obstacleData.sectors)) {
-      // console.log('🎨 Fallback: Using processed sectors for', obstacleData.sectors.length, 'obstacles');
-      drawObstacleSectors(ctx, centerX, centerY, radius, obstacleData.sectors);
-    }
-  };
-
-  const drawDistanceArray = (
-    ctx: CanvasRenderingContext2D,
-    centerX: number,
-    centerY: number,
-    radius: number,
-    distances: number[],
-    source: 'radar' | 'perception'
-  ) => {
-    if (!distances.length) return;
-    
-    const maxVisibleDistance = scaleRange; // Dynamic scale range
-    const degreesPerSector = 360 / distances.length; // degrees per array element (should be 1°)
-    
-    // Smooth color transition based on distance with gradual opacity
-    const getObstacleColorAndAlpha = (distanceInMeters: number): { color: string; alpha: number } => {
-      let r, g, b, alpha;
-      
-      // Special case: >= 6m (60000mm) means very critical distance < 75cm  
-      if (distanceInMeters >= 6) {
-        return { color: 'rgb(255, 0, 0)', alpha: 1.0 }; // Bright red, full opacity
-      }
-      
-      if (distanceInMeters < 1) {
-        // Critical: Red
-        r = 255; g = 0; b = 0;
-        alpha = 0.9;
-      } else if (distanceInMeters < 2) {
-        // Transition from red to orange (1-2m)
-        const t = (distanceInMeters - 1) / 1; // 0 to 1
-        r = 255;
-        g = Math.round(165 * t); // 0 to 165 (orange)
-        b = 0;
-        alpha = 0.8 - (t * 0.2); // 0.8 to 0.6
-      } else if (distanceInMeters < 5) {
-        // Transition from orange to yellow (2-5m)
-        const t = (distanceInMeters - 2) / 3; // 0 to 1
-        r = 255;
-        g = Math.round(165 + (255 - 165) * t); // 165 to 255 (yellow)
-        b = 0;
-        alpha = 0.6 - (t * 0.2); // 0.6 to 0.4
-      } else {
-        // Transition from yellow to green (5m+)
-        const t = Math.min((distanceInMeters - 5) / 3, 1); // 0 to 1, capped at 1
-        r = Math.round(255 - 179 * t); // 255 to 76 (green)
-        g = 255;
-        b = Math.round(0 + 175 * t); // 0 to 175 (green)
-        alpha = 0.4 - (t * 0.2); // 0.4 to 0.2
-      }
-      
-      return { color: `rgb(${r}, ${g}, ${b})`, alpha: Math.max(alpha, 0.1) };
-    };
-    
-    let obstacleCount = 0;
-    for (let i = 0; i < distances.length; i++) {
-      const distanceInMm = distances[i];
-      const distanceInMeters = distanceInMm / 1000.0;
-      
-      // Draw obstacles - handle special case for >= 6m readings
-      const shouldDraw = (distanceInMeters >= 6) || (distanceInMeters > 0 && distanceInMeters <= maxVisibleDistance);
-      
-      if (shouldDraw) {
-        const angle = i * degreesPerSector; // degrees
-        const startAngle = (angle - degreesPerSector/2 - 90) * Math.PI / 180; // -90 to start at top
-        const endAngle = (angle + degreesPerSector/2 - 90) * Math.PI / 180;
-        
-        // Calculate obstacle position - for >= 6m readings, treat as very close (0.75m)
-        const actualDistance = distanceInMeters >= 6 ? 0.75 : distanceInMeters;
-        const obstacleRadius = distanceToRadius(actualDistance, maxVisibleDistance, radius);
-        
-        const { color, alpha } = getObstacleColorAndAlpha(distanceInMeters);
-        
-        ctx.fillStyle = color;
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
-        ctx.globalAlpha = alpha;
-        
-        // Draw sector from center to obstacle distance (not inverted)
-        ctx.beginPath();
-        ctx.moveTo(centerX, centerY); // Start at center
-        
-        // Arc to obstacle distance
-        ctx.arc(centerX, centerY, obstacleRadius, startAngle, endAngle);
-        ctx.closePath();
-        ctx.fill();
-        
-        obstacleCount++;
-      }
-    }
-    
-    ctx.globalAlpha = 1.0; // Reset transparency
-    //console.log(`🎨 Drew ${obstacleCount} ${source} obstacle sectors (360° data, ${scaleRange}m range)`);
-  };
-
-  // Draw scale legend rings and labels
-  const drawScaleLegend = (
-    ctx: CanvasRenderingContext2D,
-    centerX: number,
-    centerY: number,
-    radius: number
-  ) => {
-    const maxDistance = scaleRange;
-    const ringDistances = [maxDistance * 0.25, maxDistance * 0.5, maxDistance * 0.75, maxDistance]; // 25%, 50%, 75%, 100%
-    
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([2, 4]); // Dashed lines
-    
-    // Draw distance rings
-    ringDistances.forEach((distance, index) => {
-      const ringRadius = distanceToRadius(distance, maxDistance, radius);
-      
-      ctx.beginPath();
-      ctx.arc(centerX, centerY, ringRadius, 0, Math.PI * 2);
-      ctx.stroke();
-      
-      // Add distance labels at the top of each ring
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-      ctx.font = '9px monospace';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'bottom';
-      
-      const labelText = distance < 1 ? `${(distance * 100).toFixed(0)}cm` : `${distance.toFixed(1)}m`;
-      ctx.fillText(labelText, centerX, centerY - ringRadius + 3);
-    });
-    
-    ctx.setLineDash([]); // Reset line dash
-  };
-
-  // Primary function to draw obstacles using processed sectors from PerceptionManager
-  const drawObstacleSectors = (
-    ctx: CanvasRenderingContext2D,
-    centerX: number,
-    centerY: number,
-    radius: number,
-    sectors: Array<{
-      angle: number;
-      distance: number;
-      warning_level: 'none' | 'caution' | 'warning' | 'critical';
-      source?: 'radar' | 'perception';
-    }>
-  ) => {
-    if (!sectors.length) return;
-    
-    //console.log(`🎨 Drawing ${sectors.length} obstacle sectors with source differentiation`);
-    
-    sectors.forEach((sector, index) => {
-      if (sector.warning_level === 'none') return; // Skip safe sectors
-      
-      // Get color based on warning level (back to original)
-      const colors = {
-        caution: '#FFEB3B',   // Yellow
-        warning: '#FF9800',   // Orange  
-        critical: '#F44336'   // Red
-      };
-      
-      const color = colors[sector.warning_level];
-      const sectorAngle = 15; // degrees (smaller than before)
-      const startAngle = (sector.angle - sectorAngle/2 - 90) * Math.PI / 180;
-      const endAngle = (sector.angle + sectorAngle/2 - 90) * Math.PI / 180;
-      
-      // Calculate radius based on distance (closer = larger sector) - use dynamic scale
-      const maxDistance = scaleRange; // Use the same scale as the map
-      const clampedDistance = Math.min(sector.distance, maxDistance);
-      const sectorRadius = distanceToRadius(clampedDistance, maxDistance, radius);
-      
-      ctx.fillStyle = color + '60'; // Add transparency
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
-      
-      // Draw triangular sector
-      ctx.beginPath();
-      ctx.moveTo(centerX, centerY);
-      ctx.arc(centerX, centerY, sectorRadius, startAngle, endAngle);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-    });
-  };
-
-  const drawCompassRose = (
-    ctx: CanvasRenderingContext2D,
-    centerX: number,
-    centerY: number,
-    radius: number,
-    heading: number,
-    homeDirection?: number,
-    targetDirection?: { bearing: number },
-    missionDirection?: { bearing: number },
-    poiDirection?: { bearing: number },
-    attitude?: { roll: number; pitch: number; yaw: number },
-    obstacleData?: any
-  ) => {
-    // Clear canvas
-    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-    
-    // Draw obstacle distance arrays first (so they appear behind other elements)
-    if (obstacleData) {
-      drawObstacleDistances(ctx, centerX, centerY, radius, obstacleData);
-    }
-
-    // Draw outer circle
-    ctx.strokeStyle = '#4B5563';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // Draw compass markings (rotate the compass rose instead of the arrow)
-    ctx.save();
-    ctx.translate(centerX, centerY);
-    ctx.rotate(-heading * Math.PI / 180); // Rotate compass rose counter-clockwise by heading
-    ctx.translate(-centerX, -centerY);
-    
-    ctx.strokeStyle = '#9CA3AF';
-    ctx.lineWidth = 1;
-    ctx.font = '12px monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-
-    for (let i = 0; i < 360; i += 30) {
-      const angle = (i - 90) * Math.PI / 180; // -90 to start at top
-      const x1 = centerX + Math.cos(angle) * (radius - 15);
-      const y1 = centerY + Math.sin(angle) * (radius - 15);
-      const x2 = centerX + Math.cos(angle) * (radius - 5);
-      const y2 = centerY + Math.sin(angle) * (radius - 5);
-      
-      ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
-      ctx.stroke();
-
-      // Add degree labels
-      if (i % 90 === 0) {
-        const labelX = centerX + Math.cos(angle) * (radius - 25);
-        const labelY = centerY + Math.sin(angle) * (radius - 25);
-        const labels = ['N', 'E', 'S', 'W'];
-        ctx.fillStyle = '#F3F4F6';
-        ctx.fillText(labels[i / 90], labelX, labelY);
-      }
-    }
-    
-    ctx.restore();
-
-    // Draw aircraft heading indicator (small triangle in center)
-    ctx.restore(); // Exit rotated context for aircraft indicator
-    
-    ctx.fillStyle = '#1E88E5';
-    ctx.strokeStyle = '#FFFFFF';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    // Smaller aircraft symbol in center
-    ctx.moveTo(centerX, centerY - 6);
-    ctx.lineTo(centerX - 4, centerY + 4);
-    ctx.lineTo(centerX + 4, centerY + 4);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    
-    // Draw heading value at top (fixed, not rotating) - positioned within canvas
-    // draw in the corner left top, todo : avoid hardcoded positioning
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = 'bold 12px monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    
-    // Background for heading text - positioned further outside the circle for more space
-    const headingText = `${Math.round(heading).toString()}°`;;
-    const textWidth = ctx.measureText(headingText).width;
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-    ctx.fillRect(centerX - textWidth/2 - 76, centerY - radius - 6, textWidth + 12, 18);
-    
-    ctx.fillStyle = '#FFFFFF';
-    ctx.fillText(headingText, centerX - 70, centerY - radius + 4);
-    
-    // Re-enter save context for remaining elements
-    ctx.save();
-
-    // Draw home direction indicator (if available) - relative to rotated compass
-    //console.log('🏠 HSI Home Direction Debug:', {
-    //  homeDirection,
-    //  heading,
-    //  hasHomeDirection: homeDirection !== undefined,
-    //  telemetryHomeBearing: telemetryData?.home_bearing
-    //});
-    if (homeDirection !== undefined && homeDirection > 0) {
-      ctx.save();
-      ctx.translate(centerX, centerY);
-      // Rotate by (homeDirection - heading) to account for the rotated compass rose
-      ctx.rotate((homeDirection - heading) * Math.PI / 180);
-
-      ctx.fillStyle = '#00D084';
-      ctx.strokeStyle = '#FFFFFF';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      // Move home direction indicator outside the circle
-      ctx.moveTo(0, -radius - 5);
-      ctx.lineTo(-6, -radius + 5);
-      ctx.lineTo(0, -radius + 10);
-      ctx.lineTo(6, -radius + 5);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-
-      ctx.restore();
-    }
-
-    if (missionDirection) {
-      ctx.save();
-      ctx.translate(centerX, centerY);
-      ctx.rotate((missionDirection.bearing - heading) * Math.PI / 180);
-      ctx.fillStyle = '#f97316';
-      ctx.strokeStyle = '#fed7aa';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(0, -radius - 20);
-      ctx.lineTo(-6, -radius - 8);
-      ctx.lineTo(0, -radius - 3);
-      ctx.lineTo(6, -radius - 8);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.restore();
-    }
-
-    if (poiDirection) {
-      ctx.save();
-      ctx.translate(centerX, centerY);
-      ctx.rotate((poiDirection.bearing - heading) * Math.PI / 180);
-      ctx.fillStyle = '#a855f7';
-      ctx.strokeStyle = '#e9d5ff';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(0, -radius - 16);
-      ctx.lineTo(-5, -radius - 4);
-      ctx.lineTo(0, -radius + 2);
-      ctx.lineTo(5, -radius - 4);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.restore();
-    }
-
-    if (targetDirection) {
-      ctx.save();
-      ctx.translate(centerX, centerY);
-      ctx.rotate((targetDirection.bearing - heading) * Math.PI / 180);
-      ctx.fillStyle = '#0ea5e9';
-      ctx.strokeStyle = '#bae6fd';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(0, -radius - 12);
-      ctx.lineTo(-5, -radius - 2);
-      ctx.lineTo(0, -radius + 6);
-      ctx.lineTo(5, -radius - 2);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.restore();
-    }
-
-    // Draw center dot
-    ctx.fillStyle = '#F3F4F6';
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, 3, 0, Math.PI * 2);
-    ctx.fill();
-    
-    ctx.restore(); // Exit any previous context
-    
-    // Draw obstacle distance display (like "3m" in DJI) - fixed position
-    // draw in the corner right bottom : avoid hardcoded positioning
-    if (obstacleData && obstacleData.closest_distance) {
-      const distance = obstacleData.closest_distance;
-      const distanceText = distance < 1 ? `${(distance * 3.28).toFixed(0)}ft` : `${distance.toFixed(1)}m`;
-      
-      ctx.font = 'bold 12px monospace';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      
-      // Draw background for text - positioned outside the circle
-      const textWidth = ctx.measureText(distanceText).width;
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-      ctx.fillRect(centerX - textWidth/2 + 74, centerY + radius - 8, textWidth + 8, 16);
-      
-      // Color based on system status (from bridge)
-      const statusColor = obstacleData.system_status === 'critical' ? '#FF4444' : 
-                         obstacleData.system_status === 'warning' ? '#FFAA00' : '#00FF00';
-      ctx.fillStyle = statusColor;
-      ctx.fillText(distanceText, centerX + 78, centerY + radius + 1);
-    }
-
-    // Draw scale legend rings and distance labels
-    drawScaleLegend(ctx, centerX, centerY, radius);
-
-    // Roll indicator removed - HSI focuses on horizontal navigation only
-  };
-
-  // Direct electronAPI listener for telemetry data like camera components
   useEffect(() => {
     if (!window.electronAPI || !(window.electronAPI as any).onBridgeData) {
       console.warn('⚠️ electronAPI not available for HSI telemetry updates');
@@ -599,37 +146,31 @@ export const HSICompass: React.FC<HSICompassProps> = ({
 
     const handleTelemetryData = (message: any) => {
       if (message.type === 'telemetry_data' && message.location) {
-        // Convert yaw (-180 to +180) to compass heading (0 to 360)
         const convertYawToCompass = (yaw: number): number => {
           let compass = yaw;
           if (compass < 0) compass += 360;
-          return compass;
+          return compass % 360;
         };
 
-        // Calculate bearing from aircraft to home using great circle formula
         const calculateBearing = (from: any, to: any): number => {
           if (!from || !to) return 0;
-
           const lat1 = from.latitude * Math.PI / 180;
           const lat2 = to.latitude * Math.PI / 180;
           const deltaLng = (to.longitude - from.longitude) * Math.PI / 180;
-
           const y = Math.sin(deltaLng) * Math.cos(lat2);
           const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLng);
-
-          let bearing = Math.atan2(y, x) * 180 / Math.PI;
-          return (bearing + 360) % 360;
+          return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
         };
 
-        const rawYaw = message.attitude?.yaw || message.compass_heading || message.heading || 0;
+        const rawYaw = message.attitude?.yaw ?? message.compass_heading ?? message.heading ?? 0;
         const trueCompassHeading = convertYawToCompass(rawYaw);
         const bearingToHome = calculateBearing(message.location, message.home_location);
 
-        const mappedTelemetry = {
+        const mappedTelemetry: TelemetryData = {
           ...message,
           speed: message.ground_speed || message.speed || 0,
           heading: trueCompassHeading,
-          attitude: message.attitude || { pitch: 0, roll: 0, yaw: 0 },
+          attitude: message.attitude || { pitch: 0, roll: 0, yaw: rawYaw },
           compass_heading: trueCompassHeading,
           home_bearing: bearingToHome,
         };
@@ -638,117 +179,99 @@ export const HSICompass: React.FC<HSICompassProps> = ({
       }
     };
 
-    const listener = (message: any) => {
-      handleTelemetryData(message);
-    };
-
+    const listener = (message: any) => handleTelemetryData(message);
     (window.electronAPI as any).onBridgeData(listener);
 
     return () => {
-      // Cleanup would go here if electronAPI supports removeListener
-      if (window.electronAPI && (window.electronAPI as any).removeAllListeners) {
-        try {
-          (window.electronAPI as any).removeAllListeners('bridge-data-hsi');
-        } catch (error) {
-          // Ignore cleanup errors
-        }
-      }
+      try {
+        (window.electronAPI as any).removeBridgeDataListener?.(listener);
+      } catch {}
     };
   }, []);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    try {
+      localStorage.setItem(STORAGE_KEYS.useRaw, String(useRawPerceptionData));
+    } catch {}
+  }, [useRawPerceptionData]);
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEYS.scale, String(scaleRange));
+    } catch {}
+  }, [scaleRange]);
 
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * devicePixelRatio;
-    canvas.height = rect.height * devicePixelRatio;
-    ctx.scale(devicePixelRatio, devicePixelRatio);
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEYS.logScale, String(useLogarithmicScale));
+    } catch {}
+  }, [useLogarithmicScale]);
 
-    const centerX = rect.width / 2;
-    const centerY = rect.height / 2;
-    // Make compass larger, especially for small size
-    const radius = size === 'small' 
-      ? Math.min(centerX, centerY) - 14  // Larger radius for small HSI
-      : Math.min(centerX, centerY) - 20;
-
-    // Debug: Log heading values to console
-    //console.log('🎯 HSI Heading Debug:', {
-    //  prop_heading: heading,
-    //  telemetry_heading: telemetryData?.heading,
-    //  telemetry_compass_heading: telemetryData?.compass_heading,
-    //  attitude_yaw: telemetryData?.attitude?.yaw
-    //});
-    
-    // Use real obstacle data from DJI bridge - use raw distance arrays (like official HSI)
-    const obstacleData = telemetryData?.obstacle_avoidance || undefined;
-                         
-    // Debug: Log obstacle data structure to understand what we're receiving
-    if (telemetryData?.obstacle_avoidance) {
-      //console.log('🛡️ Obstacle Data Debug:', {
-      //  full_obstacle_data: telemetryData.obstacle_avoidance,
-      //  has_sectors: !!telemetryData.obstacle_avoidance.sectors,
-      //  has_enabled: telemetryData.obstacle_avoidance.enabled,
-      //});
-    } else {
-      // console.log('🛡️ No obstacle_avoidance data in telemetryData');
-    }
-      
-    const heading = telemetryData?.compass_heading || telemetryData?.heading || 0;
-    const homeDirection = telemetryData?.home_bearing;
-    const attitude = telemetryData?.attitude;
-
-    drawCompassRose(
-      ctx,
-      centerX,
-      centerY,
-      radius,
-      heading,
-      homeDirection,
-      targetMetrics ? { bearing: targetMetrics.bearing } : undefined,
-      missionMetrics ? { bearing: missionMetrics.bearing } : undefined,
-      poiMetrics ? { bearing: poiMetrics.bearing } : undefined,
-      attitude,
-      obstacleData,
-    );
-  }, [telemetryData, useRawPerceptionData, scaleRange, useLogarithmicScale, size, targetMetrics, missionMetrics, poiMetrics]);
-
-  // Size configurations - increased height to fit heading above and distance below
-  const sizeConfig = size === 'small' 
-    ? { width: 208, height: 200, canvasWidth: 208, canvasHeight: 200 }
-    : { width: 350, height: 260, canvasWidth: 350, canvasHeight: 260 };
+  const sizeConfig = size === 'small'
+    ? { width: 208, height: 200 }
+    : { width: 350, height: 260 };
 
   const containerClass = standalone
     ? `glass-panel ${size === 'small' ? 'p-2' : 'p-4'}`
-    : `w-full h-full flex flex-col ${size === 'small' ? 'p-2' : 'p-4'}`;
+    : `${size === 'small' ? 'p-2' : 'p-3'} flex flex-col gap-2`;
+
+  const targetForCanvas = targetMetrics
+    ? {
+        bearing: targetMetrics.bearing,
+        distance: targetMetrics.slantDistance,
+        altitudeDelta: targetMetrics.altitudeDelta,
+      }
+    : null;
+
+  const missionForCanvas = missionMetrics
+    ? {
+        bearing: missionMetrics.bearing,
+        distance: missionMetrics.distance,
+        altitudeDelta: missionMetrics.altitudeDelta ?? null,
+      }
+    : null;
+
+  const poiForCanvas = poiMetrics
+    ? {
+        bearing: poiMetrics.bearing,
+        distance: poiMetrics.slantDistance,
+        altitudeDelta: poiMetrics.altitudeDelta ?? null,
+        pitch: poiMetrics.pitch ?? null,
+      }
+    : null;
+
+  const poiLabel = ((missionPoi as unknown as { label?: string })?.label) ?? 'POI';
 
   return (
     <div className={containerClass}>
       {size === 'normal' && (
         <div className="text-center mb-2">
-          <div className="text-sm font-semibold text-gray-300">
-            Horizontal Situation Indicator
-          </div>
-          <div className="mt-2 flex justify-center">
+          <div className="text-sm font-semibold text-gray-300">Horizontal Situation Indicator</div>
+          <div className="mt-2 flex justify-center gap-2">
             <button
-              onClick={() => setUseRawPerceptionData(!useRawPerceptionData)}
-              className={`px-3 py-1 text-xs rounded-md border transition-colors ${
-                useRawPerceptionData 
-                  ? 'bg-dji-blue text-white border-dji-blue' 
+              onClick={() => setUseRawPerceptionData((prev) => !prev)}
+              className={`px-3 py-1 text-xs rounded border transition-colors ${
+                useRawPerceptionData
+                  ? 'bg-dji-blue text-white border-dji-blue'
                   : 'bg-gray-700 text-gray-300 border-gray-600 hover:bg-gray-600'
               }`}
             >
               {useRawPerceptionData ? '360° Raw Data' : 'Processed Sectors'}
             </button>
+            <label className="flex items-center gap-2 text-xs text-gray-400">
+              <input
+                type="checkbox"
+                checked={useLogarithmicScale}
+                onChange={(event) => setUseLogarithmicScale(event.target.checked)}
+                className="rounded"
+              />
+              Log Scale
+            </label>
           </div>
-          
-          <div className="mt-2 px-2">
+          <div className="mt-2 px-4">
             <div className="flex items-center justify-between text-xs text-gray-400 mb-1">
               <span>Scale</span>
-              <span>{scaleRange}m</span>
+              <span>{scaleRange.toFixed(1)} m</span>
             </div>
             <input
               type="range"
@@ -756,178 +279,132 @@ export const HSICompass: React.FC<HSICompassProps> = ({
               max="8"
               step="0.5"
               value={scaleRange}
-              onChange={(e) => setScaleRange(parseFloat(e.target.value))}
-              className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer slider"
+              onChange={(event) => setScaleRange(clampScale(parseFloat(event.target.value)))}
+              className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer"
             />
-            <div className="flex justify-between text-xs text-gray-500 mt-1">
-              <span>0.5m</span>
-              <span>8m</span>
+            <div className="flex justify-between text-[10px] text-gray-500 mt-1">
+              <span>0.5 m</span>
+              <span>8 m</span>
             </div>
-          </div>
-          
-          <div className="mt-2 px-2">
-            <label className="flex items-center text-xs text-gray-400">
-              <input
-                type="checkbox"
-                checked={useLogarithmicScale}
-                onChange={(e) => setUseLogarithmicScale(e.target.checked)}
-                className="mr-2 rounded"
-              />
-              Logarithmic Scale (exaggerate close distances)
-            </label>
           </div>
         </div>
       )}
-      
+
       {size === 'small' && (
-        <div className="text-center mb-1">
-          <div className="text-xs font-semibold text-gray-300 mb-1">HSI</div>
+        <div className="flex items-center justify-between text-xs text-gray-400">
           <button
-            onClick={() => setUseRawPerceptionData(!useRawPerceptionData)}
-            className={`px-2 py-1 text-xs rounded border transition-colors ${
-              useRawPerceptionData 
-                ? 'bg-dji-blue text-white border-dji-blue' 
+            onClick={() => setUseRawPerceptionData((prev) => !prev)}
+            className={`px-2 py-1 rounded border transition-colors ${
+              useRawPerceptionData
+                ? 'bg-dji-blue text-white border-dji-blue'
                 : 'bg-gray-700 text-gray-300 border-gray-600 hover:bg-gray-600'
             }`}
           >
             {useRawPerceptionData ? '360°' : 'Sectors'}
           </button>
-          
-          <div className="mt-1 px-1">
-            <div className="flex items-center justify-between text-xs text-gray-400 mb-1">
-              <span>Scale</span>
-              <span>{scaleRange}m</span>
-            </div>
+          <label className="flex items-center gap-1">
+            <input
+              type="checkbox"
+              checked={useLogarithmicScale}
+              onChange={(event) => setUseLogarithmicScale(event.target.checked)}
+              className="rounded"
+            />
+            Log
+          </label>
+          <div className="flex items-center gap-1">
+            <span>{scaleRange.toFixed(1)}m</span>
             <input
               type="range"
               min="0.5"
               max="8"
               step="0.5"
               value={scaleRange}
-              onChange={(e) => setScaleRange(parseFloat(e.target.value))}
-              className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer slider"
+              onChange={(event) => setScaleRange(clampScale(parseFloat(event.target.value)))}
+              className="h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+              style={{ width: '120px' }}
             />
-          </div>
-          
-          <div className="mt-1 px-1">
-            <label className="flex items-center text-xs text-gray-400">
-              <input
-                type="checkbox"
-                checked={useLogarithmicScale}
-                onChange={(e) => setUseLogarithmicScale(e.target.checked)}
-                className="mr-1 rounded scale-75"
-              />
-              Log Scale
-            </label>
           </div>
         </div>
       )}
 
-      <div className="flex justify-center">
-        <canvas 
-          ref={canvasRef}
-          width={sizeConfig.canvasWidth}
-          height={sizeConfig.canvasHeight}
-          className="border border-gray-600 rounded"
-          style={{ 
-            width: `${sizeConfig.width}px`, 
-            height: `${sizeConfig.height}px` 
-          }}
+      <div
+        className="relative mx-auto"
+        style={{ width: `${sizeConfig.width}px`, height: `${sizeConfig.height}px` }}
+      >
+        <HSICanvas
+          telemetry={telemetryData}
+          target={targetForCanvas}
+          mission={missionForCanvas}
+          poi={poiForCanvas}
+          scaleRange={scaleRange}
+          useLogarithmicScale={useLogarithmicScale}
+          useRawPerceptionData={useRawPerceptionData}
         />
       </div>
 
       {size === 'small' && targetMetrics && (
-        <div className="mt-2 text-[10px] text-center text-purple-200">
+        <div className="mt-2 text-[10px] text-center text-sky-200">
           {(objectTarget?.clusterLabel ?? objectTarget?.clusterId) ?? 'Target'}: {targetMetrics.slantDistance.toFixed(1)} m
         </div>
       )}
+
       {size === 'small' && missionMetrics && missionWaypoint && (
-        <div className="mt-1 text-[10px] text-center text-sky-200">
+        <div className="text-[10px] text-center text-amber-200">
           {(missionWaypoint.label ?? 'Waypoint')}: {missionMetrics.distance.toFixed(1)} m · BRG {missionMetrics.bearing.toFixed(0)}°
         </div>
       )}
+
       {size === 'small' && poiMetrics && (
-        <div className="mt-1 text-[10px] text-center text-purple-300">
+        <div className="text-[10px] text-center text-purple-300">
           POI: {poiMetrics.slantDistance.toFixed(1)} m · BRG {poiMetrics.bearing.toFixed(0)}°
-          {poiMetrics.pitch != null ? ` · Pitch ${poiMetrics.pitch.toFixed(1)}°` : ''}
         </div>
       )}
-      
-      {/* Digital readouts - only show for normal size */}
+
       {size === 'normal' && (
-        <>
-          <div className="mt-3 flex justify-between text-xs">
-          <div className="text-center">
-            <div className="text-gray-400">HDG</div>
-            <div className="font-mono text-dji-blue">
-              {(telemetryData?.compass_heading || telemetryData?.heading || 0).toFixed(0)}°
-            </div>
+        <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+          <div className="glass-panel border border-gray-700/60 p-2">
+            <div className="text-[11px] text-gray-400 uppercase mb-1">Target</div>
+            {targetMetrics ? (
+              <div className="text-sky-200 space-y-1">
+                <div>{(objectTarget?.clusterLabel ?? objectTarget?.clusterId) ?? 'Target'}</div>
+                <div>{targetMetrics.slantDistance.toFixed(1)} m · BRG {targetMetrics.bearing.toFixed(0)}°</div>
+                {targetMetrics.altitudeDelta != null && (
+                  <div>Δ Alt {targetMetrics.altitudeDelta.toFixed(1)} m</div>
+                )}
+              </div>
+            ) : (
+              <div className="text-gray-500">No target</div>
+            )}
           </div>
-          
-          {telemetryData?.attitude && (
-            <>
-              <div className="text-center">
-                <div className="text-gray-400">ROLL</div>
-                <div className="font-mono text-yellow-400">
-                  {telemetryData.attitude.roll.toFixed(1)}°
-                </div>
+          <div className="glass-panel border border-gray-700/60 p-2">
+            <div className="text-[11px] text-gray-400 uppercase mb-1">Mission</div>
+            {missionMetrics && missionWaypoint ? (
+              <div className="text-amber-200 space-y-1">
+                <div>{missionWaypoint.label ?? 'Waypoint'}</div>
+                <div>{missionMetrics.distance.toFixed(1)} m · BRG {missionMetrics.bearing.toFixed(0)}°</div>
+                {missionMetrics.altitudeDelta != null && (
+                  <div>Δ Alt {missionMetrics.altitudeDelta.toFixed(1)} m</div>
+                )}
               </div>
-
-              <div className="text-center">
-                <div className="text-gray-400">PITCH</div>
-                <div className="font-mono text-green-400">
-                  {telemetryData.attitude.pitch.toFixed(1)}°
-                </div>
+            ) : (
+              <div className="text-gray-500">Idle</div>
+            )}
+          </div>
+          <div className="glass-panel border border-gray-700/60 p-2">
+            <div className="text-[11px] text-gray-400 uppercase mb-1">POI</div>
+            {poiMetrics ? (
+              <div className="text-purple-200 space-y-1">
+                <div>{poiLabel}</div>
+                <div>{poiMetrics.slantDistance.toFixed(1)} m · BRG {poiMetrics.bearing.toFixed(0)}°</div>
+                {poiMetrics.pitch != null && (
+                  <div>Pitch {poiMetrics.pitch.toFixed(1)}°</div>
+                )}
               </div>
-            </>
-          )}
-          
-          {telemetryData?.home_bearing !== undefined && (
-            <div className="text-center">
-              <div className="text-gray-400">HOME</div>
-              <div className="font-mono text-status-good">
-                {telemetryData.home_bearing.toFixed(0)}°
-              </div>
-            </div>
-          )}
-
-          {targetMetrics && (
-            <div className="text-center">
-              <div className="text-gray-400">OBJ</div>
-              <div className="font-mono text-purple-300">
-                {targetMetrics.bearing.toFixed(0)}°
-              </div>
-            </div>
-          )}
-          {poiMetrics && (
-            <div className="text-center">
-              <div className="text-gray-400">POI</div>
-              <div className="font-mono text-purple-200">
-                {poiMetrics.bearing.toFixed(0)}°
-              </div>
-            </div>
-          )}
+            ) : (
+              <div className="text-gray-500">Not set</div>
+            )}
+          </div>
         </div>
-          {targetMetrics && (
-            <div className="mt-2 text-xs text-center text-purple-200">
-              {(objectTarget?.clusterLabel ?? objectTarget?.clusterId) ?? 'Target'}: {targetMetrics.slantDistance.toFixed(1)} m
-              {targetMetrics.altitudeDelta != null ? ` · Δalt ${targetMetrics.altitudeDelta.toFixed(1)} m` : ''}
-            </div>
-          )}
-          {missionMetrics && missionWaypoint && (
-            <div className="mt-1 text-xs text-center text-sky-200">
-              {(missionWaypoint.label ?? 'Waypoint')}: {missionMetrics.distance.toFixed(1)} m · BRG {missionMetrics.bearing.toFixed(0)}°
-              {missionMetrics.altitudeDelta != null ? ` · Δalt ${missionMetrics.altitudeDelta.toFixed(1)} m` : ''}
-            </div>
-          )}
-          {poiMetrics && (
-            <div className="mt-1 text-xs text-center text-purple-200">
-              POI: {poiMetrics.slantDistance.toFixed(1)} m · BRG {poiMetrics.bearing.toFixed(0)}°
-              {poiMetrics.altitudeDelta != null ? ` · Δalt ${poiMetrics.altitudeDelta.toFixed(1)} m` : ''}
-              {poiMetrics.pitch != null ? ` · Pitch ${poiMetrics.pitch.toFixed(1)}°` : ''}
-            </div>
-          )}
-        </>
       )}
     </div>
   );

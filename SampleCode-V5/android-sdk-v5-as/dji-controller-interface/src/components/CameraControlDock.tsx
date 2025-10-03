@@ -1,5 +1,6 @@
 import React, { useMemo, useState, useEffect, useCallback, useSyncExternalStore } from 'react';
 import { Panel } from './Panel';
+import { CollapsibleSection, SectionLabel } from './CollapsibleSection';
 import { cameraControlStore, type CameraControlSnapshot } from '../state/cameraControls';
 import { ManualTrackControls } from './ManualTrackControls';
 import type { ManualTrackSettings, ManualTrackPresetId } from '../camera/manualTrack';
@@ -30,58 +31,6 @@ const formatAltitude = (alt?: number | null) => {
   if (typeof alt !== 'number' || !Number.isFinite(alt)) return '—';
   return `${alt.toFixed(1)} m`;
 };
-
-interface CollapsibleSectionProps {
-  title: string;
-  storageKey: string;
-  defaultOpen?: boolean;
-  children?: React.ReactNode;
-}
-
-const CollapsibleSection = ({ title, storageKey, defaultOpen = true, children }: CollapsibleSectionProps) => {
-  const [open, setOpen] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return defaultOpen;
-    try {
-      const raw = window.localStorage.getItem(storageKey);
-      if (raw == null) return defaultOpen;
-      return JSON.parse(raw) === true;
-    } catch {
-      return defaultOpen;
-    }
-  });
-
-  const toggle = useCallback(() => {
-    setOpen((prev) => {
-      const next = !prev;
-      if (typeof window !== 'undefined') {
-        try {
-          window.localStorage.setItem(storageKey, JSON.stringify(next));
-        } catch {
-          // ignore storage errors
-        }
-      }
-      return next;
-    });
-  }, [storageKey]);
-
-  return (
-    <div className="border border-gray-700/70 rounded-md overflow-hidden bg-black/45">
-      <button
-        type="button"
-        onClick={toggle}
-        className="w-full flex items-center justify-between px-3 py-2 text-xs tracking-wide uppercase text-gray-300 bg-gray-900/70 hover:bg-gray-800"
-      >
-        <span>{title}</span>
-        <span className="text-gray-500">{open ? '▾' : '▸'}</span>
-      </button>
-      {open && <div className="p-3 space-y-3 text-xs text-gray-200">{children}</div>}
-    </div>
-  );
-};
-
-const SectionLabel: React.FC<{ label: string }> = ({ label }) => (
-  <div className="text-[11px] uppercase tracking-wide text-gray-400">{label}</div>
-);
 
 const ButtonGroup: React.FC<{
   options: Array<{ value: string; label: string; disabled?: boolean }>;

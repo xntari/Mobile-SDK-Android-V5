@@ -1,6 +1,7 @@
 import React from 'react';
 import JSZip from 'jszip';
 import { Panel } from './Panel';
+import { CollapsibleSection } from './CollapsibleSection';
 import { getSimulatorModeBadge } from './SimulatorControls';
 import { useBridgeCommands } from '../hooks/useBridgeCommands';
 import { useStableBridgeData } from '../hooks/useStableBridgeData';
@@ -3666,15 +3667,20 @@ ${wpmlWaypoints}
       defaultPosition={{ x: 1040, y: 780 }}
       defaultSize={{ w: 340, h: 360 }}
     >
-      <div className="flex flex-col gap-3 text-xs text-gray-200 h-full overflow-y-auto pr-1">
+      <div className="space-y-3 text-xs text-gray-200 h-full overflow-y-auto pr-1">
         {statusMessage && (
           <div className="text-[11px] text-status-warning bg-black/40 border border-yellow-500/40 rounded px-2 py-1">
             {statusMessage}
           </div>
         )}
 
-        <div className="flex flex-col gap-1 border border-gray-700/60 bg-black/30 rounded-md px-3 py-2 text-[11px] text-gray-300">
-          <div className="flex flex-wrap items-center gap-2">
+        <CollapsibleSection
+          title="Simulator"
+          storageKey="missionControl.section.simulator"
+          defaultOpen={false}
+          summary={simulatorStatus ? (simulatorStatus.enabled ? 'Enabled' : 'Disabled') : 'No link'}
+        >
+          <div className="flex flex-wrap items-center gap-2 text-[11px]">
             <span className={`px-2 py-0.5 border rounded ${simulatorBadge.className}`}>
               {simulatorBadge.label}
             </span>
@@ -3685,7 +3691,7 @@ ${wpmlWaypoints}
               Updated {formatRelativeTime(simulatorStatus?.timestamp)}
             </span>
           </div>
-          <div className="flex flex-wrap gap-3 text-gray-400">
+          <div className="flex flex-wrap gap-3 text-gray-400 text-[11px]">
             <span>
               Motors {simulatorStatus?.motors_on === undefined ? '—' : simulatorStatus.motors_on ? 'ON' : 'OFF'}
             </span>
@@ -3698,10 +3704,9 @@ ${wpmlWaypoints}
               </span>
             )}
           </div>
-        </div>
+        </CollapsibleSection>
 
-        <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
-          <div className="text-gray-400 uppercase text-[11px] mb-2">Mission Defaults</div>
+        <CollapsibleSection title="Mission Defaults" storageKey="missionControl.section.defaults">
           <div className="grid grid-cols-2 gap-2 mb-2">
             <label className="flex flex-col gap-1 text-[11px]">
               <span>Max Speed (m/s)</span>
@@ -3896,11 +3901,16 @@ ${wpmlWaypoints}
           </div>
         )}
       </div>
-          <div className="text-[10px] text-gray-500 mb-3">
+        </CollapsibleSection>
+
+        <CollapsibleSection
+          title="Manual Move Presets"
+          storageKey="missionControl.section.manualMove"
+        >
+          <div className="text-[10px] text-gray-500">
             Default AMSL target: {defaultTargetAltitudePreview != null ? defaultTargetAltitudePreview.toFixed(1) : '—'} m
           </div>
-          <div className="text-gray-400 uppercase text-[11px] mb-2">Manual Move Presets</div>
-          <div className="grid grid-cols-2 gap-2 mb-2">
+          <div className="grid grid-cols-2 gap-2">
             <label className="flex flex-col gap-1 text-[11px]">
               <span>Distance (m)</span>
               <input
@@ -3971,11 +3981,14 @@ ${wpmlWaypoints}
               )}
             </div>
           )}
-        </section>
+        </CollapsibleSection>
 
-        <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
-          <div className="text-gray-400 uppercase text-[11px] mb-2">Vertical Move</div>
-          <div className="flex items-center gap-3 mb-2">
+        <CollapsibleSection
+          title="Vertical Move"
+          storageKey="missionControl.section.verticalMove"
+          defaultOpen={false}
+        >
+          <div className="flex items-center gap-3">
             <span className="text-[11px]">Δ Alt (m)</span>
             <input
               type="number"
@@ -3994,15 +4007,13 @@ ${wpmlWaypoints}
               Down
             </button>
           </div>
-        </section>
+        </CollapsibleSection>
 
-        <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
-          <div className="flex items-center justify-between mb-1">
-            <div className="text-gray-400 uppercase text-[11px]">Target & Planning</div>
-            {manualTargetSourceLabel && (
-              <div className="text-[10px] text-amber-300">Source: {manualTargetSourceLabel}</div>
-            )}
-          </div>
+        <CollapsibleSection
+          title="Target & Planning"
+          storageKey="missionControl.section.target"
+          summary={manualTargetSourceLabel ? `Source: ${manualTargetSourceLabel}` : undefined}
+        >
           <div className="grid grid-cols-3 gap-2 text-[11px] mb-2">
             <label className="flex flex-col gap-1">
               <span>Latitude</span>
@@ -4131,21 +4142,13 @@ ${wpmlWaypoints}
               </div>
             </div>
           )}
-        </section>
+        </CollapsibleSection>
 
-        <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
-          <div className="flex items-center justify-between mb-2">
-            <div className="text-gray-400 uppercase text-[11px]">KMZ Missions</div>
-            {lastLoadedKmz && (
-              <div className="text-[10px] text-gray-400 truncate">
-                Last: <span className="text-gray-200">{lastLoadedKmz.name}</span>
-                {lastLoadedKmz.sizeBytes ? (
-                  <span className="text-gray-500"> · {formatBytes(lastLoadedKmz.sizeBytes)}</span>
-                ) : null}
-                <span className="text-gray-500"> · {formatRelativeTime(lastLoadedKmz.timestamp)}</span>
-              </div>
-            )}
-          </div>
+        <CollapsibleSection
+          title="KMZ Missions"
+          storageKey="missionControl.section.kmz"
+          summary={lastLoadedKmz ? `${lastLoadedKmz.name} · ${formatRelativeTime(lastLoadedKmz.timestamp)}` : undefined}
+        >
           <div className="grid grid-cols-1 gap-2">
             <button
               type="button"
@@ -4174,11 +4177,15 @@ ${wpmlWaypoints}
           <div className="mt-2 text-[10px] text-gray-500">
             Imports a DJI Waypoint KMZ into the mission planner for review and simulation. Execute manually once satisfied with the plan.
           </div>
-        </section>
+        </CollapsibleSection>
 
-        <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
-          <div className="flex items-center justify-between mb-1">
-            <div className="text-gray-400 uppercase text-[11px]">Mission Plan (beta)</div>
+        <CollapsibleSection
+          title="Mission Plan (beta)"
+          storageKey="missionControl.section.plan"
+          summary={missionPlan.length ? `${missionPlan.length} entries` : undefined}
+        >
+          <div className="flex items-center justify-between text-[11px] mb-1">
+            <span className="text-gray-400 uppercase">Mission tools</span>
             {missionPlan.length > 0 && (
               <button
                 type="button"
@@ -5077,18 +5084,19 @@ ${wpmlWaypoints}
                 Converts the staged mission into a Waypoint V3 mission via the bridge; verify simulator or bench before live flight.
               </div>
             </div>
-          )}
-        </section>
+            )}
+        </CollapsibleSection>
 
-        <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
-          <div className="flex items-center justify-between mb-2">
-            <div className="text-gray-400 uppercase text-[11px]">Mission Execution</div>
-            <div className="flex items-center gap-2 text-[10px] text-gray-500">
-              <span>State</span>
-              <span className={`px-2 py-0.5 rounded border ${missionStateClassName(missionStateRaw)}`}>
-                {missionStateLabel}
-              </span>
-            </div>
+        <CollapsibleSection
+          title="Mission Execution"
+          storageKey="missionControl.section.execution"
+          summary={missionStateLabel}
+        >
+          <div className="flex items-center gap-2 text-[10px] text-gray-500">
+            <span>State</span>
+            <span className={`px-2 py-0.5 rounded border ${missionStateClassName(missionStateRaw)}`}>
+              {missionStateLabel}
+            </span>
           </div>
           <div className="flex flex-wrap gap-2">
             <button
@@ -5116,7 +5124,7 @@ ${wpmlWaypoints}
               Stop
             </button>
           </div>
-        </section>
+        </CollapsibleSection>
       </div>
     </Panel>
   );

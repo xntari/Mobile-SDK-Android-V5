@@ -1,5 +1,6 @@
 import React from 'react';
 import { Panel } from './Panel';
+import { CollapsibleSection } from './CollapsibleSection';
 import { PreflightStatus, FlightCommandAck, TelemetryDiagnosticEntry, TelemetryData, BatteryData, ControllerData } from '../types';
 import { useBridgeCommands } from '../hooks/useBridgeCommands';
 
@@ -280,14 +281,14 @@ export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, histo
       defaultPosition={{ x: 720, y: 20 }}
       defaultSize={{ w: 320, h: 340 }}
     >
-      <div className="flex flex-col gap-3 text-xs text-gray-200 h-full overflow-y-auto pr-1">
-        <section className="glass-panel border border-gray-700/70 rounded-md px-3 py-2">
-          <div className="flex items-center justify-between text-[11px] uppercase text-gray-400">
-            <span>Device Status</span>
-            <span>{preflight ? formatRelativeTime(preflight.timestamp) : '—'}</span>
-          </div>
+      <div className="space-y-3 text-xs text-gray-200 h-full overflow-y-auto pr-1">
+        <CollapsibleSection
+          title="Device Status"
+          storageKey="preflight.section.device"
+          summary={preflight ? formatRelativeTime(preflight.timestamp) : 'No data'}
+        >
           {deviceStatus ? (
-            <div className="mt-1">
+            <div className="space-y-1">
               <div className={`text-base font-semibold ${levelClass(deviceStatus.level)}`}>
                 {deviceStatus.label || deviceStatus.code || 'Status'}
               </div>
@@ -298,12 +299,15 @@ export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, histo
               )}
             </div>
           ) : (
-            <div className="text-[11px] text-status-good mt-1">All systems nominal</div>
+            <div className="text-[11px] text-status-good">All systems nominal</div>
           )}
-        </section>
+        </CollapsibleSection>
 
-        <section className="glass-panel border border-gray-700/70 rounded-md px-3 py-2">
-          <div className="text-gray-400 uppercase text-[11px] mb-1">Preflight Warnings</div>
+        <CollapsibleSection
+          title="Preflight Warnings"
+          storageKey="preflight.section.warnings"
+          summary={diagnostics.length ? `${diagnostics.length} alert${diagnostics.length === 1 ? '' : 's'}` : 'Clear'}
+        >
           {diagnostics.length === 0 ? (
             <div className="text-[11px] text-gray-400">No active diagnostics.</div>
           ) : (
@@ -327,22 +331,24 @@ export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, histo
               ))}
             </div>
           )}
-          <div className="mt-2">
+          <div className="mt-2 flex flex-col gap-1 text-[10px]">
             <button
               type="button"
-              className="px-2 py-1 text-[10px] rounded border border-gray-700 text-gray-200 hover:bg-gray-800/60"
+              className="px-2 py-1 rounded border border-gray-700 text-gray-200 hover:bg-gray-800/60"
               onClick={handleFlySafeRefresh}
             >
               Refresh Fly Safe Zones
             </button>
-            {flySafeStatusMessage && (
-              <div className="text-[10px] text-gray-400 mt-1">{flySafeStatusMessage}</div>
-            )}
+            {flySafeStatusMessage && <div className="text-gray-400">{flySafeStatusMessage}</div>}
           </div>
-        </section>
+        </CollapsibleSection>
 
-        <section className="glass-panel border border-gray-700/70 rounded-md px-3 py-2">
-          <div className="text-gray-400 uppercase text-[11px] mb-1">Flight Limits &amp; Failsafe</div>
+        
+        <CollapsibleSection
+          title="Flight Limits &amp; Failsafe"
+          storageKey="preflight.section.limits"
+          summary={flightLimits.rth != null ? formatMeters(flightLimits.rth) : '—'}
+        >
           <div className="flex flex-col gap-1.5">
             <InfoRow label="RTH Altitude" value={formatMeters(flightLimits.rth)} />
             <InfoRow label="Max Altitude" value={formatMeters(flightLimits.maxAltitude)} />
@@ -367,9 +373,10 @@ export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, histo
                 <input
                   type="number"
                   min={0}
+                  max={500}
                   value={rthAltitudeInput}
                   onChange={(event) => setRthAltitudeInput(event.target.value)}
-                  className="bg-black/40 border border-gray-700/70 rounded px-2 py-1 text-right"
+                  className="bg-black/40 border border-gray-700/70 rounded px-2 py-1"
                 />
               </label>
               <label className="flex flex-col gap-1">
@@ -377,9 +384,10 @@ export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, histo
                 <input
                   type="number"
                   min={0}
+                  max={500}
                   value={maxAltitudeInput}
                   onChange={(event) => setMaxAltitudeInput(event.target.value)}
-                  className="bg-black/40 border border-gray-700/70 rounded px-2 py-1 text-right"
+                  className="bg-black/40 border border-gray-700/70 rounded px-2 py-1"
                 />
               </label>
               <label className="flex flex-col gap-1">
@@ -387,12 +395,13 @@ export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, histo
                 <input
                   type="number"
                   min={0}
+                  max={10000}
                   value={maxDistanceInput}
                   onChange={(event) => setMaxDistanceInput(event.target.value)}
-                  className="bg-black/40 border border-gray-700/70 rounded px-2 py-1 text-right"
+                  className="bg-black/40 border border-gray-700/70 rounded px-2 py-1"
                 />
               </label>
-              <div className="flex items-center gap-2">
+              <label className="flex items-center gap-2 text-[10px]">
                 <input
                   type="checkbox"
                   checked={distanceLimitEnabledInput}
@@ -400,7 +409,7 @@ export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, histo
                   className="accent-dji-blue"
                 />
                 <span>Distance Limit Enabled</span>
-              </div>
+              </label>
             </div>
             <label className="flex flex-col gap-1">
               <span>Signal Lost Action</span>
@@ -432,14 +441,23 @@ export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, histo
                 Reset
               </button>
             </div>
-            {settingsStatus && (
-              <div className="text-[10px] text-gray-400">{settingsStatus}</div>
-            )}
+            {settingsStatus && <div className="text-[10px] text-gray-400">{settingsStatus}</div>}
           </div>
-        </section>
+        </CollapsibleSection>
 
-        <section className="glass-panel border border-gray-700/70 rounded-md px-3 py-2">
-          <div className="text-gray-400 uppercase text-[11px] mb-1">Obstacle Avoidance</div>
+
+        
+        <CollapsibleSection
+          title="Obstacle Avoidance"
+          storageKey="preflight.section.obstacle"
+          summary={
+            obstacleSettings?.collision_avoidance ?? telemetryObstacle?.enabled
+              ? 'Enabled'
+              : obstacleSettings?.collision_avoidance === false || telemetryObstacle?.enabled === false
+              ? 'Disabled'
+              : '—'
+          }
+        >
           <div className="flex flex-col gap-1.5">
             <InfoRow
               label="Collision Avoidance"
@@ -463,25 +481,32 @@ export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, histo
                   : 'DISABLED'
               }
             />
-            <InfoRow
-              label="Landing Protection"
-              value={formatActionLabel(obstacleSettings?.landing_protection)}
-            />
+            <InfoRow label="Landing Protection" value={formatActionLabel(obstacleSettings?.landing_protection)} />
           </div>
-        </section>
+        </CollapsibleSection>
 
-        <section className="glass-panel border border-gray-700/70 rounded-md px-3 py-2">
-          <div className="text-gray-400 uppercase text-[11px] mb-1">Power &amp; Battery</div>
+
+        
+        <CollapsibleSection
+          title="Power &amp; Battery"
+          storageKey="preflight.section.power"
+          summary={formatPercent(aircraftBatteryPercent)}
+        >
           <div className="flex flex-col gap-1.5">
             <InfoRow label="Aircraft" value={formatPercent(aircraftBatteryPercent)} />
             <InfoRow label="Controller" value={formatPercent(controllerBatteryPercent)} />
             <InfoRow label="Low Warning" value={formatPercent(powerStatus?.low_warning_threshold)} />
             <InfoRow label="Critical" value={formatPercent(powerStatus?.critical_warning_threshold)} />
           </div>
-        </section>
+        </CollapsibleSection>
 
-        <section className="glass-panel border border-gray-700/70 rounded-md px-3 py-2">
-          <div className="text-gray-400 uppercase text-[11px] mb-1">Controller Setup</div>
+
+        
+        <CollapsibleSection
+          title="Controller Setup"
+          storageKey="preflight.section.controller"
+          summary={controllerSettings?.stick_mode ?? '—'}
+        >
           <div className="flex flex-col gap-1.5">
             <InfoRow label="Stick Mode" value={controllerSettings?.stick_mode ?? '—'} />
             <InfoRow label="RC Mode" value={controllerSettings?.rc_mode ?? '—'} />
@@ -510,10 +535,15 @@ export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, histo
               }
             />
           </div>
-        </section>
+        </CollapsibleSection>
 
-        <section className="glass-panel border border-gray-700/70 rounded-md px-3 py-2">
-          <div className="text-gray-400 uppercase text-[11px] mb-1">Remote ID</div>
+
+        
+        <CollapsibleSection
+          title="Remote ID"
+          storageKey="preflight.section.remoteId"
+          summary={remoteIdSnapshot?.areaStrategy ?? '—'}
+        >
           <div className="flex flex-col gap-1.5">
             <InfoRow label="Area Strategy" value={remoteIdSnapshot?.areaStrategy ?? '—'} />
             <InfoRow label="Operator ID" value={remoteIdSnapshot?.operatorRegistrationNumber ?? '—'} />
@@ -570,18 +600,18 @@ export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, histo
                 Refresh
               </button>
             </div>
-            {remoteIdStatusMessage && (
-              <div className="text-[10px] text-gray-400">{remoteIdStatusMessage}</div>
-            )}
+            {remoteIdStatusMessage && <div className="text-[10px] text-gray-400">{remoteIdStatusMessage}</div>}
           </div>
-        </section>
+        </CollapsibleSection>
+
 
         {latestLandingMonitor && (
-          <section className="glass-panel border border-status-error/60 rounded-md px-3 py-2">
-            <div className="text-[11px] uppercase text-status-error mb-1 flex justify-between">
-              <span>Landing Monitor</span>
-              <span>{formatRelativeTime(latestLandingMonitor.timestamp)}</span>
-            </div>
+          <CollapsibleSection
+            title="Landing Monitor"
+            storageKey="preflight.section.landingMonitor"
+            summary={formatRelativeTime(latestLandingMonitor.timestamp)}
+            defaultOpen
+          >
             <div className="text-[11px] text-status-error leading-tight">
               {latestLandingMonitor.message || latestLandingMonitor.error_message || 'Landing monitor reported issue.'}
             </div>
@@ -596,7 +626,7 @@ export const PreflightPanel: React.FC<PreflightPanelProps> = ({ preflight, histo
                 )}
               </div>
             )}
-          </section>
+          </CollapsibleSection>
         )}
       </div>
     </Panel>

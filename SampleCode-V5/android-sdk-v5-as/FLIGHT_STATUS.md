@@ -162,13 +162,14 @@ Most recent verified features (2025-10-01):
    Alternatives: Provide a “stability” preset that clamps rates and widen documentation on how to revert to SDK LookAt if oscillations appear.
 
 2. **Unified camera control dock follow-ups**
-   Status: First pass dock is shipping (gimbal/LookAt controls, manual-track tuning, lens selectors, FPV HUD, capability probe). Follow-ups include wiring remaining payload widgets (object memory staging, orientation debug), refining resize handles, and expanding telemetry readouts.
+   Status: Dock now drives lens selection, thermal zoom (2×/4×/8×), laser enable, and FPV HUD presets, and the panel scrolls cleanly after resizing; H20N crosshair/aim cues are restored and FPV overlays were decluttered. Still pending: wiring remaining payload widgets (object memory staging, orientation debug), refining resize handles, and expanding telemetry readouts.
    Risks: Additional modules may bloat the dock or reintroduce heavy render costs; dragging over video feeds still needs focus/keyboard QA.
    Next: Audit hover/focus behaviour, add keyboard shortcuts, and document layout import/export conventions before broader rollout.
 
 3. **Collapsible architecture across major panels**
-   Plan: Extend the new collapsible pattern to Flight Commands, Mission Control, Object Memory, Preflight, and Orientation/HSI (including merging HSI visuals into Orientation with obstacle cues and vertical clearance). Persist open states, auto-expand when warnings are present, and ensure telemetry subscriptions tear down when sections collapse.
-   Risks: Legacy layouts depend on fixed heights; hiding warnings behind collapsed headings could mask critical alerts.
+   Status: ✅ Mission Control, Object Memory, Preflight, Orientation/HSI, and Flight Commands now share the collapsible section framework. Each panel stores open state in localStore, exposes section summaries (e.g., warning counts, RTH altitude), and keeps telemetry blocks accessible without scrolling. HSI visualisation still lives inside Orientation; merging obstacle cues + HSI overlays into that component remains outstanding.
+   Next: Finish the HSI merge (obstacle sectors, altitude bands) and badge collapsed headings when alerts are active so operators cannot hide faults accidentally. Verify subscription teardown costs after long sessions and profile layout persistence against legacy saves.
+   Risks: Legacy layouts depend on fixed heights; hiding warnings behind collapsed headings could mask critical alerts if badges regress.
    Alternatives: Keep legacy HSI as optional component until merged view proves reliable; badge collapsed headings with warning counts to avoid silent failures.
 
 4. **Style presets and tokenisation**
