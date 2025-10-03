@@ -164,6 +164,63 @@ const COMMAND_GROUPS: Array<{ title: string; commands: CommandSpec[] }> = [
   },
 ];
 
+interface CollapsibleSectionProps {
+  title: string;
+  storageKey: string;
+  defaultOpen?: boolean;
+  children?: React.ReactNode;
+}
+
+const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
+  title,
+  storageKey,
+  defaultOpen = true,
+  children,
+}) => {
+  const [open, setOpen] = React.useState<boolean>(() => {
+    if (typeof window === "undefined") return defaultOpen;
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (raw == null) return defaultOpen;
+      return JSON.parse(raw) === true;
+    } catch {
+      return defaultOpen;
+    }
+  });
+
+  const toggle = React.useCallback(() => {
+    setOpen((prev) => {
+      const next = !prev;
+      if (typeof window !== "undefined") {
+        try {
+          window.localStorage.setItem(storageKey, JSON.stringify(next));
+        } catch {
+          // ignore persistence errors
+        }
+      }
+      return next;
+    });
+  }, [storageKey]);
+
+  return (
+    <div className="border border-gray-700/70 rounded-md overflow-hidden bg-black/45">
+      <button
+        type="button"
+        onClick={toggle}
+        className="w-full flex items-center justify-between px-3 py-2 text-xs tracking-wide uppercase text-gray-300 bg-gray-900/70 hover:bg-gray-800"
+      >
+        <span>{title}</span>
+        <span className="text-gray-500">{open ? "▾" : "▸"}</span>
+      </button>
+      {open && <div className="p-3 space-y-3 text-xs text-gray-200">{children}</div>}
+    </div>
+  );
+};
+
+const SectionLabel: React.FC<{ label: string }> = ({ label }) => (
+  <div className="text-[11px] uppercase tracking-wide text-gray-400">{label}</div>
+);
+
 const baseButtonClasses =
   "w-full rounded border text-[11px] font-semibold uppercase tracking-wide py-1 px-2 transition-colors duration-150 focus:outline-none focus:ring-1 focus:ring-offset-[1px] focus:ring-offset-black/40 flex items-center justify-center text-center";
 const toneClass: Record<CommandTone, string> = {
@@ -1025,96 +1082,81 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
         defaultPosition={{ x: 1040, y: 340 }}
         defaultSize={{ w: 320, h: 420 }}
       >
-        <div className="flex flex-col gap-4 text-xs text-gray-200 h-full overflow-y-auto">
-          <SimulatorControls
-            telemetry={telemetry}
-            onSend={handleSend}
-            pendingActions={pendingActions}
-            pendingMeta={pendingMeta}
-            acknowledgements={acknowledgements}
-          />
-          <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
-            <div className="flex justify-between text-[11px] uppercase text-gray-400 mb-1">
-              <span>Status</span>
+        <div className="space-y-3 text-xs h-full overflow-y-auto pr-1">
+          <CollapsibleSection
+            title="Simulator"
+            storageKey="flightCommands.section.simulator"
+            defaultOpen={false}
+          >
+            <SimulatorControls
+              telemetry={telemetry}
+              onSend={handleSend}
+              pendingActions={pendingActions}
+              pendingMeta={pendingMeta}
+              acknowledgements={acknowledgements}
+            />
+          </CollapsibleSection>
+          <CollapsibleSection
+            title="Flight Status"
+            storageKey="flightCommands.section.status"
+          >
+            <div className="flex items-center justify-between text-[11px] uppercase text-gray-400">
+              <span>Status snapshot</span>
               <span>{new Date().toLocaleTimeString()}</span>
             </div>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[12px]">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[12px] text-gray-200">
               <div>
-                Motors:{" "}
-                <span
-                  className={motorsOn ? "text-status-good" : "text-gray-300"}
-                >
-                  {motorsOn ? "ON" : "OFF"}
-                </span>
+                Motors: <span className={motorsOn ? "text-status-good" : "text-gray-300"}>{motorsOn ? "ON" : "OFF"}</span>
               </div>
               <div>
-                Mode: <span className="text-white">{flightMode}</span>
+                Mode: <span className="text-gray-100">{flightMode}</span>
               </div>
               <div>
-                Auto Mode: <span className="text-white">{autoModeLabel}</span>
+                Auto Mode: <span className="text-gray-100">{autoModeLabel}</span>
               </div>
               <div>Alt AGL: {formatAltitude(telemetry?.altitude)}</div>
-              <div>
-                Alt TO: {formatAltitude(telemetry?.altitude_above_takeoff)}
-              </div>
+              <div>Alt TO: {formatAltitude(telemetry?.altitude_above_takeoff)}</div>
               <div>Ground Speed: {formatSpeed(telemetry?.speed)}</div>
               <div>GPS: {gpsLevel}</div>
               <div>RC Signal: {rcText}</div>
-              <div>
-                Distance Home: {formatAltitude(telemetry?.distance_to_home)}
-              </div>
+              <div>Distance Home: {formatAltitude(telemetry?.distance_to_home)}</div>
             </div>
             {lastAck && (
-              <div className="mt-2 text-[11px]">
-                <span className="text-gray-400 uppercase">Last Command:</span>
-                <span className="ml-2 text-white">{lastAck.action}</span>
-                <span
-                  className={`ml-2 ${lastAck.status === "ok" ? "text-status-good" : "text-status-error"}`}
-                >
-                  {lastAck.status.toUpperCase()}
-                </span>
-                {(lastAck.error_message || lastAck.message) && (
-                  <span className="ml-2 text-status-error">
-                    {lastAck.error_message || lastAck.message}
+              <div className="mt-2 space-y-1 text-[11px]">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-gray-400 uppercase">Last Command</span>
+                  <span className="text-gray-100">{lastAck.action}</span>
+                  <span className={lastAck.status === "ok" ? "text-status-good" : "text-status-error"}>
+                    {lastAck.status.toUpperCase()}
                   </span>
-                )}
+                  {(lastAck.error_message || lastAck.message) && (
+                    <span className="text-status-error">{lastAck.error_message || lastAck.message}</span>
+                  )}
+                </div>
                 {lastDiagnostic && (
-                  <div
-                    className={`mt-1 ${diagnosticLevelClass(lastDiagnostic.level)} leading-tight`}
-                  >
+                  <div className={`${diagnosticLevelClass(lastDiagnostic.level)} leading-tight`}>
                     {summarizeDiagnostic(lastDiagnostic)}
                   </div>
                 )}
                 {(lastAck.error_type || lastAck.error_code || lastAck.error_domain) && (
-                  <div className="mt-1 text-[10px] text-status-error leading-tight">
+                  <div className="text-[10px] text-status-error leading-tight">
                     {lastAck.error_type && <span>{lastAck.error_type}</span>}
                     {lastAck.error_code && (
-                      <span>
-                        {lastAck.error_type ? " · " : ""}
-                        code {lastAck.error_code}
-                      </span>
+                      <span>{lastAck.error_type ? " · " : ""}code {lastAck.error_code}</span>
                     )}
                     {typeof lastAck.error_code_value === "number" && (
-                      <span>
-                        {" "}(0x{lastAck.error_code_value.toString(16).toUpperCase()})
-                      </span>
+                      <span> (0x{lastAck.error_code_value.toString(16).toUpperCase()})</span>
                     )}
                     {lastAck.error_domain && (
-                      <span>
-                        {" "}
-                        — {lastAck.error_domain}
-                      </span>
+                      <span> — {lastAck.error_domain}</span>
                     )}
                   </div>
                 )}
                 {lastAck.target_location && (
-                  <div className="mt-1 text-[10px] text-gray-400 leading-tight">
-                    Target: lat {typeof lastAck.target_location.latitude === "number" ? lastAck.target_location.latitude.toFixed(6) : "—"}
-                    {" "}· lon {typeof lastAck.target_location.longitude === "number" ? lastAck.target_location.longitude.toFixed(6) : "—"}
+                  <div className="text-[10px] text-gray-400 leading-tight">
+                    Target: lat {typeof lastAck.target_location.latitude === "number" ? lastAck.target_location.latitude.toFixed(6) : "—"} · lon {typeof lastAck.target_location.longitude === "number" ? lastAck.target_location.longitude.toFixed(6) : "—"}
                     {typeof lastAck.target_location.altitude === "number" && (
-                      <span>
-                        {" "}· alt {lastAck.target_location.altitude.toFixed(1)} m
-                      </span>
+                      <span> · alt {lastAck.target_location.altitude.toFixed(1)} m</span>
                     )}
                   </div>
                 )}
@@ -1124,18 +1166,16 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                   </div>
                 )}
                 {lastFlySafeWarning && (
-                  <div className="mt-1 text-[10px] text-yellow-300 leading-tight">
+                  <div className="text-[10px] text-yellow-300 leading-tight">
                     FlySafe: {lastFlySafeWarning.description || lastFlySafeWarning.event}
                     {typeof lastFlySafeWarning.height_limit === "number" && (
-                      <span>
-                        {" "}· limit {lastFlySafeWarning.height_limit.toFixed(1)} m
-                      </span>
+                      <span> · limit {lastFlySafeWarning.height_limit.toFixed(1)} m</span>
                     )}
                   </div>
                 )}
                 {renderFlyToContext(flyToContext)}
                 {lastAck.fly_to_param_update && (
-                  <div className="mt-1 text-[10px] text-gray-300 leading-tight">
+                  <div className="text-[10px] text-gray-300 leading-tight">
                     Param update: {lastAck.fly_to_param_update}
                     {lastAck.fly_to_param_message && (
                       <span className="text-gray-400"> — {lastAck.fly_to_param_message}</span>
@@ -1143,63 +1183,55 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                   </div>
                 )}
                 {lastAck.fly_to_param_error && (
-                  <div className="mt-1 text-[10px] text-status-error leading-tight">
+                  <div className="text-[10px] text-status-error leading-tight">
                     Param error: {lastAck.fly_to_param_error}
                   </div>
                 )}
                 {renderFlyToSteps(lastAck.fly_to_param_steps)}
               </div>
             )}
-          </section>
+          </CollapsibleSection>
 
-          <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
-            <div className="flex items-center justify-between mb-1">
-              <div className="text-gray-400 uppercase text-[11px]">
-                Waypoint Mission
-              </div>
-              <div className={`text-[11px] font-semibold ${missionStateBadge}`}>
+          <CollapsibleSection
+            title="Waypoint Mission"
+            storageKey="flightCommands.section.waypoint"
+          >
+            <div className="flex items-center justify-between">
+              <SectionLabel label="Mission" />
+              <span className={`text-[11px] font-semibold ${missionStateBadge}`}>
                 {missionStateLabel}
-              </div>
+              </span>
             </div>
-            <div className="text-[11px] text-gray-300 space-y-0.5">
+            <div className="text-[11px] text-gray-300 space-y-1">
               <div>
-                Backend:{" "}
-                <span className="text-gray-200">{missionBackend ?? "—"}</span>
+                Backend: <span className="text-gray-200">{missionBackend ?? "—"}</span>
               </div>
               <div>
-                Mission ID:{" "}
-                <span className="text-gray-200">{missionId ?? "—"}</span>
+                Mission ID: <span className="text-gray-200">{missionId ?? "—"}</span>
               </div>
               <div>
-                Waypoint:{" "}
-                <span className="text-gray-200">
-                  {typeof missionExecuting?.current_waypoint_index === "number"
-                    ? `#${missionExecuting.current_waypoint_index}`
-                    : "—"}
-                </span>
+                Waypoint: <span className="text-gray-200">{typeof missionExecuting?.current_waypoint_index === "number" ? `#${missionExecuting.current_waypoint_index}` : "—"}</span>
                 {typeof missionExecuting?.wayline_id === "number" && (
                   <span className="ml-1 text-gray-400">(Wayline {missionExecuting.wayline_id})</span>
                 )}
               </div>
-              <div>
-                Updated:{" "}
-                <span className="text-gray-200">{missionTimestamp ?? "–"}</span>
-              </div>
-            {missionInterrupt?.description && (
-              <div className="text-status-error">
-                Interrupt: {missionInterrupt.description}
-                {missionInterrupt.code && (
-                  <span className="text-gray-400"> ({missionInterrupt.code})</span>
-                )}
-              </div>
-            )}
-            {missionPath && (
-              <div className="text-[10px] text-gray-400 leading-tight">
-                KMZ: <span className="text-gray-300" title={missionPath}>{missionPath}</span>
-              </div>
-            )}
+              <div>Updated: <span className="text-gray-200">{missionTimestamp ?? "–"}</span></div>
+              {missionInterrupt?.description && (
+                <div className="text-status-error">
+                  Interrupt: {missionInterrupt.description}
+                  {missionInterrupt.code && (
+                    <span className="text-gray-400"> ({missionInterrupt.code})</span>
+                  )}
+                </div>
+              )}
+              {missionPath && (
+                <div className="text-[10px] text-gray-400 leading-tight">
+                  KMZ: <span className="text-gray-300" title={missionPath}>{missionPath}</span>
+                </div>
+              )}
+            </div>
             {missionTimelineDisplay.length > 0 && (
-              <div className="pt-2 border-t border-gray-800 space-y-1 text-[10px] text-gray-400 max-h-20 overflow-y-auto">
+              <div className="pt-2 border-t border-gray-800 space-y-1 text-[10px] text-gray-400 max-h-24 overflow-y-auto">
                 {missionTimelineDisplay.map((entry, idx) => {
                   const fallbackLabel = entry.type === 'state'
                     ? formatMissionState(entry.state)
@@ -1221,15 +1253,14 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                 })}
               </div>
             )}
-          </div>
-            <div className="mt-2 flex gap-2">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
               <button
                 type="button"
                 className={`${toneClass.primary} disabled:opacity-40 disabled:cursor-not-allowed`}
                 onClick={() => handleSend("waypoint_pause")}
                 disabled={!canPauseMission}
               >
-                Pause Waypoint
+                Pause
               </button>
               <button
                 type="button"
@@ -1237,7 +1268,7 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                 onClick={() => handleSend("waypoint_resume")}
                 disabled={!canResumeMission}
               >
-                Resume Waypoint
+                Resume
               </button>
               <button
                 type="button"
@@ -1245,87 +1276,59 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                 onClick={() => handleSend("waypoint_stop")}
                 disabled={!canStopMission}
               >
-                Stop Waypoint Mission
+                Stop Mission
               </button>
             </div>
-          </section>
+          </CollapsibleSection>
 
-          <section className="glass-panel border border-gray-700/60 rounded-md px-3 py-2">
-            <div className="flex items-center justify-between mb-1">
-              <div className="text-gray-400 uppercase text-[11px]">
-                Manual Control
-              </div>
-              <div className={`text-[11px] font-semibold ${manualStatusClass}`}>
+          <CollapsibleSection
+            title="Manual Control"
+            storageKey="flightCommands.section.manual"
+          >
+            <div className="flex items-center justify-between">
+              <SectionLabel label="Virtual Stick" />
+              <span className={`text-[11px] font-semibold ${manualStatusClass}`}>
                 {manualState.status.toUpperCase()}
-              </div>
+              </span>
             </div>
             <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[12px] text-gray-200">
               <div>
-                Virtual Stick:{" "}
-                <span className={vsStatusClass}>
-                  {virtualStick.enabled ? "ENABLED" : "DISABLED"}
-                </span>
+                Virtual Stick: <span className={vsStatusClass}>{virtualStick.enabled ? "ENABLED" : "DISABLED"}</span>
               </div>
               <div>
-                Authority:{" "}
-                <span className={manualAuthorityBadge}>{vsOwner}</span>
+                Authority: <span className={manualAuthorityBadge}>{vsOwner}</span>
               </div>
-              <div>
-                Last Command:{" "}
-                <span className="text-gray-300">{manualLastCommand} ago</span>
-              </div>
-              <div>
-                Reason:{" "}
-                <span className="text-gray-300">
-                  {virtualStick.changeReason}
-                </span>
-              </div>
-              <div>
-                Pitch:{" "}
-                <span className="text-gray-200">
-                  {formatAxisPercent(manualAxes.pitch)}
-                </span>
-              </div>
-              <div>
-                Roll:{" "}
-                <span className="text-gray-200">
-                  {formatAxisPercent(manualAxes.roll)}
-                </span>
-              </div>
-              <div>
-                Throttle:{" "}
-                <span className="text-gray-200">
-                  {formatAxisPercent(manualAxes.throttle)}
-                </span>
-              </div>
-              <div>
-                Yaw:{" "}
-                <span className="text-gray-200">
-                  {formatAxisPercent(manualAxes.yaw)}
-                </span>
-              </div>
+              <div>Last Command: <span className="text-gray-300">{manualLastCommand} ago</span></div>
+              <div>Reason: <span className="text-gray-300">{virtualStick.changeReason}</span></div>
+              <div>Pitch: {formatAxisPercent(manualAxes.pitch)}</div>
+              <div>Roll: {formatAxisPercent(manualAxes.roll)}</div>
+              <div>Throttle: {formatAxisPercent(manualAxes.throttle)}</div>
+              <div>Yaw: {formatAxisPercent(manualAxes.yaw)}</div>
             </div>
-            <div className="mt-3">
-              <div className="flex items-center justify-between text-[11px] uppercase text-gray-400">
-                <span>Sensitivity Preset</span>
-                <span className="text-gray-300">{manualSensitivity.toUpperCase()}</span>
+            <div className="space-y-3 mt-3">
+              <div>
+                <div className="flex items-center justify-between text-[11px] uppercase text-gray-400">
+                  <span>Sensitivity Preset</span>
+                  <span className="text-gray-300">{manualSensitivity.toUpperCase()}</span>
+                </div>
+                <div className="mt-1 flex gap-1">
+                  {sensitivityOptions.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={`${presetButtonClass(option.value)} py-1 px-2 text-[11px] uppercase tracking-wide transition-colors`}
+                      onClick={() => manualControl.setSensitivity(option.value)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="mt-1 text-[10px] text-gray-500 leading-tight">
+                  {sensitivityOptions.find((opt) => opt.value === manualSensitivity)?.hint}
+                </div>
               </div>
-              <div className="mt-1 flex gap-1">
-                {sensitivityOptions.map((option) => (
-                  <button
-                    key={option.value}
-                    type="button"
-                    className={`${presetButtonClass(option.value)} py-1 px-2 text-[11px] uppercase tracking-wide transition-colors`}
-                    onClick={() => manualControl.setSensitivity(option.value)}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-              <div className="mt-1 text-[10px] text-gray-500 leading-tight">
-                {sensitivityOptions.find((opt) => opt.value === manualSensitivity)?.hint}
-              </div>
-              <div className="mt-3">
+
+              <div>
                 <div className="flex items-center justify-between text-[10px] uppercase text-gray-400">
                   <span>Mouse Yaw Gain</span>
                   <span className="text-gray-300">
@@ -1348,7 +1351,8 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                   <span>Fast</span>
                 </div>
               </div>
-              <div className="mt-3">
+
+              <div>
                 <div className="flex items-center justify-between text-[11px] uppercase text-gray-400">
                   <span>Session Export</span>
                   <span className="text-gray-300">
@@ -1374,95 +1378,85 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                   </button>
                 </div>
                 <div className="mt-1 text-[10px] text-gray-500 leading-tight">
-                  Captures stick commands (~16 Hz) and key events (start, kill, overrides).
-                  Export once manual testing concludes and motors are safe.
+                  Captures stick commands (~16 Hz) and key events (start, kill, overrides). Export once manual testing concludes and motors are safe.
                 </div>
               </div>
-            </div>
-            <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
-              <button
-                className={toneClass.primary}
-                onClick={manualControl.start}
-                disabled={manualState.active || manualState.status === "arming"}
-              >
-                {manualState.status === "arming"
-                  ? "Enabling…"
-                  : "Start Keyboard"}
-              </button>
-              <button
-                className={toneClass.primary}
-                onClick={manualControl.stop}
-                disabled={
-                  !manualState.active && manualState.status !== "arming"
-                }
-              >
-                Release Control
-              </button>
-              <button className={toneClass.danger} onClick={manualControl.kill}>
-                Kill Switch (ESC)
-              </button>
-              {manualControl.pointerLockSupported && (
+
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 <button
                   className={toneClass.primary}
-                  onClick={manualControl.togglePointerLock}
-                  disabled={!manualState.active}
+                  onClick={manualControl.start}
+                  disabled={manualState.active || manualState.status === "arming"}
                 >
-                  {manualState.pointerLocked
-                    ? "Release Mouse Yaw"
-                    : "Capture Mouse Yaw"}
+                  {manualState.status === "arming" ? "Enabling…" : "Start Keyboard"}
                 </button>
+                <button
+                  className={toneClass.primary}
+                  onClick={manualControl.stop}
+                  disabled={!manualState.active && manualState.status !== "arming"}
+                >
+                  Release Control
+                </button>
+                <button className={toneClass.danger} onClick={manualControl.kill}>
+                  Kill Switch (ESC)
+                </button>
+                {manualControl.pointerLockSupported && (
+                  <button
+                    className={toneClass.primary}
+                    onClick={manualControl.togglePointerLock}
+                    disabled={!manualState.active}
+                  >
+                    {manualState.pointerLocked ? "Release Mouse Yaw" : "Capture Mouse Yaw"}
+                  </button>
+                )}
+              </div>
+
+              {virtualStick.manualOverride && (
+                <div className="text-[11px] text-status-error">
+                  Manual override detected – hardware controller has authority.
+                </div>
               )}
-            </div>
-            {virtualStick.manualOverride && (
-              <div className="mt-2 text-[11px] text-status-error">
-                Manual override detected – hardware controller has authority.
+              {manualState.error && (
+                <div className="text-[11px] text-status-error">{manualState.error}</div>
+              )}
+              <div className="text-[11px] text-gray-400 leading-tight">
+                Bindings: <span className="text-gray-300">WASD</span> pitch/roll, <span className="text-gray-300">Space / Shift or Arrow Up/Down</span> vertical, <span className="text-gray-300">Q/E or Arrow Left/Right</span> yaw, mouse yaw when captured, <span className="text-gray-300">Esc</span> triggers the kill switch (zeros sticks and disables virtual stick in &lt;200&nbsp;ms).
               </div>
-            )}
-            {manualState.error && (
-              <div className="mt-2 text-[11px] text-status-error">
-                {manualState.error}
-              </div>
-            )}
-            <div className="mt-2 text-[11px] text-gray-400 leading-tight">
-              Bindings: <span className="text-gray-300">WASD</span> pitch/roll,{" "}
-              <span className="text-gray-300">
-                Space / Shift or Arrow Up/Down
-              </span>{" "}
-              vertical,{" "}
-              <span className="text-gray-300">Q/E or Arrow Left/Right</span>{" "}
-              yaw, mouse yaw when captured,{" "}
-              <span className="text-gray-300">Esc</span> triggers the kill
-              switch (zeros sticks and disables virtual stick in
-              &lt;200&nbsp;ms).
             </div>
-          </section>
+          </CollapsibleSection>
 
-          {COMMAND_GROUPS.map((group) => (
-            <section key={group.title}>
-              <div className="text-gray-400 uppercase text-[11px] mb-1">
-                {group.title}
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                {group.commands.map((command) => (
-                  <CommandButton
-                    key={command.action}
-                    spec={command}
-                    telemetry={telemetry}
-                    acknowledgements={acknowledgements}
-                    isPending={pendingActions.has(command.action)}
-                    pendingMeta={pendingMeta.get(command.action)}
-                    onSend={handleSend}
-                  />
-                ))}
-              </div>
-            </section>
-          ))}
-
-          <section>
-            <div className="text-gray-400 uppercase text-[11px] mb-1">
-              Recent Responses
+          <CollapsibleSection
+            title="Commands"
+            storageKey="flightCommands.section.commands"
+          >
+            <div className="space-y-3">
+              {COMMAND_GROUPS.map((group) => (
+                <div key={group.title} className="space-y-2">
+                  <SectionLabel label={group.title} />
+                  <div className="grid grid-cols-2 gap-3">
+                    {group.commands.map((command) => (
+                      <CommandButton
+                        key={command.action}
+                        spec={command}
+                        telemetry={telemetry}
+                        acknowledgements={acknowledgements}
+                        isPending={pendingActions.has(command.action)}
+                        pendingMeta={pendingMeta.get(command.action)}
+                        onSend={handleSend}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
-            <div className="bg-black/50 border border-gray-700 rounded-md px-2 py-2 flex flex-col gap-1">
+          </CollapsibleSection>
+
+          <CollapsibleSection
+            title="Recent Responses"
+            storageKey="flightCommands.section.recent"
+            defaultOpen={false}
+          >
+            <div className="flex flex-col gap-2">
               {recentEvents.length === 0 && (
                 <div className="text-gray-500 text-[11px]">
                   No command responses yet.
@@ -1680,7 +1674,7 @@ export const FlightCommandsPanel: React.FC<FlightCommandsPanelProps> = ({
                   </div>
                 ))}
             </div>
-          </section>
+          </CollapsibleSection>
         </div>
       </Panel>
     </>
