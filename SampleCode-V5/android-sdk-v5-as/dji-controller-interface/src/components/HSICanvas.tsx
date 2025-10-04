@@ -368,27 +368,72 @@ export const HSICanvas: React.FC<HSICanvasProps> = ({
       //ctx.fillText('HOME', labelX, labelY - 8);
     };
 
-    const drawObstacleDistances = (
-      obstacleData: any,
-    ) => {
+    const drawObstacleDistances = (obstacleData: any) => {
       if (!obstacleData) return;
-      const radarDistances = obstacleData.radar_distances;
-      const perceptionDistances = obstacleData.perception_distances;
 
-      if (Array.isArray(radarDistances) && radarDistances.length) {
+      const radarDistances = Array.isArray(obstacleData.radar_distances)
+        ? obstacleData.radar_distances as number[]
+        : null;
+      const perceptionDistances = Array.isArray(obstacleData.perception_distances)
+        ? obstacleData.perception_distances as number[]
+        : null;
+      const sectors = Array.isArray(obstacleData.sectors)
+        ? obstacleData.sectors as Array<{
+            angle: number;
+            distance: number;
+            warning_level: 'none' | 'caution' | 'warning' | 'critical';
+            source?: 'radar' | 'perception';
+          }>
+        : null;
+
+      if (radarDistances && radarDistances.length) {
         drawDistanceArray(radarDistances, 'radar');
       }
 
       if (useRawPerceptionData) {
-        if (Array.isArray(perceptionDistances) && perceptionDistances.length) {
+        if (perceptionDistances && perceptionDistances.length) {
           drawDistanceArray(perceptionDistances, 'perception');
         }
-      } else if (Array.isArray(obstacleData.sectors) && obstacleData.sectors.length) {
-        drawDistanceArray(perceptionDistances, 'perception');
-        drawObstacleSectors(obstacleData.sectors);
-      } else if (Array.isArray(perceptionDistances) && perceptionDistances.length) {
-        drawDistanceArray(perceptionDistances, 'perception');
+        if (sectors && sectors.length) {
+          drawObstacleSectors(sectors);
+        }
+      } else {
+        if (perceptionDistances && perceptionDistances.length) {
+          drawDistanceArray(perceptionDistances, 'perception');
+        }
+        if (sectors && sectors.length) {
+          drawObstacleSectors(sectors);
+        }
       }
+    };
+
+    const computeClosestDistance = (obstacleData: any): number | null => {
+      if (!obstacleData) return null;
+      const distances: number[] = [];
+      const push = (value: number) => {
+        if (Number.isFinite(value) && value > 0) {
+          distances.push(value);
+        }
+      };
+      const radar = obstacleData.radar_distances;
+      if (Array.isArray(radar)) {
+        radar.forEach((distanceMm: number) => push(distanceMm / 1000));
+      }
+      const perception = obstacleData.perception_distances;
+      if (Array.isArray(perception)) {
+        perception.forEach((distanceMm: number) => push(distanceMm / 1000));
+      }
+      const sectors = obstacleData.sectors;
+      if (Array.isArray(sectors)) {
+        sectors.forEach((sector: any) => push(sector?.distance));
+      }
+      if (typeof obstacleData.closest_distance === 'number' && obstacleData.closest_distance > 0) {
+        push(obstacleData.closest_distance);
+      }
+      if (!distances.length) {
+        return null;
+      }
+      return Math.min(...distances);
     };
 
     const getObstacleColor = (distance: number) => {
@@ -478,8 +523,10 @@ export const HSICanvas: React.FC<HSICanvasProps> = ({
     };
 
     const drawObstacleSummary = (obstacleData: any) => {
-      if (!obstacleData?.closest_distance) return;
-      const distance = obstacleData.closest_distance;
+      const distance = computeClosestDistance(obstacleData);
+      if (distance == null) {
+        return;
+      }
       const text = distance < 1 ? `${(distance * 3.28).toFixed(0)}ft` : `${distance.toFixed(1)}m`;
       const textX = centerX + 0;
       const textY = centerY + radius * 0.7;
@@ -487,7 +534,7 @@ export const HSICanvas: React.FC<HSICanvasProps> = ({
       ctx.save();
       ctx.fillStyle = 'rgba(0,0,0,0.6)';
       ctx.fillRect(textX - 40, textY - 12, 80, 24);
-      ctx.fillStyle = obstacleData.system_status === 'critical' ? '#ef4444'
+      ctx.fillStyle = obstacleData?.system_status === 'critical' ? '#ef4444'
         : obstacleData.system_status === 'warning' ? '#facc15'
         : '#22c55e';
       ctx.font = 'bold 12px monospace';

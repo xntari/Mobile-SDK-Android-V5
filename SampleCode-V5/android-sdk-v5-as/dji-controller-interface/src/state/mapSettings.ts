@@ -31,7 +31,19 @@ const DEFAULT_LAYER_PRESETS: MapLayerPreset[] = [
     id: 'osm-street',
     label: 'OpenStreetMap Street',
     provider: 'maplibre',
-    supportsTerrain: false,
+    supportsTerrain: true,
+  },
+  {
+    id: 'arcgis-satellite',
+    label: 'ArcGIS Satellite',
+    provider: 'maplibre',
+    supportsTerrain: true,
+  },
+  {
+    id: 'hybrid',
+    label: 'Hybrid (Sat + Streets)',
+    provider: 'maplibre',
+    supportsTerrain: true,
   },
 ];
 

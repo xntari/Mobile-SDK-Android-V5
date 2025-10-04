@@ -13,6 +13,7 @@ import type {
   PoiTarget,
 } from '../types/missionPlanner';
 import { mapSettingsStore, type MapProvider } from '../state/mapSettings';
+import { terrainCache } from '../map/terrainCache';
 import { CollapsibleSection } from './CollapsibleSection';
 
 const calculateDistance = (
@@ -69,6 +70,9 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
     () => objectMemoryTargetStore.getCurrent(),
   );
   useEffect(() => objectMemoryTargetStore.subscribe(setObjectTarget), []);
+
+  const [terrainStats, setTerrainStats] = useState(() => terrainCache.getSnapshot());
+  useEffect(() => terrainCache.subscribe(setTerrainStats), []);
 
   const [missionPlan, setMissionPlan] = useState<PlannedMissionEntry[]>(
     () => missionPlannerStore.getSnapshot().plan,
@@ -140,6 +144,10 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
   const layerPresetOptions = useMemo(() => (
     layerPresets.filter((preset) => preset.provider === mapSettings.provider)
   ), [layerPresets, mapSettings.provider]);
+  const currentPreset = useMemo(() => (
+    layerPresets.find((preset) => preset.id === mapSettings.layerPresetId) ?? null
+  ), [layerPresets, mapSettings.layerPresetId]);
+  const terrainSupported = currentPreset?.supportsTerrain ?? false;
 
   const handleToggleAutoRotate = useCallback(() => {
     mapSettingsStore.setAutoRotate(!mapSettings.autoRotate);
@@ -157,15 +165,25 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
     mapSettingsStore.setLayerPreset(event.target.value);
   }, []);
 
-  const handleTerrainEnabledChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
-    mapSettingsStore.setTerrainEnabled(event.target.checked);
-  }, []);
+  const handleToggleTerrain = useCallback(() => {
+    if (!terrainSupported) {
+      if (mapSettings.terrainEnabled) {
+        mapSettingsStore.setTerrainEnabled(false);
+      }
+      return;
+    }
+    mapSettingsStore.setTerrainEnabled(!mapSettings.terrainEnabled);
+  }, [mapSettings.terrainEnabled, terrainSupported]);
 
   const handleTerrainExaggerationChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const value = Number(event.target.value);
     if (Number.isFinite(value)) {
       mapSettingsStore.setTerrainExaggeration(value);
     }
+  }, []);
+
+  const handleClearTerrainCache = useCallback(() => {
+    terrainCache.clear();
   }, []);
 
   const handleToggleViewMode = useCallback(() => {
@@ -432,6 +450,21 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
                 {mapSettings.autoCenter ? 'Auto-center' : 'Center off'}
               </button>
               <button
+                onClick={handleToggleTerrain}
+                disabled={!terrainSupported}
+                className={`px-3 py-1 text-xs rounded border transition-colors ${
+                  !terrainSupported
+                    ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+                    : mapSettings.terrainEnabled
+                      ? 'bg-sky-700 text-white border-sky-500'
+                      : 'bg-gray-700 text-gray-300 border-gray-600 hover:bg-gray-600'
+                }`}
+              >
+                {terrainSupported
+                  ? mapSettings.terrainEnabled ? 'Terrain on' : 'Terrain off'
+                  : 'Terrain unavailable'}
+              </button>
+              <button
                 onClick={handleToggleViewMode}
                 className={`px-3 py-1 text-xs rounded border transition-colors ${
                   mapSettings.viewMode === '3d'
@@ -459,21 +492,9 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
           bodyClassName="text-xs text-gray-200 space-y-2"
         >
           <div className="space-y-3">
-            <div className="bg-gray-900/60 border border-gray-700 rounded px-3 py-2 text-[11px] text-gray-400">
-              Terrain rendering and caching hooks arrive in Phase 3. Current builds always render flat 2D tiles without local cache.
-            </div>
             <div className="flex flex-wrap items-center gap-4 text-gray-300">
               <label className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={mapSettings.terrainEnabled}
-                  onChange={handleTerrainEnabledChange}
-                  className="accent-sky-400"
-                />
-                <span>Enable terrain preview (experimental)</span>
-              </label>
-              <label className="flex items-center gap-2">
-                <span>Exaggeration</span>
+                <span>Terrain exaggeration</span>
                 <input
                   type="range"
                   min={0.5}
@@ -481,7 +502,7 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
                   step={0.1}
                   value={mapSettings.terrainExaggeration}
                   onChange={handleTerrainExaggerationChange}
-                  disabled={!mapSettings.terrainEnabled}
+                  disabled={!mapSettings.terrainEnabled || !terrainSupported}
                   className="accent-sky-400"
                 />
                 <span className="w-10 text-right text-sm text-gray-200">
@@ -490,10 +511,21 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
               </label>
             </div>
             <div className="bg-gray-900/40 border border-gray-700 rounded px-3 py-2 text-[11px] text-gray-400 space-y-1">
-              <div className="text-gray-300 font-semibold">Cache status</div>
-              <div>Tiles cached: –</div>
-              <div>Disk usage: –</div>
-              <div className="text-gray-500">Caching controls activate when offline packages are available.</div>
+              <div className="text-gray-300 font-semibold">Terrain cache</div>
+              <div>Tiles cached: {terrainStats.tileCount}</div>
+              <div>Requests: {terrainStats.requests} (hits {terrainStats.hits}, misses {terrainStats.misses})</div>
+              <div>Pending loads: {terrainStats.pending}</div>
+              {!terrainSupported && (
+                <div className="text-[10px] text-yellow-400">Current layer does not support terrain. Switch to Street, Satellite, or Hybrid to enable terrain rendering.</div>
+              )}
+              <button
+                type="button"
+                onClick={handleClearTerrainCache}
+                disabled={terrainStats.tileCount === 0}
+                className={`mt-2 px-2 py-1 rounded border ${terrainStats.tileCount === 0 ? 'border-gray-700 text-gray-600 cursor-not-allowed' : 'border-gray-500 text-gray-200 hover:bg-gray-800'}`}
+              >
+                Clear cache
+              </button>
             </div>
           </div>
         </CollapsibleSection>

@@ -26,6 +26,8 @@ import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../st
 import { listClusters } from '../agent/objectMemoryClient';
 import type { ObjectMemoryCluster, ObjectMemoryClusterAnchor } from '../agent/objectMemoryClient';
 import { missionPlannerStore } from '../state/missionPlanner';
+import { missionSettingsStore, altitudeReferenceForExecuteMode, type ExecuteHeightMode } from '../state/missionSettings';
+import { terrainCache } from '../map/terrainCache';
 
 type MissionLogKind = 'command' | 'telemetry' | 'simulation' | 'laser' | 'manual' | 'kmz';
 
@@ -366,6 +368,9 @@ export const FlyToPanel: React.FC = () => {
   const { sendFlightCommand } = useBridgeCommands();
   const { bridgeData } = useStableBridgeData();
   const telemetry = bridgeData.telemetry;
+  const [missionSettings, setMissionSettings] = React.useState(() => missionSettingsStore.getSnapshot());
+  React.useEffect(() => missionSettingsStore.subscribe(setMissionSettings), []);
+  const executeHeightMode = missionSettings.executeHeightMode;
   const takeoffAltitudeAsl = React.useMemo(() => {
     const latestContextAltitude = (() => {
       const log = bridgeData.flightCommandLog;
@@ -604,6 +609,24 @@ export const FlyToPanel: React.FC = () => {
     poiTargetRef.current = poiTarget;
   }, [poiTarget]);
 
+  React.useEffect(() => {
+    missionPlannerStore.updatePlan((prev) => {
+      const desiredReference = altitudeReferenceForExecuteMode(executeHeightMode);
+      let mutated = false;
+      const next = prev.map((entry) => {
+        if (entry.altitudeReference && entry.altitudeReference !== 'inherit') {
+          return entry;
+        }
+        mutated = true;
+        return {
+          ...entry,
+          altitudeReference: desiredReference,
+        };
+      });
+      return mutated ? next : prev;
+    });
+  }, [executeHeightMode]);
+
   React.useEffect(() => objectMemoryTargetStore.subscribe(setTargetSelection), []);
   React.useEffect(() => missionPlannerStore.subscribePoiTarget(setPoiTarget), []);
   React.useEffect(() => missionPlannerStore.subscribeOrbitMode(setOrbitModeState), []);
@@ -676,6 +699,10 @@ export const FlyToPanel: React.FC = () => {
     missionPlannerStore.setOrbitMode(mode);
   }, []);
 
+  const handleExecuteHeightModeChange = React.useCallback((mode: ExecuteHeightMode) => {
+    missionSettingsStore.setExecuteHeightMode(mode);
+  }, []);
+
   const ensureTelemetry = (): TelemetryData | null => {
     if (!telemetry || !telemetry.location) {
       setStatusMessage('Telemetry unavailable — cannot compute target.');
@@ -684,8 +711,66 @@ export const FlyToPanel: React.FC = () => {
     return telemetry;
   };
 
-  const computeDefaultTargetAltitude = React.useCallback((): number | null => {
+  const [terrainElevationPreview, setTerrainElevationPreview] = React.useState<number | null>(null);
+
+  const getDefaultAglHeight = React.useCallback((): number | null => {
+    if (flyToMode === 'set_height' && Number.isFinite(flyToHeight)) {
+      return flyToHeight;
+    }
+    if (Number.isFinite(securityTakeoffHeight)) {
+      return securityTakeoffHeight;
+    }
+    return null;
+  }, [flyToHeight, flyToMode, securityTakeoffHeight]);
+
+  React.useEffect(() => {
+    if (executeHeightMode !== 'absolute_wgs84') {
+      setTerrainElevationPreview(null);
+      return;
+    }
+    const candidateLat = manualTarget.latitude ?? telemetry?.location?.latitude ?? telemetry?.home_location?.latitude ?? null;
+    const candidateLon = manualTarget.longitude ?? telemetry?.location?.longitude ?? telemetry?.home_location?.longitude ?? null;
+    if (typeof candidateLat !== 'number' || typeof candidateLon !== 'number' || !Number.isFinite(candidateLat) || !Number.isFinite(candidateLon)) {
+      setTerrainElevationPreview(null);
+      return;
+    }
+    let cancelled = false;
+    terrainCache.getElevation(candidateLat, candidateLon).then((value) => {
+      if (!cancelled) {
+        setTerrainElevationPreview(typeof value === 'number' && Number.isFinite(value) ? value : null);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [executeHeightMode, manualTarget.latitude, manualTarget.longitude, telemetry?.home_location?.latitude, telemetry?.home_location?.longitude, telemetry?.location?.latitude, telemetry?.location?.longitude]);
+
+  const computeDefaultTargetAltitude = React.useCallback((options?: {
+    latitude?: number | null;
+    longitude?: number | null;
+    terrainElevation?: number | null;
+  }): number | null => {
     const takeoffAsl = resolveTakeoffAltitude();
+    const defaultAglHeight = getDefaultAglHeight();
+
+    if (executeHeightMode === 'absolute_wgs84') {
+      const terrainElevation = (() => {
+        if (typeof options?.terrainElevation === 'number' && Number.isFinite(options.terrainElevation)) {
+          return options.terrainElevation;
+        }
+        if (typeof terrainElevationPreview === 'number' && Number.isFinite(terrainElevationPreview)) {
+          return terrainElevationPreview;
+        }
+        return null;
+      })();
+
+      if (terrainElevation != null && defaultAglHeight != null) {
+        return clampAltitude(terrainElevation + defaultAglHeight);
+      }
+      if (takeoffAsl != null && defaultAglHeight != null) {
+        return clampAltitude(takeoffAsl + defaultAglHeight);
+      }
+    }
 
     if (flyToMode === 'set_height' && Number.isFinite(flyToHeight)) {
       if (takeoffAsl != null) {
@@ -713,7 +798,32 @@ export const FlyToPanel: React.FC = () => {
 
     const fallbackAlt = telemetry?.location?.altitude ?? telemetry?.altitude ?? null;
     return typeof fallbackAlt === 'number' && Number.isFinite(fallbackAlt) ? fallbackAlt : null;
-  }, [flyToHeight, flyToMode, resolveTakeoffAltitude, securityTakeoffHeight, telemetry?.altitude, telemetry?.location?.altitude]);
+  }, [executeHeightMode, getDefaultAglHeight, resolveTakeoffAltitude, terrainElevationPreview, telemetry?.altitude, telemetry?.location?.altitude, flyToMode, flyToHeight, securityTakeoffHeight]);
+
+  const resolveDefaultAltitudeForLocation = React.useCallback(async (
+    latitude: number,
+    longitude: number,
+    fallback?: number | null,
+  ): Promise<number | null> => {
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      return computeDefaultTargetAltitude();
+    }
+
+    if (executeHeightMode === 'absolute_wgs84') {
+      const agl = getDefaultAglHeight();
+      if (agl != null) {
+        const terrainElevation = await terrainCache.getElevation(latitude, longitude);
+        if (typeof terrainElevation === 'number' && Number.isFinite(terrainElevation)) {
+          return clampAltitude(terrainElevation + agl);
+        }
+      }
+      if (typeof fallback === 'number' && Number.isFinite(fallback)) {
+        return clampAltitude(fallback);
+      }
+    }
+
+    return computeDefaultTargetAltitude();
+  }, [computeDefaultTargetAltitude, executeHeightMode, getDefaultAglHeight]);
 
   const handleCopyMissionPath = React.useCallback(async (path: string) => {
     try {
@@ -1810,34 +1920,51 @@ export const FlyToPanel: React.FC = () => {
   }, [updatePlanEntryActionGroups]);
 
   const stageManualTarget = React.useCallback((next: ManualTargetState, context: Record<string, any>, message: string) => {
-    const resolvedAltitude = typeof next.altitude === 'number' ? next.altitude : computeDefaultTargetAltitude();
-    setManualTarget({
-      latitude: next.latitude,
-      longitude: next.longitude,
-      altitude: resolvedAltitude,
-      source: next.source,
-    });
-    setPlacingTarget(false);
-    setSimPreview(null);
-    appendLog('Target staged', context, 'manual');
-    setStatusMessage(message);
-  }, [appendLog, computeDefaultTargetAltitude]);
+    (async () => {
+      let resolvedAltitude = typeof next.altitude === 'number' ? next.altitude : null;
+      if (resolvedAltitude == null && typeof next.latitude === 'number' && typeof next.longitude === 'number') {
+        resolvedAltitude = await resolveDefaultAltitudeForLocation(next.latitude, next.longitude);
+      }
+      if (resolvedAltitude == null) {
+        resolvedAltitude = computeDefaultTargetAltitude();
+      }
+
+      setManualTarget({
+        latitude: next.latitude,
+        longitude: next.longitude,
+        altitude: resolvedAltitude,
+        source: next.source,
+      });
+      setPlacingTarget(false);
+      setSimPreview(null);
+      appendLog('Target staged', context, 'manual');
+      setStatusMessage(message);
+    })();
+  }, [appendLog, computeDefaultTargetAltitude, resolveDefaultAltitudeForLocation]);
 
   React.useEffect(() => {
     const unsubscribeAdd = missionPlannerStore.onAddWaypointRequest((request) => {
+      (async () => {
       const { latitude, longitude } = request;
       if (typeof latitude !== 'number' || typeof longitude !== 'number') {
         return;
       }
       const clampedLat = clampLat(latitude);
       const clampedLon = clampLon(longitude);
-      const defaultAltitudeForWaypoint = computeDefaultTargetAltitude();
+      const defaultAltitudeForWaypoint = computeDefaultTargetAltitude({ latitude: clampedLat, longitude: clampedLon });
       const altitudeFallback = typeof manualTarget.altitude === 'number'
         ? manualTarget.altitude
         : telemetry?.location?.altitude ?? null;
-      const altitudeCandidate = typeof request.altitude === 'number'
+      let altitudeCandidate = typeof request.altitude === 'number'
         ? request.altitude
         : (defaultAltitudeForWaypoint ?? altitudeFallback ?? 0);
+
+      if (typeof request.altitude !== 'number' && executeHeightMode === 'absolute_wgs84') {
+        const resolved = await resolveDefaultAltitudeForLocation(clampedLat, clampedLon, altitudeCandidate);
+        if (typeof resolved === 'number' && Number.isFinite(resolved)) {
+          altitudeCandidate = resolved;
+        }
+      }
 
       if (request.kind === 'orbit') {
         missionPlannerStore.setPoiTarget({
@@ -1900,10 +2027,13 @@ export const FlyToPanel: React.FC = () => {
       }
       if (request.altitudeReference) {
         entry.altitudeReference = request.altitudeReference;
+      } else {
+        entry.altitudeReference = altitudeReferenceForExecuteMode(executeHeightMode);
       }
       updateMissionPlan((prev) => [...prev, entry]);
       appendLog('Plan waypoint added (map)', entry, 'manual');
       setStatusMessage('Waypoint added from map.');
+      })();
     });
 
     const unsubscribeStage = missionPlannerStore.onStageTargetRequest((request) => {
@@ -1937,6 +2067,8 @@ export const FlyToPanel: React.FC = () => {
     manualTarget.altitude,
     stageManualTarget,
     computeDefaultTargetAltitude,
+    executeHeightMode,
+    resolveDefaultAltitudeForLocation,
     telemetry?.altitude,
     telemetry?.location?.altitude,
     setStatusMessage,
@@ -2563,7 +2695,9 @@ export const FlyToPanel: React.FC = () => {
       const latitude = clampLat(entry.latitude);
       const longitude = clampLon(entry.longitude);
       const altitude = typeof entry.altitude === 'number' ? entry.altitude : (defaultTargetAltitudePreview ?? baseAltitude);
-      const relativeHeight = (altitude ?? baseAltitude) - baseAltitude;
+      const executeHeightValue = executeHeightMode === 'absolute_wgs84'
+        ? (altitude ?? baseAltitude)
+        : (altitude ?? baseAltitude) - baseAltitude;
       const isFirst = index === 0;
       const isLast = index === primaryWaypoints.length - 1;
       const defaultTurnMode = (!curvedPath || primaryWaypoints.length <= 1)
@@ -2642,7 +2776,7 @@ export const FlyToPanel: React.FC = () => {
         '          </coordinates>',
         '        </Point>',
         `        <wpml:index>${index}</wpml:index>`,
-        `        <wpml:executeHeight>${relativeHeight.toFixed(3)}</wpml:executeHeight>`,
+        `        <wpml:executeHeight>${executeHeightValue.toFixed(3)}</wpml:executeHeight>`,
         `        <wpml:waypointSpeed>${globalSpeed}</wpml:waypointSpeed>`,
         `        <wpml:useStraightLine>${useStraightLine ? '1' : '0'}</wpml:useStraightLine>`,
         '        <wpml:waypointTurnParam>',
@@ -2667,9 +2801,13 @@ export const FlyToPanel: React.FC = () => {
       max_speed: globalSpeed,
       security_takeoff_height: securityHeight,
       takeoff_altitude_asl: baseAltitude,
+      execute_height_mode: executeHeightMode,
+      altitude_reference: altitudeReferenceForExecuteMode(executeHeightMode),
       poi_target: sanitizePoiTarget(poiTarget),
       plan: metadataPlan,
     };
+
+    const executeHeightModeTag = executeHeightMode === 'absolute_wgs84' ? 'WGS84' : 'relativeToStartPoint';
 
     const wpml = `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2" xmlns:wpml="http://www.dji.com/wpmz/1.0.6">
@@ -2684,7 +2822,7 @@ export const FlyToPanel: React.FC = () => {
     </wpml:missionConfig>
     <Folder>
       <wpml:templateId>0</wpml:templateId>
-      <wpml:executeHeightMode>relativeToStartPoint</wpml:executeHeightMode>
+      <wpml:executeHeightMode>${executeHeightModeTag}</wpml:executeHeightMode>
       <wpml:waylineId>0</wpml:waylineId>
       <wpml:autoFlightSpeed>${globalSpeed}</wpml:autoFlightSpeed>
 ${wpmlWaypoints}
@@ -2737,7 +2875,7 @@ ${wpmlWaypoints}
       finish_action: finishAction,
     }, 'kmz');
     setStatusMessage(`Mission plan exported to ${fileName}.`);
-  }, [appendLog, defaultTargetAltitudePreview, maxSpeed, missionPlan, resolveTakeoffAltitude, securityTakeoffHeight, telemetry?.altitude, telemetry?.location?.altitude]);
+  }, [appendLog, defaultTargetAltitudePreview, executeHeightMode, maxSpeed, missionPlan, resolveTakeoffAltitude, securityTakeoffHeight, telemetry?.altitude, telemetry?.location?.altitude]);
 
   React.useEffect(() => {
     const api = (window as any).electronAPI;
@@ -3834,6 +3972,22 @@ ${wpmlWaypoints}
                 <option value="gimbal">Gimbal LookAt POI (aircraft assists)</option>
                 <option value="gimbal_free">Gimbal LookAt POI (gimbal only)</option>
               </select>
+            </label>
+            <label className="flex flex-col gap-1 text-[11px]">
+              <span>Altitude Reference Mode</span>
+              <select
+                value={executeHeightMode}
+                onChange={(event) => handleExecuteHeightModeChange(event.target.value as ExecuteHeightMode)}
+                className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200"
+              >
+                <option value="relative_to_takeoff">Relative to takeoff</option>
+                <option value="absolute_wgs84">Absolute (WGS84)</option>
+              </select>
+              {executeHeightMode === 'absolute_wgs84' && (
+                <span className="text-[10px] text-gray-500">
+                  Terrain preview: {terrainElevationPreview != null ? terrainElevationPreview.toFixed(1) : '—'} m
+                </span>
+              )}
             </label>
             <label className="flex flex-col gap-1 text-[11px]">
               <span>Default Target Height (m AGL)</span>

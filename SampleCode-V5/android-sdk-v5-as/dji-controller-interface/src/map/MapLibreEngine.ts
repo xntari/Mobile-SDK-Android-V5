@@ -170,6 +170,8 @@ export class MapLibreEngine implements MapEngine {
   private lastTerrainEnabled = false;
   private lastAutoRotate = false;
   private lastAppliedViewMode: '2d' | '3d' = '2d';
+  private desiredLayerPreset: string = 'osm-street';
+  private appliedLayerPreset: string | null = null;
 
   private readonly interactionEvents: Array<{ event: MapInteractionEvent; phase: 'start' | 'end' }> = [
     { event: 'dragstart', phase: 'start' },
@@ -193,18 +195,33 @@ export class MapLibreEngine implements MapEngine {
       style: {
         version: 8,
         sources: {
-          'osm-tiles': {
+          'street-tiles': {
             type: 'raster',
             tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
             tileSize: 256,
             attribution: '© OpenStreetMap contributors',
           },
+          'satellite-tiles': {
+            type: 'raster',
+            tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+            tileSize: 256,
+            attribution: 'Imagery © Esri, Maxar, Earthstar Geographics, and the GIS User Community',
+          },
         },
         layers: [
           {
-            id: 'osm-tiles-layer',
+            id: 'satellite-base',
             type: 'raster',
-            source: 'osm-tiles',
+            source: 'satellite-tiles',
+            layout: { visibility: 'none' },
+          },
+          {
+            id: 'street-base',
+            type: 'raster',
+            source: 'street-tiles',
+            paint: {
+              'raster-opacity': 1,
+            },
           },
         ],
       },
@@ -216,6 +233,7 @@ export class MapLibreEngine implements MapEngine {
 
     this.map.once('load', () => {
       this.mapReady = true;
+      this.applyLayerPreset(this.desiredLayerPreset, true);
       this.options?.onReady?.();
     });
 
@@ -291,7 +309,9 @@ export class MapLibreEngine implements MapEngine {
       this.animationFrame = requestAnimationFrame(this.applyTelemetryUpdate);
     }
 
+    this.desiredLayerPreset = state.layerPresetId;
     this.updateTerrain(state.terrainEnabled, state.terrainExaggeration);
+    this.applyLayerPreset(state.layerPresetId);
     this.applyViewMode(state.viewMode);
     this.updatePlanMarkers(state.displayedPlan);
     this.updatePoiTarget(state.poiTarget);
@@ -587,7 +607,7 @@ export class MapLibreEngine implements MapEngine {
               paint: {
                 'hillshade-exaggeration': exaggeration,
               },
-            }, 'osm-tiles-layer');
+            }, map.getLayer('street-base') ? 'street-base' : undefined);
           } else {
             map.setPaintProperty(`${this.terrainSourceId}-hillshade`, 'hillshade-exaggeration', exaggeration);
           }
@@ -622,6 +642,32 @@ export class MapLibreEngine implements MapEngine {
 
       this.pendingTerrainRestore = requestAnimationFrame(restore);
     }
+  }
+
+  private applyLayerPreset(presetId: string, force = false) {
+    this.desiredLayerPreset = presetId;
+    if (!this.mapReady || !this.map) {
+      return;
+    }
+
+    const map = this.map;
+    const showStreet = presetId === 'osm-street' || presetId === 'hybrid';
+    const showSatellite = presetId === 'arcgis-satellite' || presetId === 'hybrid';
+
+    if (!force && this.appliedLayerPreset === presetId) {
+      return;
+    }
+
+    if (map.getLayer('street-base')) {
+      map.setLayoutProperty('street-base', 'visibility', showStreet ? 'visible' : 'none');
+      map.setPaintProperty('street-base', 'raster-opacity', presetId === 'hybrid' ? 0.5 : 1);
+    }
+
+    if (map.getLayer('satellite-base')) {
+      map.setLayoutProperty('satellite-base', 'visibility', showSatellite ? 'visible' : 'none');
+    }
+
+    this.appliedLayerPreset = presetId;
   }
 
   private applyViewMode(viewMode: '2d' | '3d') {
