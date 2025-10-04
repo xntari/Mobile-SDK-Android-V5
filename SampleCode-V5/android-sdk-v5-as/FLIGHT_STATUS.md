@@ -19,7 +19,7 @@ Use only standard ascii characters here - don't use ✅  or similar
 - **Panel visibility** - Orientation panel unsubscribes from mission/object stores when hidden, and the shared visibility bus now drives the camera throttles—closing a panel tears subscriptions down immediately.
 - **Camera control dock** - The new floating dock consolidates gimbal/LookAt controls, manual-track presets, lens-specific zoom selectors (optical + thermal), capability probing, and FPV HUD/snapshot settings; thermal super-resolution toggles currently persist UI intent while we confirm SDK key support.
 - **Fly-To refactor** - Fly-To now fronts the mission planner (defaults, target staging, KMZ import/export). Multi-waypoint runs with RTH/Land finish actions were validated; orbit execution/export still needs work.
-- **Map controls** - Map auto-center now has a manual toggle beside auto-rotate; click drops a waypoint, Ctrl/⌘+click stages a target, and Option+click adds an orbit without breaking drag-to-pan.
+- **Map controls** - Auto-center/auto-rotate respect manual panning, follow the aircraft by default (and fall back to home/manual targets only when aircraft telemetry is absent), terrain preview toggles preserve zoom/bearing/pitch, and click (WP) / Ctrl⌘+click (stage) / Alt+click (POI) combos no longer interfere with drag-to-pan.
 - **3D mission groundwork** - Commit e2454c1e is locked as the pre-3D baseline; Phase 1 (MapEngine abstraction) is complete and Phase 2 (provider/preset UI) now includes an experimental MapLibre terrain preview toggle (demo tiles, no caching yet) within the Advanced panel. Section 7.8 tracks the remaining tasks through terrain shading, caching, and alternate engines.
 - **Manual mission tooling** - Desktop Fly-To panel supports map clicks, laser fixes, manual lat/lon entry, mission-wide simulation, and timeline export; validate on hardware before relying on it in the field.
 - **KMZ workflow** - Mission Control writes `waylines.wpml` plus `mission-metadata.json` when exporting, and the loader restores either metadata or raw WPML (turns/POI/gimbal/actions) so DJI Pilot plans round-trip without losing detail; execution remains manual after review.
@@ -189,8 +189,8 @@ Most recent verified features (2025-10-01):
    Alternatives: Allow operators to throttle/disable probes and rely on existing logbook entries if the widget proves noisy.
 
 7. **3D terrain-aware mission planning**
-   Status: Phase 1 shipped (MapEngine abstraction + MapLibre engine). Phase 2 is underway: provider/preset selectors now live in the Map panel with collapsible basic/advanced settings, and the MapViewManager can instantiate engines based on the selected provider. The advanced panel will host terrain/caching toggles once Phase 3 lands.
-   Next: Introduce terrain and caching options (Phase 3) by wiring 2D/3D flags into the engine state, enabling MapLibre Terrain-RGB, and surfacing cache status in the advanced panel. Later phases bring Cesium 3D tiles, Mapbox/Google fallbacks, and offline-prefetch tooling. See Section 7.8 for the full roadmap.
+   Status: Phase 1 shipped (MapEngine abstraction + MapLibre engine). Phase 2 continues: provider/preset selectors and the advanced terrain toggle are live, map view state now persists across terrain on/off, and auto-center prioritises manual targets without waypoint staging jumps.
+   Next: Finish Phase 2 by plumbing preset metadata (street/satellite/terrain), exposing terrain cache status, and regression-testing north-up/auto-rotate after long sessions; then roll into Phase 3 (Terrain-RGB ingest, caching, alternate providers). See Section 7.8 for the full roadmap.
    Risks: Terrain tiles may blow through cache budgets, GPUs with weak WebGL support could stutter, and inconsistent geoid models can skew altitude previews. We will keep a beta toggle and retain the current 2D plan editor until terrain validation finishes.
    Alternatives: If 3D performance lags, ship a hybrid 2D map with terrain cross-sections and postpone Cesium integration until cache strategies prove stable.
 
@@ -428,8 +428,8 @@ Keep this list groomed; link each item to task tracking where applicable.
 - **Layer & provider switching** - Expose a map settings panel that lets operators pick the provider, layer preset (street, satellite, terrain, night), and 2D/3D mode. Persist choices in localStore and surface token status (Mapbox/Google) with graceful degradations when credentials are missing.
 - **Terrain roadmap**
   1. Phase 1: Extract current MapLibre map into the engine abstraction (commit e2454c1e as pre-3D baseline) and confirm overlays still behave in 2D.
-  2. Phase 2: Add provider selector UI, layer presets, and toggleable auto-center/rotate controls that work for every engine.
-  3. Phase 3: Initial MapLibre Terrain-RGB preview is wired behind an experimental toggle (using MapLibre demo tiles and automatic pitch). Next steps: add altitude shading, mission elevation profiles tied into the EGM96 pipeline, and swap the demo tiles for configurable providers with caching.
+  2. Phase 2: Add provider selector UI, layer presets, and keep auto-center/rotate/terrain toggles bound to the shared engine state (no per-layer special cases).
+  3. Phase 3: Initial MapLibre Terrain-RGB preview sits behind an experimental toggle (using MapLibre demo tiles while view mode enforces the operator pitch). Next steps: add altitude shading, mission elevation profiles tied into the EGM96 pipeline, and swap the demo tiles for configurable providers with caching.
   4. Phase 4: Integrate CesiumJS for full 3D terrain/photogrammetry (with 2D fallback), plus Mapbox vector alternatives and Google Maps as a low-latency 2D option.
   5. Phase 5: Ship offline tile/terrain caching (shared LRU + MBTiles support), CLI prefetch tooling, and cache management UI with size quotas and purge options.
 - **Caching strategy** - Cache raster/vector/terrain tiles locally via a shared LRU; log provider, zoom, and license metadata. Provide a CLI (`tools/cache-terrain`) to pre-seed mission areas and document offline workflows. Respect storage limits and offer one-click purge.

@@ -1904,18 +1904,6 @@ export const FlyToPanel: React.FC = () => {
       updateMissionPlan((prev) => [...prev, entry]);
       appendLog('Plan waypoint added (map)', entry, 'manual');
       setStatusMessage('Waypoint added from map.');
-      if (manualTarget.latitude == null || manualTarget.longitude == null) {
-        stageManualTarget(
-          {
-            latitude: clampedLat,
-            longitude: clampedLon,
-            altitude: altitudeCandidate,
-            source: 'map',
-          },
-          { source: 'map', latitude: clampedLat, longitude: clampedLon },
-          `Map target set at ${clampedLat.toFixed(6)}, ${clampedLon.toFixed(6)}`,
-        );
-      }
     });
 
     const unsubscribeStage = missionPlannerStore.onStageTargetRequest((request) => {

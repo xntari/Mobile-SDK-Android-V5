@@ -154,14 +154,13 @@ export class MapLibreEngine implements MapEngine {
 
   private lastMapBearing: number | null = null;
   private lastArrowRotation: number | null = null;
-  private manualTargetPan: { latitude: number; longitude: number } | null = null;
-  private planIds = new Set<string>();
   private userInteracting = false;
   private initialCenterApplied = false;
   private lastCenter: [number, number] | null = null;
 
   private telemetryPayload: TelemetryPayload | null = null;
   private animationFrame: number | null = null;
+  private pendingTerrainRestore: number | null = null;
   private latestState: MapViewState | null = null;
 
   private terrainSourceId = 'maplibre-terrain-dem';
@@ -240,6 +239,11 @@ export class MapLibreEngine implements MapEngine {
       this.animationFrame = null;
     }
 
+    if (this.pendingTerrainRestore !== null) {
+      cancelAnimationFrame(this.pendingTerrainRestore);
+      this.pendingTerrainRestore = null;
+    }
+
     if (this.map) {
       this.map.off('click', this.handleMapClick);
       this.boundInteractionHandlers.forEach((handler, event) => {
@@ -260,7 +264,6 @@ export class MapLibreEngine implements MapEngine {
     this.poiMarker = null;
     this.planMarkers.forEach((marker) => marker.remove());
     this.planMarkers.clear();
-    this.planIds.clear();
     this.boundInteractionHandlers.clear();
     this.terrainActive = false;
   }
@@ -290,10 +293,9 @@ export class MapLibreEngine implements MapEngine {
 
     this.updateTerrain(state.terrainEnabled, state.terrainExaggeration);
     this.applyViewMode(state.viewMode);
-    this.updatePlanFollow(state.displayedPlan, state.autoCenter);
     this.updatePlanMarkers(state.displayedPlan);
     this.updatePoiTarget(state.poiTarget);
-    this.updateManualTarget(state.manualTarget, state.autoCenter);
+    this.updateManualTarget(state.manualTarget);
     this.updateActiveWaypoint(state.activeWaypoint);
     this.updateFlightPath(state.flightPath);
   }
@@ -368,6 +370,15 @@ export class MapLibreEngine implements MapEngine {
     const { telemetry, targetMetrics, autoCenter, autoRotate, objectTargetLabel, viewMode } = this.telemetryPayload;
     const aircraftLocation = telemetry?.location;
     const homeLocation = telemetry?.home_location;
+    const manualTarget = this.latestState?.manualTarget;
+    const manualTargetCenter =
+      manualTarget &&
+      typeof manualTarget.latitude === 'number' &&
+      typeof manualTarget.longitude === 'number' &&
+      Number.isFinite(manualTarget.latitude) &&
+      Number.isFinite(manualTarget.longitude)
+        ? [manualTarget.longitude, manualTarget.latitude] as [number, number]
+        : null;
     const compassHeading = normalizeBearing(
       typeof telemetry?.compass_heading === 'number'
         ? telemetry.compass_heading
@@ -395,18 +406,22 @@ export class MapLibreEngine implements MapEngine {
         initialTarget = [aircraftLocation!.longitude!, aircraftLocation!.latitude!];
       } else if (isFiniteCoordinate(homeLocation)) {
         initialTarget = [homeLocation!.longitude!, homeLocation!.latitude!];
+      } else if (manualTargetCenter) {
+        initialTarget = manualTargetCenter;
       }
       if (initialTarget) {
         map.jumpTo({ center: initialTarget });
         this.initialCenterApplied = true;
         this.lastCenter = initialTarget;
       }
-    } else if (
-      autoCenter &&
-      isFiniteCoordinate(aircraftLocation) &&
-      !this.userInteracting
-    ) {
-      tryCenter(aircraftLocation!.longitude!, aircraftLocation!.latitude!, true);
+    } else if (autoCenter && !this.userInteracting) {
+      if (isFiniteCoordinate(aircraftLocation)) {
+        tryCenter(aircraftLocation!.longitude!, aircraftLocation!.latitude!, true);
+      } else if (isFiniteCoordinate(homeLocation)) {
+        tryCenter(homeLocation!.longitude!, homeLocation!.latitude!, true);
+      } else if (manualTargetCenter) {
+        tryCenter(manualTargetCenter[0], manualTargetCenter[1], true);
+      }
     }
 
     if (isFiniteCoordinate(aircraftLocation)) {
@@ -501,77 +516,111 @@ export class MapLibreEngine implements MapEngine {
       return;
     }
 
+    const map = this.map;
+    const preservedCenter = map.getCenter();
+    const preservedZoom = map.getZoom();
+    const preservedBearing = map.getBearing();
+    const preservedPitch = map.getPitch();
+
+    let viewNeedsRestore = false;
+
+    if (this.pendingTerrainRestore !== null) {
+      cancelAnimationFrame(this.pendingTerrainRestore);
+      this.pendingTerrainRestore = null;
+    }
+
     if (!enabled) {
       if (this.terrainActive) {
-        this.map.setTerrain(null);
-        if (this.map.getLayer(this.terrainSkyLayerId)) {
+        map.setTerrain(null);
+        if (map.getLayer(this.terrainSkyLayerId)) {
           try {
-            this.map.removeLayer(this.terrainSkyLayerId);
+            map.removeLayer(this.terrainSkyLayerId);
           } catch (error) {
             console.warn('[MapLibreEngine] Failed to remove sky layer', error);
           }
         }
-        if (this.map.getLayer(`${this.terrainSourceId}-hillshade`)) {
+        if (map.getLayer(`${this.terrainSourceId}-hillshade`)) {
           try {
-            this.map.removeLayer(`${this.terrainSourceId}-hillshade`);
+            map.removeLayer(`${this.terrainSourceId}-hillshade`);
           } catch (error) {
             console.warn('[MapLibreEngine] Failed to remove hillshade layer', error);
           }
         }
         this.terrainActive = false;
         this.lastTerrainEnabled = false;
+        viewNeedsRestore = true;
       }
-      return;
+    } else {
+      const needsActivation = !this.terrainActive || !this.lastTerrainEnabled;
+      const exaggerationChanged = Math.abs(this.lastTerrainExaggeration - exaggeration) >= 0.01;
+
+      if (needsActivation || exaggerationChanged) {
+        try {
+          if (!map.getSource(this.terrainSourceId)) {
+            map.addSource(this.terrainSourceId, {
+              type: 'raster-dem',
+              tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],
+              tileSize: 256,
+              attribution: 'Terrain data © Mapzen / AWS Terrain Tiles',
+              maxzoom: 15,
+              encoding: 'terrarium',
+            } as any);
+          }
+
+          if (!map.getLayer(this.terrainSkyLayerId)) {
+            map.addLayer({
+              id: this.terrainSkyLayerId,
+              type: 'sky',
+              paint: {
+                'sky-type': 'atmosphere',
+                'sky-atmosphere-sun': [0.0, 0.0],
+                'sky-atmosphere-sun-intensity': 10,
+              },
+            } as any);
+          }
+
+          if (!map.getLayer(`${this.terrainSourceId}-hillshade`)) {
+            map.addLayer({
+              id: `${this.terrainSourceId}-hillshade`,
+              type: 'hillshade',
+              source: this.terrainSourceId,
+              paint: {
+                'hillshade-exaggeration': exaggeration,
+              },
+            }, 'osm-tiles-layer');
+          } else {
+            map.setPaintProperty(`${this.terrainSourceId}-hillshade`, 'hillshade-exaggeration', exaggeration);
+          }
+
+          map.setTerrain({ source: this.terrainSourceId, exaggeration });
+          this.terrainActive = true;
+          this.lastTerrainExaggeration = exaggeration;
+          this.lastTerrainEnabled = true;
+          viewNeedsRestore = true;
+        } catch (error) {
+          console.warn('[MapLibreEngine] Failed to enable terrain', error);
+        }
+      }
     }
 
-    if (this.lastTerrainEnabled === enabled && this.terrainActive && Math.abs(this.lastTerrainExaggeration - exaggeration) < 0.01) {
-      return;
-    }
+    if (viewNeedsRestore) {
+      const restore = () => {
+        if (!this.map || !this.mapReady) {
+          this.pendingTerrainRestore = null;
+          return;
+        }
+        this.map.jumpTo({
+          center: [preservedCenter.lng, preservedCenter.lat],
+          zoom: preservedZoom,
+          bearing: preservedBearing,
+          pitch: preservedPitch,
+        });
+        this.lastCenter = [preservedCenter.lng, preservedCenter.lat];
+        this.lastMapBearing = normalizeBearing(preservedBearing);
+        this.pendingTerrainRestore = null;
+      };
 
-    try {
-      if (!this.map.getSource(this.terrainSourceId)) {
-        this.map.addSource(this.terrainSourceId, {
-          type: 'raster-dem',
-          tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],
-          tileSize: 256,
-          attribution: 'Terrain data © Mapzen / AWS Terrain Tiles',
-          maxzoom: 15,
-          encoding: 'terrarium',
-        } as any);
-      }
-
-      if (!this.map.getLayer(this.terrainSkyLayerId)) {
-        this.map.addLayer({
-          id: this.terrainSkyLayerId,
-          type: 'sky',
-          paint: {
-            'sky-type': 'atmosphere',
-            'sky-atmosphere-sun': [0.0, 0.0],
-            'sky-atmosphere-sun-intensity': 10,
-          },
-        } as any);
-      }
-
-      if (!this.map.getLayer(`${this.terrainSourceId}-hillshade`)) {
-        this.map.addLayer({
-          id: `${this.terrainSourceId}-hillshade`,
-          type: 'hillshade',
-          source: this.terrainSourceId,
-          paint: {
-            'hillshade-exaggeration': exaggeration,
-          },
-        }, 'osm-tiles-layer');
-      } else {
-        this.map.setPaintProperty(`${this.terrainSourceId}-hillshade`, 'hillshade-exaggeration', exaggeration);
-      }
-
-      this.map.setTerrain({ source: this.terrainSourceId, exaggeration });
-      this.terrainActive = true;
-      this.lastTerrainExaggeration = exaggeration;
-      this.lastTerrainEnabled = true;
-
-    } catch (error) {
-      console.warn('[MapLibreEngine] Failed to enable terrain', error);
+      this.pendingTerrainRestore = requestAnimationFrame(restore);
     }
   }
 
@@ -584,18 +633,16 @@ export class MapLibreEngine implements MapEngine {
       return;
     }
 
-    if (this.lastAppliedViewMode === viewMode) {
-      return;
-    }
+    const targetPitch = viewMode === '3d' ? 55 : 0;
+    const currentPitch = this.map.getPitch();
+    const pitchDelta = Math.abs(currentPitch - targetPitch);
 
-    if (viewMode === '3d') {
-      if (this.map.getPitch() < 40) {
-        this.map.easeTo({ pitch: 55, duration: 500, essential: true });
-      }
-    } else if (viewMode === '2d') {
-      if (this.map.getPitch() !== 0) {
-        this.map.easeTo({ pitch: 0, duration: 400, essential: true });
-      }
+    if (pitchDelta > 0.5) {
+      this.map.easeTo({
+        pitch: targetPitch,
+        duration: viewMode === '3d' ? 500 : 400,
+        essential: true,
+      });
     }
 
     this.lastAppliedViewMode = viewMode;
@@ -655,31 +702,6 @@ export class MapLibreEngine implements MapEngine {
     } else {
       this.homeMarker.setLngLat([lng, lat]);
     }
-  }
-
-  private updatePlanFollow(displayedPlan: PlannedMissionEntry[], autoCenter: boolean) {
-    if (!this.mapReady || !this.map) {
-      this.planIds = new Set(displayedPlan.map((entry) => entry.id));
-      return;
-    }
-
-    const currentIds = new Set<string>();
-    displayedPlan.forEach((entry) => {
-      if (entry?.id) {
-        currentIds.add(entry.id);
-      }
-    });
-
-    if (autoCenter && !this.userInteracting) {
-      const previousIds = this.planIds;
-      const newEntries = displayedPlan.filter((entry) => entry?.id && !previousIds.has(entry.id));
-      const latest = newEntries.length ? newEntries[newEntries.length - 1] : null;
-      if (latest && Number.isFinite(latest.latitude) && Number.isFinite(latest.longitude)) {
-        this.map.jumpTo({ center: [latest.longitude, latest.latitude] });
-      }
-    }
-
-    this.planIds = currentIds;
   }
 
   private updatePlanMarkers(displayedPlan: PlannedMissionEntry[]) {
@@ -753,7 +775,7 @@ export class MapLibreEngine implements MapEngine {
     }
   }
 
-  private updateManualTarget(manualTarget: ManualTargetState | null, autoCenter: boolean) {
+  private updateManualTarget(manualTarget: ManualTargetState | null) {
     if (!this.mapReady || !this.map) {
       if (this.manualTargetMarker) {
         this.manualTargetMarker.remove();
@@ -767,38 +789,28 @@ export class MapLibreEngine implements MapEngine {
         this.manualTargetMarker.remove();
         this.manualTargetMarker = null;
       }
-      this.manualTargetPan = null;
       return;
     }
 
-    if (this.manualTargetMarker) {
-      this.manualTargetMarker.remove();
-      this.manualTargetMarker = null;
+    const lng = manualTarget.longitude;
+    const lat = manualTarget.latitude;
+
+    if (!this.manualTargetMarker) {
+      const element = document.createElement('div');
+      element.style.width = '14px';
+      element.style.height = '14px';
+      element.style.borderRadius = '50%';
+      element.style.backgroundColor = '#38bdf8';
+      element.style.border = '2px solid #ffffff';
+      element.style.boxShadow = '0 0 6px rgba(59, 130, 246, 0.8)';
+
+      this.manualTargetMarker = new maplibregl.Marker({ element })
+        .setLngLat([lng, lat])
+        .addTo(this.map);
+      return;
     }
 
-    const element = document.createElement('div');
-    element.style.width = '14px';
-    element.style.height = '14px';
-    element.style.borderRadius = '50%';
-    element.style.backgroundColor = '#38bdf8';
-    element.style.border = '2px solid #ffffff';
-    element.style.boxShadow = '0 0 6px rgba(59, 130, 246, 0.8)';
-
-    this.manualTargetMarker = new maplibregl.Marker({ element })
-      .setLngLat([manualTarget.longitude, manualTarget.latitude])
-      .addTo(this.map);
-
-    if (autoCenter && !this.userInteracting) {
-      const lat = manualTarget.latitude;
-      const lon = manualTarget.longitude;
-      const previous = this.manualTargetPan;
-      if (!previous || Math.abs(previous.latitude - lat) > 1e-6 || Math.abs(previous.longitude - lon) > 1e-6) {
-        this.map.jumpTo({ center: [lon, lat] });
-        this.manualTargetPan = { latitude: lat, longitude: lon };
-      }
-    } else {
-      this.manualTargetPan = null;
-    }
+    this.manualTargetMarker.setLngLat([lng, lat]);
   }
 
   private updateActiveWaypoint(activeWaypoint: MissionWaypointTarget | null) {
