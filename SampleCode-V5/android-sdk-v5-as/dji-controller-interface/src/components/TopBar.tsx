@@ -390,7 +390,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           onClick={() => preflightPanelControls.setVisible(true)}
         >
           <div className={`text-[11px] uppercase tracking-wide ${statusLevelClass(diagnosticsSeverity)} font-semibold`}>System</div>
-          <div className="text-[11px] text-gray-100 font-semibold leading-tight">{formatStatusLabel(systemStatus?.label)}</div>
+          <div className="text-[8px] text-gray-100 font-semibold leading-tight">{formatStatusLabel(systemStatus?.label)}</div>
           <div className="text-[11px] text-gray-400 max-w-[120px] truncate">{systemDescription}</div>
         </button>
         <div className="flex flex-col min-w-[180px]">

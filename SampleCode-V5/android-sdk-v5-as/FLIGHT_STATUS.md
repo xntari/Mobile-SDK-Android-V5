@@ -7,7 +7,7 @@ Use only standard ascii characters here - don't use ✅  or similar
 > **Transcript logging** - Append the user's instructions and your thought process (with ISO 8601 timestamps) to transcript.txt after every working session so we can reconstruct decision history later.
 ---
 
-## TL;DR (Oct 03 2025 10:15 - workspace, HEAD a9dac908f66c7a5533ebadd768efcb85aac58a97)
+## TL;DR (Oct 03 2025 14:45 - workspace, HEAD a9dac908f66c7a5533ebadd768efcb85aac58a97)
 
 - **Document discipline** - Update this file after every bridge/desktop change. Status, safety checklists, operator notes, and backlog items must always reflect the running code. Never mark a feature complete without field verification.
 - **Transcript discipline** - Keep transcript.txt current: append the latest user instructions and your thought process with ISO 8601 timestamps whenever you touch the project.
@@ -20,6 +20,7 @@ Use only standard ascii characters here - don't use ✅  or similar
 - **Camera control dock** - The new floating dock consolidates gimbal/LookAt controls, manual-track presets, lens-specific zoom selectors (optical + thermal), capability probing, and FPV HUD/snapshot settings; thermal super-resolution toggles currently persist UI intent while we confirm SDK key support.
 - **Fly-To refactor** - Fly-To now fronts the mission planner (defaults, target staging, KMZ import/export). Multi-waypoint runs with RTH/Land finish actions were validated; orbit execution/export still needs work.
 - **Map controls** - Map auto-center now has a manual toggle beside auto-rotate; click drops a waypoint, Ctrl/⌘+click stages a target, and Option+click adds an orbit without breaking drag-to-pan.
+- **3D mission groundwork** - Commit e2454c1e is locked as the pre-3D baseline; Phase 1 (MapEngine abstraction) is complete and Phase 2 (provider/preset UI) now includes an experimental MapLibre terrain preview toggle (demo tiles, no caching yet) within the Advanced panel. Section 7.8 tracks the remaining tasks through terrain shading, caching, and alternate engines.
 - **Manual mission tooling** - Desktop Fly-To panel supports map clicks, laser fixes, manual lat/lon entry, mission-wide simulation, and timeline export; validate on hardware before relying on it in the field.
 - **KMZ workflow** - Mission Control writes `waylines.wpml` plus `mission-metadata.json` when exporting, and the loader restores either metadata or raw WPML (turns/POI/gimbal/actions) so DJI Pilot plans round-trip without losing detail; execution remains manual after review.
 - **Performance watch** - Map rAF batching and the camera throttles landed; FPV/H20N rendering now runs through an OffscreenCanvas worker so the renderer trace stays comfortably under frame budget (continue profiling long sessions for decoder spikes).
@@ -188,9 +189,10 @@ Most recent verified features (2025-10-01):
    Alternatives: Allow operators to throttle/disable probes and rely on existing logbook entries if the widget proves noisy.
 
 7. **3D terrain-aware mission planning**
-   Plan: Prototype MapLibre GL JS terrain (Terrain-RGB) with offline caching, overlay 2D/3D mission paths, and tie probes back into the EGM96 workflow. Document fallback options (CesiumJS, Mapbox GL JS, Google Maps) with cost/performance comparisons.
-   Risks: Terrain tiles may blow through cache budgets; differing geoid models can confuse altitude previews; older GPUs might stutter under 3D load.
-   Alternatives: Fall back to hybrid 2D map plus terrain cross-section while we validate caching; gate 3D mode behind a beta toggle if geoid alignment remains suspect.
+   Status: Phase 1 shipped (MapEngine abstraction + MapLibre engine). Phase 2 is underway: provider/preset selectors now live in the Map panel with collapsible basic/advanced settings, and the MapViewManager can instantiate engines based on the selected provider. The advanced panel will host terrain/caching toggles once Phase 3 lands.
+   Next: Introduce terrain and caching options (Phase 3) by wiring 2D/3D flags into the engine state, enabling MapLibre Terrain-RGB, and surfacing cache status in the advanced panel. Later phases bring Cesium 3D tiles, Mapbox/Google fallbacks, and offline-prefetch tooling. See Section 7.8 for the full roadmap.
+   Risks: Terrain tiles may blow through cache budgets, GPUs with weak WebGL support could stutter, and inconsistent geoid models can skew altitude previews. We will keep a beta toggle and retain the current 2D plan editor until terrain validation finishes.
+   Alternatives: If 3D performance lags, ship a hybrid 2D map with terrain cross-sections and postpone Cesium integration until cache strategies prove stable.
 
 8. **Mission planning UX groundwork for agent-driven flows**
    Plan: Streamline object-memory/POI selection to a guided, two-click experience, unify layout export/import so agent services can choose presets, and align data structures with upcoming natural-language planner APIs.
@@ -422,7 +424,17 @@ Keep this list groomed; link each item to task tracking where applicable.
 - Use Chrome DevTools (Performance/Web Vitals, `about:tracing`) to isolate the remaining FPV/H20N "system" spikes and compare frame times with single vs dual video streams.
 
 ### 7.8 Mapping enhancements
-- Add a 3D mission planning view (incl. edit mode) with optional street/satellite/topographic layers; evaluate MapLibre plugins vs alternative map providers.
+- **Architecture** - Introduce a provider-agnostic `MapEngine` interface consumed by a `MapViewManager`. Engines for MapLibre (baseline), CesiumJS (3D tiles), Mapbox GL JS, and Google Maps share overlay hooks so mission plans, staged targets, and object-memory markers render identically across providers.
+- **Layer & provider switching** - Expose a map settings panel that lets operators pick the provider, layer preset (street, satellite, terrain, night), and 2D/3D mode. Persist choices in localStore and surface token status (Mapbox/Google) with graceful degradations when credentials are missing.
+- **Terrain roadmap**
+  1. Phase 1: Extract current MapLibre map into the engine abstraction (commit e2454c1e as pre-3D baseline) and confirm overlays still behave in 2D.
+  2. Phase 2: Add provider selector UI, layer presets, and toggleable auto-center/rotate controls that work for every engine.
+  3. Phase 3: Initial MapLibre Terrain-RGB preview is wired behind an experimental toggle (using MapLibre demo tiles and automatic pitch). Next steps: add altitude shading, mission elevation profiles tied into the EGM96 pipeline, and swap the demo tiles for configurable providers with caching.
+  4. Phase 4: Integrate CesiumJS for full 3D terrain/photogrammetry (with 2D fallback), plus Mapbox vector alternatives and Google Maps as a low-latency 2D option.
+  5. Phase 5: Ship offline tile/terrain caching (shared LRU + MBTiles support), CLI prefetch tooling, and cache management UI with size quotas and purge options.
+- **Caching strategy** - Cache raster/vector/terrain tiles locally via a shared LRU; log provider, zoom, and license metadata. Provide a CLI (`tools/cache-terrain`) to pre-seed mission areas and document offline workflows. Respect storage limits and offer one-click purge.
+- **Altitude & geoid alignment** - Store per-waypoint geoid offsets so WGS84 ↔ EGM96 conversions remain consistent when switching providers. Highlight altitude discrepancies in the mission planner if terrain sources disagree beyond thresholds.
+- **Performance & UX safeguards** - Detect GPU capability before enabling 3D, fall back to 2D when WebGL is weak, and keep a beta toggle until field validation finishes. Maintain the existing 2D editor as a fallback until terrain features pass flight testing.
 
 ---
 
@@ -439,4 +451,4 @@ During the test, annotate each significant event (command, toast, diagnostic) wi
 
 ---
 Keep conversation history updated in transcript.txt. Read-friendly formatting. Use verbose/full transcript
-_Last updated: Sep 29 2025 - Map telemetry now batches via rAF, FPV/H20N throttles respect simulator/visibility state, and performance follow-ups focus on decoder spikes._
+_Last updated: Oct 03 2025 - Pre-3D baseline locked (e2454c1e) and 3D terrain/provider plan documented; terrain work now proceeds via the phased roadmap in Section 7.8._

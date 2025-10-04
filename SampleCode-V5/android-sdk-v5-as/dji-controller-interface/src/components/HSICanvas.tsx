@@ -346,7 +346,7 @@ export const HSICanvas: React.FC<HSICanvasProps> = ({
       const labelX = centerX + Math.cos(rad) * labelRadius;
       const labelY = centerY + Math.sin(rad) * labelRadius;
 
-      ctx.strokeStyle = '#80f7d0';
+      ctx.strokeStyle = '#40f750';
       ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.moveTo(markerX, markerY);
@@ -358,7 +358,7 @@ export const HSICanvas: React.FC<HSICanvasProps> = ({
       ctx.moveTo(labelX, labelY);
       ctx.lineTo(labelX - Math.cos(arrowAngle - Math.PI / 6) * arrowLength, labelY - Math.sin(arrowAngle - Math.PI / 6) * arrowLength);
       ctx.lineTo(labelX - Math.cos(arrowAngle + Math.PI / 6) * arrowLength, labelY - Math.sin(arrowAngle + Math.PI / 6) * arrowLength);
-      ctx.fillStyle = '#bbf7d0';
+      ctx.fillStyle = '#40f750';
       ctx.fill();
 
       //ctx.fillStyle = '#bbf7d0';

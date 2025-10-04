@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import maplibregl from 'maplibre-gl';
-import 'maplibre-gl/dist/maplibre-gl.css';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+import { MapViewManager, type MapClickEvent } from '../map';
 import { MapDisplayProps } from '../types';
 import { telemetryShallowEqual } from '../utils/telemetryCompare';
 import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
@@ -12,183 +12,94 @@ import type {
   MissionWaypointTarget,
   PoiTarget,
 } from '../types/missionPlanner';
+import { mapSettingsStore, type MapProvider } from '../state/mapSettings';
+import { CollapsibleSection } from './CollapsibleSection';
 
-const clampLat = (value: number) => Math.max(-90, Math.min(90, value));
-const clampLon = (value: number) => Math.max(-180, Math.min(180, value));
-const MISSION_PLAN_SOURCE_ID = 'mission-plan';
-const MISSION_PLAN_LAYER_ID = 'mission-plan-layer';
-const CENTER_EPSILON_DEGREES = 5e-6;
+const calculateDistance = (
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number,
+) => {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+    + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180)
+    * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c * 1000;
+};
 
-const needsCenterUpdate = (map: maplibregl.Map, lon: number, lat: number) => {
-  const current = map.getCenter();
-  return (
-    Math.abs(current.lat - lat) > CENTER_EPSILON_DEGREES ||
-    Math.abs(current.lng - lon) > CENTER_EPSILON_DEGREES
+const getMapInfo = (telemetryData: MapDisplayProps['telemetryData']) => {
+  const aircraftLocation = telemetryData?.location;
+  const homeLocation = telemetryData?.home_location;
+
+  if (!aircraftLocation || !homeLocation) {
+    return { distance: 0, bearing: 0, valid: false } as const;
+  }
+
+  const distance = calculateDistance(
+    aircraftLocation.latitude,
+    aircraftLocation.longitude,
+    homeLocation.latitude,
+    homeLocation.longitude,
   );
-};
 
-const normalizeBearing = (value: number) => {
-  if (!Number.isFinite(value)) {
-    return 0;
-  }
-  let bearing = value % 360;
-  if (bearing < 0) {
-    bearing += 360;
-  }
-  return bearing;
-};
+  const bearing = telemetryData?.home_bearing || 0;
 
-const bearingDelta = (a: number, b: number) => {
-  const diff = ((a - b + 540) % 360) - 180;
-  return Math.abs(diff);
-};
-
-type MapTelemetryUpdate = {
-  telemetry: MapDisplayProps['telemetryData'];
-  targetMetrics: ReturnType<typeof computeTargetMetrics>;
-  autoCenter: boolean;
-  autoRotate: boolean;
-};
-
-const ORBIT_COLORS = {
-  text: '#7c2d12',
-  background: '#fed7aa',
-  border: '#ea580c',
-  shadow: '0 0 4px rgba(234, 88, 12, 0.4)',
-};
-
-const POI_COLORS = {
-  text: '#4c1d95',
-  background: '#ede9fe',
-  border: '#7c3aed',
-  shadow: '0 0 6px rgba(124, 58, 237, 0.45)',
-};
-
-const WAYPOINT_COLORS = {
-  text: '#1e3a8a',
-  background: '#bfdbfe',
-  border: '#1d4ed8',
-  shadow: '0 0 4px rgba(29, 78, 216, 0.35)',
-};
-
-const RETURN_HOME_COLORS = {
-  text: '#065f46',
-  background: '#bbf7d0',
-  border: '#047857',
-  shadow: '0 0 4px rgba(4, 120, 87, 0.4)',
-};
-
-const LAND_COLORS = {
-  text: '#7f1d1d',
-  background: '#fecaca',
-  border: '#b91c1c',
-  shadow: '0 0 4px rgba(185, 28, 28, 0.35)',
-};
-
-const SVG_NS = 'http://www.w3.org/2000/svg';
-
-const createPlanMarkerElement = (label: string, kind?: string, highlight = false) => {
-  const element = document.createElement('div');
-  element.className = 'map-plan-marker';
-  element.style.width = '16px';
-  element.style.height = '16px';
-  element.style.borderRadius = '50%';
-  element.style.display = 'flex';
-  element.style.alignItems = 'center';
-  element.style.justifyContent = 'center';
-  element.style.fontSize = '10px';
-  element.style.fontWeight = '600';
-
-  const palette = kind === 'orbit'
-    ? ORBIT_COLORS
-    : kind === 'return_home'
-      ? RETURN_HOME_COLORS
-      : kind === 'land'
-        ? LAND_COLORS
-        : WAYPOINT_COLORS;
-  element.style.color = palette.text;
-  element.style.backgroundColor = palette.background;
-  element.style.border = highlight ? '2px solid #f97316' : `1.5px solid ${palette.border}`;
-  element.style.boxShadow = highlight ? '0 0 6px rgba(249, 115, 22, 0.6)' : palette.shadow;
-  element.textContent = label;
-  return element;
-};
-
-const createPoiMarkerElement = () => {
-  const element = document.createElement('div');
-  element.style.width = '20px';
-  element.style.height = '20px';
-  element.style.borderRadius = '50%';
-  element.style.border = `2px solid ${POI_COLORS.border}`;
-  element.style.backgroundColor = POI_COLORS.background;
-  element.style.boxShadow = POI_COLORS.shadow;
-  element.style.display = 'flex';
-  element.style.alignItems = 'center';
-  element.style.justifyContent = 'center';
-  element.style.fontSize = '9px';
-  element.style.fontWeight = '700';
-  element.style.color = POI_COLORS.text;
-  element.textContent = 'POI';
-  return element;
+  return { distance, bearing, valid: true } as const;
 };
 
 const MapDisplayComponent: React.FC<MapDisplayProps> = ({
   flightPath = [],
   telemetryData: telemetryDataProp = null,
 }) => {
-  const mapContainer = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<maplibregl.Map | null>(null);
-  const aircraftMarkerRef = useRef<maplibregl.Marker | null>(null);
-  const homeMarkerRef = useRef<maplibregl.Marker | null>(null);
-  const targetMarkerRef = useRef<maplibregl.Marker | null>(null);
-  const manualTargetMarkerRef = useRef<maplibregl.Marker | null>(null);
-  const activeWaypointMarkerRef = useRef<maplibregl.Marker | null>(null);
-  const poiMarkerRef = useRef<maplibregl.Marker | null>(null);
-  const planMarkerRefs = useRef<Map<string, maplibregl.Marker>>(new Map());
-  const animationFrameRef = useRef<number | null>(null);
-  const telemetryStateRef = useRef<MapTelemetryUpdate | null>(null);
-  const userInteractingRef = useRef(false);
-  const aircraftArrowRef = useRef<SVGSVGElement | null>(null);
-  const lastMapBearingRef = useRef<number | null>(null);
-  const lastArrowRotationRef = useRef<number | null>(null);
-  const initialCenterAppliedRef = useRef(false);
-  const manualTargetPanRef = useRef<{ latitude: number; longitude: number } | null>(null);
-  const planIdsRef = useRef<Set<string>>(new Set());
-  const [mapReady, setMapReady] = useState(false);
   const telemetryData = telemetryDataProp ?? null;
-  const [objectTarget, setObjectTarget] = useState<ObjectMemoryTargetSelection | null>(() => objectMemoryTargetStore.getCurrent());
-  const [missionPlan, setMissionPlan] = useState<PlannedMissionEntry[]>(() => missionPlannerStore.getSnapshot().plan);
-  const [manualTarget, setManualTarget] = useState<ManualTargetState | null>(() => missionPlannerStore.getSnapshot().manualTarget);
-  const [activeWaypoint, setActiveWaypoint] = useState<MissionWaypointTarget | null>(() => missionPlannerStore.getSnapshot().activeWaypoint ?? null);
-  const [poiTarget, setPoiTarget] = useState<PoiTarget | null>(() => missionPlannerStore.getSnapshot().poiTarget ?? null);
 
-  const [autoCenter, setAutoCenter] = useState(() => {
-    try {
-      const stored = localStorage.getItem('map.autoCenter');
-      return stored ? JSON.parse(stored) : true;
-    } catch {
-      return true;
-    }
-  });
+  const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const mapManagerRef = useRef<MapViewManager | null>(null);
+  const mapClickHandlerRef = useRef<(event: MapClickEvent) => void>(() => {});
 
-  const autoCenterEnabled = autoCenter;
+  const [mapReady, setMapReady] = useState(false);
 
-  useEffect(() => {
-    const unsubscribe = objectMemoryTargetStore.subscribe(setObjectTarget);
-    return unsubscribe;
-  }, []);
+  const [mapSettings, setMapSettings] = useState(() => mapSettingsStore.getSnapshot());
 
+  const [objectTarget, setObjectTarget] = useState<ObjectMemoryTargetSelection | null>(
+    () => objectMemoryTargetStore.getCurrent(),
+  );
+  useEffect(() => objectMemoryTargetStore.subscribe(setObjectTarget), []);
+
+  const [missionPlan, setMissionPlan] = useState<PlannedMissionEntry[]>(
+    () => missionPlannerStore.getSnapshot().plan,
+  );
   useEffect(() => missionPlannerStore.subscribePlan(setMissionPlan), []);
+
+  const [manualTarget, setManualTarget] = useState<ManualTargetState | null>(
+    () => missionPlannerStore.getSnapshot().manualTarget,
+  );
   useEffect(() => missionPlannerStore.subscribeManualTarget(setManualTarget), []);
+
+  const [activeWaypoint, setActiveWaypoint] = useState<MissionWaypointTarget | null>(
+    () => missionPlannerStore.getSnapshot().activeWaypoint ?? null,
+  );
   useEffect(() => missionPlannerStore.subscribeActiveWaypoint(setActiveWaypoint), []);
+
+  const [poiTarget, setPoiTarget] = useState<PoiTarget | null>(
+    () => missionPlannerStore.getSnapshot().poiTarget ?? null,
+  );
   useEffect(() => missionPlannerStore.subscribePoiTarget(setPoiTarget), []);
 
-  const targetMetrics = React.useMemo(
-    () => computeTargetMetrics(telemetryData, objectTarget?.anchor, objectTarget?.clusterLabel ?? objectTarget?.clusterId),
-    [telemetryData, objectTarget]
+  const targetMetrics = useMemo(
+    () => computeTargetMetrics(
+      telemetryData,
+      objectTarget?.anchor,
+      objectTarget?.clusterLabel ?? objectTarget?.clusterId,
+    ),
+    [telemetryData, objectTarget],
   );
 
-  const telemetryPlan = React.useMemo<PlannedMissionEntry[]>(() => {
+  const telemetryPlan = useMemo<PlannedMissionEntry[]>(() => {
     const waypoints = telemetryData?.waypoint_status?.waypoints;
     if (!Array.isArray(waypoints)) {
       return [];
@@ -216,185 +127,66 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
       .filter((entry): entry is PlannedMissionEntry => Boolean(entry));
   }, [telemetryData?.waypoint_status?.waypoints]);
 
-  const displayedPlan = missionPlan.length ? missionPlan : telemetryPlan;
+  const displayedPlan = useMemo<PlannedMissionEntry[]>(() => (
+    missionPlan.length ? missionPlan : telemetryPlan
+  ), [missionPlan, telemetryPlan]);
 
-  // Map rotation toggle
-  const [autoRotate, setAutoRotate] = useState(() => {
-    try {
-      const stored = localStorage.getItem('map.autoRotate');
-      return stored ? JSON.parse(stored) : true;
-    } catch {
-      return true;
+  useEffect(() => mapSettingsStore.subscribe(setMapSettings), []);
+
+  const layerPresets = useMemo(() => mapSettingsStore.getPresets(), []);
+  const providerOptions = useMemo<MapProvider[]>(() => (
+    Array.from(new Set(layerPresets.map((preset) => preset.provider)))
+  ), [layerPresets]);
+  const layerPresetOptions = useMemo(() => (
+    layerPresets.filter((preset) => preset.provider === mapSettings.provider)
+  ), [layerPresets, mapSettings.provider]);
+
+  const handleToggleAutoRotate = useCallback(() => {
+    mapSettingsStore.setAutoRotate(!mapSettings.autoRotate);
+  }, [mapSettings.autoRotate]);
+
+  const handleToggleAutoCenter = useCallback(() => {
+    mapSettingsStore.setAutoCenter(!mapSettings.autoCenter);
+  }, [mapSettings.autoCenter]);
+
+  const handleProviderChange = useCallback((event: React.ChangeEvent<HTMLSelectElement>) => {
+    mapSettingsStore.setProvider(event.target.value as MapProvider);
+  }, []);
+
+  const handleLayerPresetChange = useCallback((event: React.ChangeEvent<HTMLSelectElement>) => {
+    mapSettingsStore.setLayerPreset(event.target.value);
+  }, []);
+
+  const handleTerrainEnabledChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    mapSettingsStore.setTerrainEnabled(event.target.checked);
+  }, []);
+
+  const handleTerrainExaggerationChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const value = Number(event.target.value);
+    if (Number.isFinite(value)) {
+      mapSettingsStore.setTerrainExaggeration(value);
     }
-  });
+  }, []);
 
-  // Calculate distance for display (bearing comes from telemetry)
-  const calculateDistance = (
-    lat1: number, lon1: number,
-    lat2: number, lon2: number
-  ): number => {
-    const R = 6371;
-    const dLat = (lat2 - lat1) * Math.PI / 180;
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-      Math.sin(dLon/2) * Math.sin(dLon/2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-    return R * c * 1000;
-  };
-
-  const getMapInfo = () => {
-    const aircraftLocation = telemetryData?.location;
-    const homeLocation = telemetryData?.home_location;
-
-    if (!aircraftLocation || !homeLocation) {
-      return { distance: 0, bearing: 0, valid: false };
-    }
-
-    const distance = calculateDistance(
-      aircraftLocation.latitude, aircraftLocation.longitude,
-      homeLocation.latitude, homeLocation.longitude
-    );
-
-    // Use bearing from telemetry data (calculated in bridgeManager)
-    const bearing = telemetryData?.home_bearing || 0;
-
-    return { distance, bearing, valid: true };
-  };
-
-  const mapInfo = getMapInfo();
-
-  const lastCenterRef = useRef<[number, number] | null>(null);
-
-  const handleRecenter = React.useCallback(() => {
-    const map = mapRef.current;
-    if (!map) {
-      return;
-    }
-    const target = telemetryData?.location ?? telemetryData?.home_location;
-    let center: [number, number] | null = null;
-    if (target && Number.isFinite(target.latitude) && Number.isFinite(target.longitude)) {
-      center = [target.longitude, target.latitude];
-    } else if (lastCenterRef.current) {
-      center = lastCenterRef.current;
-    }
-    if (!center) {
-      return;
-    }
-    map.easeTo({ center, duration: 220, essential: true, easing: (t) => t });
-    lastCenterRef.current = center;
-  }, [telemetryData?.location?.latitude, telemetryData?.location?.longitude, telemetryData?.home_location?.latitude, telemetryData?.home_location?.longitude]);
-
-  // Initialize map
-  useEffect(() => {
-    if (!mapContainer.current) return;
-
-    // Initialize MapLibre map with OpenStreetMap tiles
-    const map = new maplibregl.Map({
-      container: mapContainer.current,
-      style: {
-        version: 8,
-        sources: {
-          'osm-tiles': {
-            type: 'raster',
-            tiles: [
-              'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
-            ],
-            tileSize: 256,
-            attribution: '© OpenStreetMap contributors'
-          }
-        },
-        layers: [
-          {
-            id: 'osm-tiles-layer',
-            type: 'raster',
-            source: 'osm-tiles'
-          }
-        ]
-      },
-      center: [0, 0],
-      zoom: 16,
-      attributionControl: false,
-      logoPosition: 'bottom-right'
-    });
-
-    mapRef.current = map;
-
-    map.on('load', () => {
-      setMapReady(true);
-    });
-
-    const markInteractionStart = () => {
-      userInteractingRef.current = true;
-    };
-    const markInteractionEnd = () => {
-      userInteractingRef.current = false;
-    };
-
-    map.on('dragstart', markInteractionStart);
-    map.on('dragend', markInteractionEnd);
-    map.on('rotatestart', markInteractionStart);
-    map.on('rotateend', markInteractionEnd);
-    map.on('pitchstart', markInteractionStart);
-    map.on('pitchend', markInteractionEnd);
-    map.on('zoomstart', markInteractionStart);
-    map.on('zoomend', markInteractionEnd);
-    map.on('moveend', markInteractionEnd);
-
-    return () => {
-      map.off('dragstart', markInteractionStart);
-      map.off('dragend', markInteractionEnd);
-      map.off('rotatestart', markInteractionStart);
-      map.off('rotateend', markInteractionEnd);
-      map.off('pitchstart', markInteractionStart);
-      map.off('pitchend', markInteractionEnd);
-      map.off('zoomstart', markInteractionStart);
-      map.off('zoomend', markInteractionEnd);
-      map.off('moveend', markInteractionEnd);
-
-      if (mapRef.current) {
-        mapRef.current.remove();
-      }
-      userInteractingRef.current = false;
-      if (animationFrameRef.current !== null) {
-        cancelAnimationFrame(animationFrameRef.current);
-        animationFrameRef.current = null;
-      }
-      aircraftMarkerRef.current = null;
-      aircraftArrowRef.current = null;
-      lastMapBearingRef.current = null;
-      lastArrowRotationRef.current = null;
-      homeMarkerRef.current = null;
-      targetMarkerRef.current = null;
-      if (poiMarkerRef.current) {
-        poiMarkerRef.current.remove();
-        poiMarkerRef.current = null;
-      }
-    };
+  const handleToggleViewMode = useCallback(() => {
+    mapSettingsStore.toggleViewMode();
   }, []);
 
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-
-    const handleClick = (event: maplibregl.MapMouseEvent) => {
-      if (!event?.lngLat) return;
-      const pointerEvent = event.originalEvent as MouseEvent | PointerEvent | undefined;
-      if (pointerEvent && pointerEvent.button !== 0) {
+    mapClickHandlerRef.current = (event: MapClickEvent) => {
+      if (event.button !== 0) {
         return;
       }
 
-      const clampedLat = clampLat(event.lngLat.lat);
-      const clampedLon = clampLon(event.lngLat.lng);
-
-      const wantsOrbit = Boolean(pointerEvent?.altKey);
-      const wantsStageTarget = Boolean(pointerEvent?.ctrlKey || pointerEvent?.metaKey);
-      const wantsWaypoint = Boolean(pointerEvent?.shiftKey || (!wantsOrbit && !wantsStageTarget));
+      const { latitude, longitude, altKey, ctrlKey, metaKey, shiftKey } = event;
+      const wantsOrbit = altKey;
+      const wantsStageTarget = ctrlKey || metaKey;
+      const wantsWaypoint = shiftKey || (!wantsOrbit && !wantsStageTarget);
 
       if (wantsStageTarget) {
         missionPlannerStore.requestStageTarget({
-          latitude: clampedLat,
-          longitude: clampedLon,
+          latitude,
+          longitude,
           source: 'map',
         });
         return;
@@ -411,15 +203,15 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
                 : null;
 
         missionPlannerStore.setPoiTarget({
-          latitude: clampedLat,
-          longitude: clampedLon,
+          latitude,
+          longitude,
           altitude: altitudeCandidate,
         });
 
         if (manualTarget?.latitude == null || manualTarget?.longitude == null) {
           missionPlannerStore.requestStageTarget({
-            latitude: clampedLat,
-            longitude: clampedLon,
+            latitude,
+            longitude,
             altitude: altitudeCandidate ?? undefined,
             source: 'map',
           });
@@ -430,497 +222,97 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
 
       if (wantsWaypoint) {
         missionPlannerStore.requestAddWaypoint({
-          latitude: clampedLat,
-          longitude: clampedLon,
+          latitude,
+          longitude,
           kind: 'waypoint',
           source: 'map',
         });
       }
     };
-
-    map.on('click', handleClick);
-
-    return () => {
-      map.off('click', handleClick);
-    };
-  }, [
-    mapReady,
-    manualTarget?.latitude,
-    manualTarget?.longitude,
-    manualTarget?.altitude,
-    telemetryData?.location?.altitude,
-    telemetryData?.altitude,
-  ]);
-
-  const applyTelemetryUpdate = useCallback(() => {
-    animationFrameRef.current = null;
-    if (!mapReady) {
-      return;
-    }
-
-    const map = mapRef.current;
-    const payload = telemetryStateRef.current;
-    if (!map || !payload) {
-      return;
-    }
-
-    const { telemetry, targetMetrics: targetMetricsSnapshot, autoCenter, autoRotate: autoRotateSnapshot } = payload;
-    const aircraftLocation = telemetry?.location;
-    const homeLocation = telemetry?.home_location;
-    const compassHeading = normalizeBearing(
-      typeof telemetry?.compass_heading === 'number'
-        ? telemetry.compass_heading
-        : typeof telemetry?.heading === 'number'
-          ? telemetry.heading
-          : 0,
-    );
-
-    const isFiniteCoordinate = (coord?: { latitude?: number | null; longitude?: number | null } | null) => (
-      coord ? Number.isFinite(coord.latitude) && Number.isFinite(coord.longitude) : false
-    );
-
-    const tryCenter = (lon: number, lat: number, animate: boolean) => {
-      if (!needsCenterUpdate(map, lon, lat)) {
-        return;
-      }
-      const center = [lon, lat] as [number, number];
-      if (animate) {
-        map.easeTo({ center, duration: 220, easing: (t) => t, essential: true });
-      } else {
-        map.jumpTo({ center });
-      }
-      lastCenterRef.current = center;
-    };
-
-    if (!initialCenterAppliedRef.current) {
-      let initialTarget: [number, number] | null = null;
-      if (isFiniteCoordinate(aircraftLocation)) {
-        initialTarget = [aircraftLocation!.longitude!, aircraftLocation!.latitude!];
-      } else if (isFiniteCoordinate(homeLocation)) {
-        initialTarget = [homeLocation!.longitude!, homeLocation!.latitude!];
-      }
-      if (initialTarget) {
-        map.jumpTo({ center: initialTarget });
-        initialCenterAppliedRef.current = true;
-        lastCenterRef.current = initialTarget;
-      }
-    } else if (
-      autoCenter &&
-      isFiniteCoordinate(aircraftLocation) &&
-      !userInteractingRef.current
-    ) {
-      tryCenter(aircraftLocation!.longitude!, aircraftLocation!.latitude!, true);
-    }
-
-    const ensureAircraftMarker = (lng: number, lat: number) => {
-      if (!aircraftMarkerRef.current) {
-        const container = document.createElement('div');
-        container.style.width = '36px';
-        container.style.height = '36px';
-        container.style.display = 'flex';
-        container.style.alignItems = 'center';
-        container.style.justifyContent = 'center';
-
-        const svg = document.createElementNS(SVG_NS, 'svg');
-        svg.setAttribute('width', '32');
-        svg.setAttribute('height', '32');
-        svg.setAttribute('viewBox', '0 0 16 16');
-        svg.style.fill = '#ef4444';
-        svg.style.transformOrigin = '50% 50%';
-        svg.style.filter = 'drop-shadow(0 0 3px rgba(0, 0, 0, 0.6))';
-
-        const path = document.createElementNS(SVG_NS, 'path');
-        path.setAttribute('d', 'M8 1 L13 13 L8 10 L3 13 Z');
-        svg.appendChild(path);
-        container.appendChild(svg);
-
-        aircraftArrowRef.current = svg;
-        aircraftMarkerRef.current = new maplibregl.Marker({ element: container })
-          .setLngLat([lng, lat])
-          .addTo(map);
-      } else {
-        aircraftMarkerRef.current.setLngLat([lng, lat]);
-      }
-    };
-
-    if (isFiniteCoordinate(aircraftLocation)) {
-      ensureAircraftMarker(aircraftLocation!.longitude!, aircraftLocation!.latitude!);
-    }
-
-    const desiredArrowRotation = autoRotateSnapshot ? 0 : compassHeading;
-    const arrowSvg = aircraftArrowRef.current;
-    if (arrowSvg && (lastArrowRotationRef.current == null || bearingDelta(normalizeBearing(desiredArrowRotation), normalizeBearing(lastArrowRotationRef.current)) > 0.5)) {
-      arrowSvg.style.transform = `rotate(${desiredArrowRotation}deg)`;
-      lastArrowRotationRef.current = normalizeBearing(desiredArrowRotation);
-    }
-
-    if (isFiniteCoordinate(homeLocation)) {
-      if (!homeMarkerRef.current) {
-        const homeEl = document.createElement('div');
-        homeEl.style.width = '12px';
-        homeEl.style.height = '12px';
-        homeEl.style.borderRadius = '50%';
-        homeEl.style.backgroundColor = '#4ade80';
-        homeEl.style.border = '2px solid white';
-
-        homeMarkerRef.current = new maplibregl.Marker({ element: homeEl })
-          .setLngLat([homeLocation!.longitude!, homeLocation!.latitude!])
-          .addTo(map);
-      } else {
-        homeMarkerRef.current.setLngLat([homeLocation!.longitude!, homeLocation!.latitude!]);
-      }
-    }
-
-    const targetPosition = targetMetricsSnapshot?.targetPosition;
-    if (
-      targetPosition &&
-      Number.isFinite(targetPosition.latitude) &&
-      Number.isFinite(targetPosition.longitude)
-    ) {
-      const lng = targetPosition.longitude!;
-      const lat = targetPosition.latitude!;
-      if (!targetMarkerRef.current) {
-        const targetEl = document.createElement('div');
-        targetEl.style.width = '8px';
-        targetEl.style.height = '8px';
-        targetEl.style.borderRadius = '50%';
-        targetEl.style.backgroundColor = '#0ea5e9';
-        targetEl.style.border = '2px solid white';
-        targetEl.style.boxShadow = '0 0 6px rgba(14, 165, 233, 0.7)';
-
-        targetMarkerRef.current = new maplibregl.Marker({ element: targetEl })
-          .setLngLat([lng, lat])
-          .addTo(map);
-      } else {
-        targetMarkerRef.current.setLngLat([lng, lat]);
-      }
-    } else if (targetMarkerRef.current) {
-      targetMarkerRef.current.remove();
-      targetMarkerRef.current = null;
-    }
-
-    const desiredBearing = autoRotateSnapshot ? compassHeading : 0;
-    const normalizedDesired = normalizeBearing(desiredBearing);
-    const currentBearing = normalizeBearing(map.getBearing());
-    if (lastMapBearingRef.current == null || bearingDelta(normalizedDesired, currentBearing) > 0.5 || bearingDelta(normalizedDesired, lastMapBearingRef.current) > 0.5) {
-      map.setBearing(normalizedDesired > 180 ? normalizedDesired - 360 : normalizedDesired);
-      lastMapBearingRef.current = normalizedDesired;
-    }
-  }, [mapReady]);
+  }, [manualTarget, telemetryData]);
 
   useEffect(() => {
-    telemetryStateRef.current = {
+    const container = mapContainerRef.current;
+    if (!container) {
+      return;
+    }
+
+    const manager = new MapViewManager({
+      provider: mapSettings.provider,
+      onReady: () => setMapReady(true),
+      onClick: (event) => mapClickHandlerRef.current?.(event),
+    });
+
+    manager.initialize(container);
+    mapManagerRef.current = manager;
+
+    return () => {
+      manager.destroy();
+      mapManagerRef.current = null;
+      setMapReady(false);
+    };
+  }, [mapSettings.provider]);
+
+  useEffect(() => {
+    const manager = mapManagerRef.current;
+    if (!manager) {
+      return;
+    }
+
+    manager.updateState({
       telemetry: telemetryData,
       targetMetrics,
-      autoCenter: autoCenterEnabled,
-      autoRotate,
-    };
-
-    if (!mapReady || !mapRef.current) {
-      return;
-    }
-
-    if (animationFrameRef.current !== null) {
-      return;
-    }
-    animationFrameRef.current = requestAnimationFrame(applyTelemetryUpdate);
-  }, [telemetryData, targetMetrics, autoCenterEnabled, autoRotate, mapReady, applyTelemetryUpdate]);
-
-  useEffect(() => {
-    if (!mapReady || !mapRef.current) {
-      planIdsRef.current = new Set(missionPlan.map((entry) => entry.id));
-      return;
-    }
-
-    const currentIds = new Set<string>();
-    missionPlan.forEach((entry) => {
-      if (entry?.id) {
-        currentIds.add(entry.id);
-      }
+      objectTargetLabel: objectTarget?.clusterLabel
+        ?? (objectTarget?.clusterId != null ? String(objectTarget.clusterId) : null),
+      autoCenter: mapSettings.autoCenter,
+      autoRotate: mapSettings.autoRotate,
+      layerPresetId: mapSettings.layerPresetId,
+      terrainEnabled: mapSettings.terrainEnabled,
+      terrainExaggeration: mapSettings.terrainExaggeration,
+      viewMode: mapSettings.viewMode,
+      displayedPlan,
+      manualTarget,
+      activeWaypoint,
+      poiTarget,
+      flightPath: flightPath.length ? flightPath : undefined,
     });
+  }, [
+    telemetryData,
+    targetMetrics,
+    objectTarget,
+    mapSettings,
+    displayedPlan,
+    manualTarget,
+    activeWaypoint,
+    poiTarget,
+    flightPath,
+  ]);
 
-    if (!autoCenterEnabled && !userInteractingRef.current) {
-      const previousIds = planIdsRef.current;
-      const newEntries = missionPlan.filter((entry) => entry?.id && !previousIds.has(entry.id));
-      const latest = newEntries.length ? newEntries[newEntries.length - 1] : null;
-      if (latest && Number.isFinite(latest.latitude) && Number.isFinite(latest.longitude)) {
-        mapRef.current.jumpTo({ center: [latest.longitude, latest.latitude] });
-      }
-    }
+  const handleRecenter = useCallback(() => {
+    mapManagerRef.current?.recenter();
+  }, []);
 
-    planIdsRef.current = currentIds;
-  }, [missionPlan, mapReady, autoCenterEnabled]);
-
-  useEffect(() => {
-    if (!mapReady || !mapRef.current) return;
-    const map = mapRef.current;
-
-    planMarkerRefs.current.forEach((marker) => marker.remove());
-    planMarkerRefs.current.clear();
-
-    displayedPlan.forEach((entry, index) => {
-      if (!Number.isFinite(entry.latitude) || !Number.isFinite(entry.longitude)) {
-        return;
-      }
-      const label = (() => {
-        if (entry.kind === 'orbit') return `O${index + 1}`;
-        if (entry.kind === 'return_home') return 'R';
-        if (entry.kind === 'land') return 'L';
-        return `${index + 1}`;
-      })();
-      const element = createPlanMarkerElement(label, entry.kind);
-
-      const marker = new maplibregl.Marker({ element })
-        .setLngLat([entry.longitude, entry.latitude])
-        .addTo(map);
-      planMarkerRefs.current.set(entry.id, marker);
-    });
-
-    return () => {
-      planMarkerRefs.current.forEach((marker) => marker.remove());
-      planMarkerRefs.current.clear();
-    };
-  }, [mapReady, displayedPlan]);
-
-  useEffect(() => {
-    if (!mapReady || !mapRef.current) {
-      if (poiMarkerRef.current) {
-        poiMarkerRef.current.remove();
-        poiMarkerRef.current = null;
-      }
-      return;
-    }
-
-    const map = mapRef.current;
-    if (!poiTarget || !Number.isFinite(poiTarget.latitude) || !Number.isFinite(poiTarget.longitude)) {
-      if (poiMarkerRef.current) {
-        poiMarkerRef.current.remove();
-        poiMarkerRef.current = null;
-      }
-      return;
-    }
-
-    const clampedLat = clampLat(poiTarget.latitude);
-    const clampedLon = clampLon(poiTarget.longitude);
-
-    if (!poiMarkerRef.current) {
-      const element = createPoiMarkerElement();
-      poiMarkerRef.current = new maplibregl.Marker({ element })
-        .setLngLat([clampedLon, clampedLat])
-        .addTo(map);
-    } else {
-      poiMarkerRef.current.setLngLat([clampedLon, clampedLat]);
-    }
-  }, [mapReady, poiTarget]);
-
-  useEffect(() => {
-    if (!mapReady || !mapRef.current) return;
-    const map = mapRef.current;
-
-    if (map.getLayer(MISSION_PLAN_LAYER_ID)) {
-      map.removeLayer(MISSION_PLAN_LAYER_ID);
-    }
-    if (map.getSource(MISSION_PLAN_SOURCE_ID)) {
-      map.removeSource(MISSION_PLAN_SOURCE_ID);
-    }
-
-    if (displayedPlan.length < 2) {
-      return;
-    }
-
-    const coordinates = displayedPlan
-      .filter((entry) => Number.isFinite(entry.latitude) && Number.isFinite(entry.longitude))
-      .map((entry) => [entry.longitude, entry.latitude]);
-
-    if (coordinates.length < 2) {
-      return;
-    }
-
-    map.addSource(MISSION_PLAN_SOURCE_ID, {
-      type: 'geojson',
-      data: {
-        type: 'Feature',
-        properties: {},
-        geometry: {
-          type: 'LineString',
-          coordinates,
-        },
-      },
-    });
-
-    map.addLayer({
-      id: MISSION_PLAN_LAYER_ID,
-      type: 'line',
-      source: MISSION_PLAN_SOURCE_ID,
-      layout: {
-        'line-join': 'round',
-        'line-cap': 'round',
-      },
-      paint: {
-        'line-color': '#38bdf8',
-        'line-width': 2,
-        'line-opacity': 0.7,
-        'line-dasharray': [2, 2],
-      },
-    });
-  }, [mapReady, displayedPlan]);
-
-  useEffect(() => {
-    if (!mapReady || !mapRef.current) return;
-
-    if (!manualTarget || manualTarget.latitude == null || manualTarget.longitude == null) {
-      if (manualTargetMarkerRef.current) {
-        manualTargetMarkerRef.current.remove();
-        manualTargetMarkerRef.current = null;
-      }
-      return;
-    }
-
-    const map = mapRef.current;
-    if (manualTargetMarkerRef.current) {
-      manualTargetMarkerRef.current.remove();
-      manualTargetMarkerRef.current = null;
-    }
-
-    const element = document.createElement('div');
-    element.style.width = '14px';
-    element.style.height = '14px';
-    element.style.borderRadius = '50%';
-    element.style.backgroundColor = '#38bdf8';
-    element.style.border = '2px solid #ffffff';
-    element.style.boxShadow = '0 0 6px rgba(59, 130, 246, 0.8)';
-
-    manualTargetMarkerRef.current = new maplibregl.Marker({ element })
-      .setLngLat([manualTarget.longitude, manualTarget.latitude])
-      .addTo(map);
-  }, [mapReady, manualTarget]);
-
-  useEffect(() => {
-    if (!mapReady || !mapRef.current) {
-      return;
-    }
-    if (autoCenterEnabled) {
-      manualTargetPanRef.current = null;
-      return;
-    }
-    if (!manualTarget || manualTarget.latitude == null || manualTarget.longitude == null) {
-      manualTargetPanRef.current = null;
-      return;
-    }
-
-    if (userInteractingRef.current) {
-      return;
-    }
-
-    const lat = manualTarget.latitude;
-    const lon = manualTarget.longitude;
-    const previous = manualTargetPanRef.current;
-    if (!previous || Math.abs(previous.latitude - lat) > 1e-6 || Math.abs(previous.longitude - lon) > 1e-6) {
-      mapRef.current.jumpTo({ center: [lon, lat] });
-      manualTargetPanRef.current = { latitude: lat, longitude: lon };
-    }
-  }, [mapReady, manualTarget?.latitude, manualTarget?.longitude, autoCenterEnabled]);
-
-  useEffect(() => {
-    if (!mapReady || !mapRef.current) return;
-
-    if (!activeWaypoint || !Number.isFinite(activeWaypoint.latitude) || !Number.isFinite(activeWaypoint.longitude)) {
-      if (activeWaypointMarkerRef.current) {
-        activeWaypointMarkerRef.current.remove();
-        activeWaypointMarkerRef.current = null;
-      }
-      return;
-    }
-
-    const map = mapRef.current;
-    if (activeWaypointMarkerRef.current) {
-      activeWaypointMarkerRef.current.remove();
-      activeWaypointMarkerRef.current = null;
-    }
-
-    const element = createPlanMarkerElement(activeWaypoint.label ?? 'NEXT', activeWaypoint.kind, true);
-
-    activeWaypointMarkerRef.current = new maplibregl.Marker({ element })
-      .setLngLat([activeWaypoint.longitude, activeWaypoint.latitude])
-      .addTo(map);
-  }, [mapReady, activeWaypoint]);
-
-  // Persist autoRotate setting
-  useEffect(() => {
-    try {
-      localStorage.setItem('map.autoRotate', JSON.stringify(autoRotate));
-    } catch {}
-  }, [autoRotate]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('map.autoCenter', JSON.stringify(autoCenter));
-    } catch {}
-  }, [autoCenter]);
-
-  // Add flight path
-  useEffect(() => {
-    if (!mapReady || !mapRef.current || flightPath.length < 2) return;
-
-    const map = mapRef.current;
-
-    // Remove existing flight path
-    if (map.getSource('flight-path')) {
-      map.removeLayer('flight-path-layer');
-      map.removeSource('flight-path');
-    }
-
-    // Add flight path as GeoJSON
-    map.addSource('flight-path', {
-      type: 'geojson',
-      data: {
-        type: 'Feature',
-        properties: {},
-        geometry: {
-          type: 'LineString',
-          coordinates: flightPath.map(point => [point.longitude, point.latitude])
-        }
-      }
-    });
-
-    map.addLayer({
-      id: 'flight-path-layer',
-      type: 'line',
-      source: 'flight-path',
-      layout: {
-        'line-join': 'round',
-        'line-cap': 'round'
-      },
-      paint: {
-        'line-color': '#1E88E5',
-        'line-width': 2,
-        'line-opacity': 0.7
-      }
-    });
-  }, [mapReady, flightPath]);
+  const mapInfo = useMemo(() => getMapInfo(telemetryData), [telemetryData]);
 
   return (
     <div className="w-full h-full flex flex-col">
-      {/* MapLibre container */}
       <div className="flex-1 rounded border border-gray-600 overflow-hidden relative">
         <div
-          ref={mapContainer}
+          ref={mapContainerRef}
           className="w-full h-full"
           style={{ minHeight: '120px' }}
         />
 
-        <div className="absolute top-2 left-2 flex flex-col gap-2 pointer-events-none select-none">
-          <div className="text-[10px] text-gray-200 bg-black/60 px-2 py-1 rounded whitespace-nowrap">
-            Click: waypoint · Ctrl/⌘+Click: stage target · Alt/Option+Click: orbit · Drag: pan
-          </div>
-          <button
-            type="button"
-            className="pointer-events-auto text-[10px] text-gray-200 bg-black/60 hover:bg-black/70 px-2 py-1 rounded border border-gray-600 self-start"
-            onClick={handleRecenter}
-          >
-            Recenter map
-          </button>
+        <div className="absolute top-2 left-2 text-[10px] text-gray-200 bg-black/60 px-2 py-1 rounded pointer-events-none select-none">
+          Click: WP · ⌘+Click: stage target · Alt+Click: POI
         </div>
+        <button
+          type="button"
+          className="absolute top-2 right-2 text-[10px] text-gray-200 bg-black/60 hover:bg-black/70 px-2 py-1 rounded border border-gray-600"
+          onClick={handleRecenter}
+        >
+          Recenter map
+        </button>
 
         {activeWaypoint && (
           <div className="absolute top-2 right-2 text-[10px] font-semibold text-slate-900 bg-sky-300/95 px-2 py-1 rounded shadow pointer-events-none select-none whitespace-nowrap">
@@ -928,17 +320,13 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
           </div>
         )}
 
-
-
-        {/* Connection status indicator */}
         {!mapReady && (
           <div className="absolute inset-0 bg-gray-900 bg-opacity-80 flex items-center justify-center">
             <div className="text-xs text-gray-400">Loading Map...</div>
           </div>
         )}
       </div>
-      
-      {/* Map info */}
+
       <div className="mt-2 flex flex-wrap justify-around gap-4 text-xs">
         <div className="text-center">
           <div className="text-gray-400">DIST HOME</div>
@@ -988,59 +376,152 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
         )}
       </div>
 
-      {targetMetrics && (
-        <div className="mt-1 text-[11px] text-center text-purple-200">
-          {(objectTarget?.clusterLabel ?? objectTarget?.clusterId) ?? 'Target'}
-          {targetMetrics.altitudeDelta != null ? ` · Δalt ${targetMetrics.altitudeDelta.toFixed(1)} m` : ''}
-        </div>
-      )}
+      <div className="mt-3 space-y-3">
+        <CollapsibleSection
+          title="Map Settings"
+          storageKey="map.settings.basic"
+          defaultOpen
+          bodyClassName="space-y-3"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-1 text-gray-300">
+                <span>Provider</span>
+                <select
+                  value={mapSettings.provider}
+                  onChange={handleProviderChange}
+                  className="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-gray-200"
+                >
+                  {providerOptions.map((provider) => (
+                    <option key={provider} value={provider}>{provider}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex items-center gap-1 text-gray-300">
+                <span>Layer</span>
+                <select
+                  value={mapSettings.layerPresetId}
+                  onChange={handleLayerPresetChange}
+                  className="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-gray-200"
+                >
+                  {layerPresetOptions.map((preset) => (
+                    <option key={preset.id} value={preset.id}>{preset.label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleToggleAutoRotate}
+                className={`px-3 py-1 text-xs rounded border transition-colors ${
+                  mapSettings.autoRotate
+                    ? 'bg-dji-blue text-white border-dji-blue'
+                    : 'bg-gray-700 text-gray-300 border-gray-600 hover:bg-gray-600'
+                }`}
+              >
+                {mapSettings.autoRotate ? 'Auto-rotate' : 'North up'}
+              </button>
+              <button
+                onClick={handleToggleAutoCenter}
+                className={`px-3 py-1 text-xs rounded border transition-colors ${
+                  mapSettings.autoCenter
+                    ? 'bg-dji-blue text-white border-dji-blue'
+                    : 'bg-gray-700 text-gray-300 border-gray-600 hover:bg-gray-600'
+                }`}
+              >
+                {mapSettings.autoCenter ? 'Auto-center' : 'Center off'}
+              </button>
+              <button
+                onClick={handleToggleViewMode}
+                className={`px-3 py-1 text-xs rounded border transition-colors ${
+                  mapSettings.viewMode === '3d'
+                    ? 'bg-sky-700 text-white border-sky-500'
+                    : 'bg-gray-700 text-gray-300 border-gray-600 hover:bg-gray-600'
+                }`}
+              >
+                {mapSettings.viewMode === '3d' ? 'Switch to 2D' : 'Switch to 3D'}
+              </button>
+            </div>
+          </div>
 
-      {/* Map rotation toggle */}
-      <div className="mt-2 flex justify-center gap-2">
-        <button
-          onClick={() => setAutoRotate(!autoRotate)}
-          className={`px-3 py-1 text-xs rounded border transition-colors ${
-            autoRotate
-              ? 'bg-dji-blue text-white border-dji-blue'
-              : 'bg-gray-700 text-gray-300 border-gray-600 hover:bg-gray-600'
-          }`}
+          {targetMetrics && (
+            <div className="text-[11px] text-center text-purple-200">
+              {(objectTarget?.clusterLabel ?? objectTarget?.clusterId) ?? 'Target'}
+              {targetMetrics.altitudeDelta != null ? ` · Δalt ${targetMetrics.altitudeDelta.toFixed(1)} m` : ''}
+            </div>
+          )}
+        </CollapsibleSection>
+
+        <CollapsibleSection
+          title="Advanced"
+          storageKey="map.settings.advanced"
+          defaultOpen={false}
+          bodyClassName="text-xs text-gray-200 space-y-2"
         >
-          {autoRotate ? 'Auto-rotate' : 'North up'}
-        </button>
-        <button
-          onClick={() => setAutoCenter((prev) => !prev)}
-          className={`px-3 py-1 text-xs rounded border transition-colors ${
-            autoCenter
-              ? 'bg-dji-blue text-white border-dji-blue'
-              : 'bg-gray-700 text-gray-300 border-gray-600 hover:bg-gray-600'
-          }`}
-        >
-          {autoCenter ? 'Auto-center' : 'Center off'}
-        </button>
+          <div className="space-y-3">
+            <div className="bg-gray-900/60 border border-gray-700 rounded px-3 py-2 text-[11px] text-gray-400">
+              Terrain rendering and caching hooks arrive in Phase 3. Current builds always render flat 2D tiles without local cache.
+            </div>
+            <div className="flex flex-wrap items-center gap-4 text-gray-300">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={mapSettings.terrainEnabled}
+                  onChange={handleTerrainEnabledChange}
+                  className="accent-sky-400"
+                />
+                <span>Enable terrain preview (experimental)</span>
+              </label>
+              <label className="flex items-center gap-2">
+                <span>Exaggeration</span>
+                <input
+                  type="range"
+                  min={0.5}
+                  max={3}
+                  step={0.1}
+                  value={mapSettings.terrainExaggeration}
+                  onChange={handleTerrainExaggerationChange}
+                  disabled={!mapSettings.terrainEnabled}
+                  className="accent-sky-400"
+                />
+                <span className="w-10 text-right text-sm text-gray-200">
+                  {mapSettings.terrainExaggeration.toFixed(1)}×
+                </span>
+              </label>
+            </div>
+            <div className="bg-gray-900/40 border border-gray-700 rounded px-3 py-2 text-[11px] text-gray-400 space-y-1">
+              <div className="text-gray-300 font-semibold">Cache status</div>
+              <div>Tiles cached: –</div>
+              <div>Disk usage: –</div>
+              <div className="text-gray-500">Caching controls activate when offline packages are available.</div>
+            </div>
+          </div>
+        </CollapsibleSection>
       </div>
 
-      {/* GPS coordinates */}
       <div className="mt-2 flex justify-between text-xs font-mono leading-tight">
-        {/* Aircraft coordinates */}
         {telemetryData?.location && (
           <div className="text-gray-500">
             <div className="text-gray-400 text-[10px] mb-1">AIRCRAFT</div>
             <div>{telemetryData.location.latitude.toFixed(6)}</div>
             <div>{telemetryData.location.longitude.toFixed(6)}</div>
             <div className="text-yellow-400">
-              {(telemetryData.altitude_amsl ?? ((telemetryData.takeoff_altitude || 0) + (telemetryData.altitude || 0))).toFixed(1)} m AMSL
+              {(telemetryData.altitude_amsl
+                ?? ((telemetryData.takeoff_altitude || 0) + (telemetryData.altitude || 0)))
+                .toFixed(1)} m AMSL
             </div>
           </div>
         )}
 
-        {/* Home coordinates */}
         {telemetryData?.home_location && (
           <div className="text-gray-500">
             <div className="text-gray-400 text-[10px] mb-1">HOME</div>
             <div>{telemetryData.home_location.latitude.toFixed(6)}</div>
             <div>{telemetryData.home_location.longitude.toFixed(6)}</div>
             <div className="text-yellow-400">
-              {(telemetryData.home_location.altitude ?? telemetryData.takeoff_altitude ?? 0).toFixed(1)} m AMSL
+              {(telemetryData.home_location.altitude
+                ?? telemetryData.takeoff_altitude
+                ?? 0).toFixed(1)} m AMSL
             </div>
           </div>
         )}
@@ -1062,7 +543,7 @@ const MapDisplayComponent: React.FC<MapDisplayProps> = ({
 
 const flightPathEqual = (
   a?: Array<{ latitude: number; longitude: number }> | null,
-  b?: Array<{ latitude: number; longitude: number }> | null
+  b?: Array<{ latitude: number; longitude: number }> | null,
 ) => {
   if (!a && !b) {
     return true;
