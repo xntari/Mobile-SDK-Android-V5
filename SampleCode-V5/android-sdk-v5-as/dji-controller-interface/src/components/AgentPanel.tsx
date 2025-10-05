@@ -4,6 +4,7 @@ import type { Detection } from '../agent/visionClient';
 import { getActiveThreshold, setActiveThreshold } from '../agent/visionClient';
 import { getNextZIndex, getBaseZIndex } from '../utils/zIndex';
 import { CollapsibleSection, SectionLabel } from './CollapsibleSection';
+import { agentTelemetryStore, AgentTelemetrySnapshot } from '../state/agentTelemetry';
 
 export interface AgentPanelProps {
   getSnapshot: () => Promise<string>;
@@ -64,6 +65,40 @@ const EXAMPLE_PROMPTS: Array<{ title: string; prompt: string; note?: string }> =
     title: 'Return and land',
     prompt: 'Return home and land safely.',
   },
+  {
+    title: 'Ascend to absolute altitude',
+    prompt: 'Ascend to 20 meters and hold position.',
+    note: 'Absolute altitude target via mission_fly_to.',
+  },
+  {
+    title: 'Ascend by delta',
+    prompt: 'Increase altitude by 10 meters.',
+    note: 'Relative climb via mission_relative_move.',
+  },
+  {
+    title: 'Descend to altitude',
+    prompt: 'Descend to 12 meters and hold.',
+  },
+  {
+    title: 'Descend by delta',
+    prompt: 'Descend by 5 meters.',
+  },
+  {
+    title: 'Fly forward',
+    prompt: 'Fly forward 10 meters.',
+  },
+  {
+    title: 'Fly back',
+    prompt: 'Fly back 10 meters.',
+  },
+  {
+    title: 'Fly lateral',
+    prompt: 'Fly left 10 meters, then right 10 meters.',
+  },
+  {
+    title: 'Cardinal move',
+    prompt: 'Fly north 20 meters and report when done.',
+  },
 ];
 
 // Global visibility controls for Components menu
@@ -106,6 +141,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
     } catch {}
     return true;
   });
+  const [telemetry, setTelemetry] = useState<AgentTelemetrySnapshot>(() => agentTelemetryStore.getSnapshot());
   const [pos, setPos] = useState<{ x: number; y: number }>(() => {
     try {
       const raw = localStorage.getItem('agent.panel.pos');
@@ -141,6 +177,12 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
   usePersistElementHeight(execRef, 'agent.h.exec', 220);
   const planRef = React.useRef<HTMLDivElement | null>(null);
   usePersistElementHeight(planRef, 'agent.h.plan', 120);
+
+  React.useEffect(() => {
+    return agentTelemetryStore.subscribe((snapshot) => {
+      setTelemetry(snapshot);
+    });
+  }, []);
 
   const log = useCallback((line: string) => {
     setLogLines(prev => [...prev.slice(-40), line]);
@@ -531,6 +573,48 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
           </CollapsibleSection>
 
           <CollapsibleSection
+            title="Mission Telemetry"
+            storageKey="agent.section.telemetry"
+            summary={`${telemetry.missionState}${telemetry.fallbackActive ? ' · fallback' : ''}`}
+          >
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-gray-200">
+              <div className="text-gray-400">Mission state</div>
+              <div>{telemetry.missionState}</div>
+
+              <div className="text-gray-400">Last command</div>
+              <div>{telemetry.lastCommand ?? '—'}</div>
+
+              <div className="text-gray-400">Altitude target</div>
+              <div>{telemetry.altitudeTarget != null ? `${telemetry.altitudeTarget.toFixed(1)} m` : '—'}</div>
+
+              <div className="text-gray-400">Altitude current</div>
+              <div>{telemetry.altitudeCurrent != null ? `${telemetry.altitudeCurrent.toFixed(1)} m` : '—'}</div>
+
+              <div className="text-gray-400">Horizontal remaining</div>
+              <div>{telemetry.horizontalRemaining != null ? `${telemetry.horizontalRemaining.toFixed(1)} m` : '—'}</div>
+
+              <div className="text-gray-400">Virtual stick</div>
+              <div>
+                {telemetry.virtualStickEnabled ? 'ENABLED' : 'disabled'}
+                {telemetry.virtualStickOwner ? ` (${telemetry.virtualStickOwner})` : ''}
+              </div>
+
+              <div className="text-gray-400">Fallback active</div>
+              <div>{telemetry.fallbackActive ? 'Yes' : 'No'}</div>
+
+              <div className="text-gray-400">Last update</div>
+              <div>{formatTimestamp(telemetry.lastUpdateMs)}</div>
+            </div>
+            {telemetry.notes.length > 0 && (
+              <div className="mt-2 bg-gray-900/50 border border-gray-800/70 rounded p-2 text-[10px] text-gray-300 space-y-1">
+                {telemetry.notes.slice(-5).map((note, idx) => (
+                  <div key={idx}>• {note}</div>
+                ))}
+              </div>
+            )}
+          </CollapsibleSection>
+
+          <CollapsibleSection
             title="Console Log"
             storageKey="agent.section.logs"
             summary={logSummary}
@@ -586,6 +670,16 @@ function formatArgs(args: any): string {
   } catch {
     try { return JSON.stringify(args); } catch { return ''; }
   }
+}
+
+function formatTimestamp(timestamp: number): string {
+  const now = Date.now();
+  const diff = Math.max(0, now - timestamp);
+  if (diff < 1000) return 'just now';
+  if (diff < 60_000) return `${Math.floor(diff / 1000)} s ago`;
+  if (diff < 3_600_000) return `${Math.floor(diff / 60000)} min ago`;
+  const date = new Date(timestamp);
+  return date.toLocaleTimeString();
 }
 
 function safeStringify(obj: any): string {
