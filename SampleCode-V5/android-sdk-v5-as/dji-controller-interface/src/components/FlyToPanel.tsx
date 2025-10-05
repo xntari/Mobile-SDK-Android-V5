@@ -1966,11 +1966,26 @@ export const FlyToPanel: React.FC = () => {
         }
       }
 
+      const takeoffAslLocal = resolveTakeoffAltitude(telemetry);
+      const altitudeReference = request.altitudeReference
+        ? request.altitudeReference
+        : altitudeReferenceForExecuteMode(executeHeightMode);
+
+      const relativeAltitude = altitudeReference === 'relative_to_takeoff'
+        ? (typeof altitudeCandidate === 'number' && takeoffAslLocal != null
+          ? altitudeCandidate - takeoffAslLocal
+          : altitudeCandidate)
+        : altitudeCandidate;
+
       if (request.kind === 'orbit') {
         missionPlannerStore.setPoiTarget({
           latitude: clampedLat,
           longitude: clampedLon,
-          altitude: altitudeCandidate,
+          altitude: altitudeReference === 'relative_to_takeoff'
+            ? (typeof altitudeCandidate === 'number' && takeoffAslLocal != null
+              ? altitudeCandidate
+              : altitudeCandidate)
+            : altitudeCandidate,
         });
         appendLog('POI target updated (map)', {
           latitude: clampedLat,
@@ -1999,7 +2014,9 @@ export const FlyToPanel: React.FC = () => {
         kind: 'waypoint',
         latitude: clampedLat,
         longitude: clampedLon,
-        altitude: altitudeCandidate,
+        altitude: altitudeReference === 'relative_to_takeoff'
+          ? relativeAltitude
+          : altitudeCandidate,
       };
       if (request.turn) {
         entry.turn = { ...request.turn };
@@ -2025,11 +2042,7 @@ export const FlyToPanel: React.FC = () => {
           })),
         }));
       }
-      if (request.altitudeReference) {
-        entry.altitudeReference = request.altitudeReference;
-      } else {
-        entry.altitudeReference = altitudeReferenceForExecuteMode(executeHeightMode);
-      }
+      entry.altitudeReference = altitudeReference;
       updateMissionPlan((prev) => [...prev, entry]);
       appendLog('Plan waypoint added (map)', entry, 'manual');
       setStatusMessage('Waypoint added from map.');
@@ -3617,9 +3630,22 @@ ${wpmlWaypoints}
           return null;
         }
 
-        let altitudeAsl = typeof entry.altitude === 'number'
-          ? entry.altitude
-          : defaultAltitudeAsl;
+        const altitudeReference = entry.altitudeReference ?? altitudeReferenceForExecuteMode(executeHeightMode);
+
+        let altitudeAsl: number | null = null;
+        if (altitudeReference === 'absolute_wgs84') {
+          altitudeAsl = typeof entry.altitude === 'number'
+            ? entry.altitude
+            : defaultAltitudeAsl;
+        } else if (altitudeReference === 'relative_to_takeoff') {
+          altitudeAsl = typeof entry.altitude === 'number' && snapshotTakeoffAsl != null
+            ? snapshotTakeoffAsl + entry.altitude
+            : (typeof defaultAltitudeAsl === 'number' ? defaultAltitudeAsl : null);
+        } else {
+          altitudeAsl = typeof entry.altitude === 'number'
+            ? entry.altitude
+            : defaultAltitudeAsl;
+        }
 
         if (entry.kind === 'land') {
           altitudeAsl = snapshotTakeoffAsl ?? defaultAltitudeAsl ?? altitudeAsl ?? 0;
@@ -3628,7 +3654,9 @@ ${wpmlWaypoints}
         const payload: MissionPlanCommandEntry = {
           latitude,
           longitude,
-          altitude: typeof altitudeAsl === 'number' ? altitudeAsl : null,
+          altitude: altitudeReference === 'relative_to_takeoff'
+            ? (typeof entry.altitude === 'number' ? entry.altitude : null)
+            : (typeof altitudeAsl === 'number' ? altitudeAsl : null),
           kind: entry.kind,
         };
         if (typeof entry.radius === 'number') {
@@ -3686,9 +3714,15 @@ ${wpmlWaypoints}
 
     const finalTarget = planPayload[planPayload.length - 1];
     const maxSpeedValue = Number.isFinite(maxSpeed) ? maxSpeed : undefined;
-    const targetAltitudeAsl = finalTarget.altitude
-      ?? (snapshotTakeoffAsl != null && Number.isFinite(securityTakeoffHeight)
-        ? snapshotTakeoffAsl + securityTakeoffHeight
+    const finalReference = finalTarget.altitude_reference ?? altitudeReferenceForExecuteMode(executeHeightMode);
+    const targetAltitudeAsl = finalReference === 'absolute_wgs84'
+      ? (typeof finalTarget.altitude === 'number'
+        ? finalTarget.altitude
+        : (snapshotTakeoffAsl != null && Number.isFinite(securityTakeoffHeight)
+          ? snapshotTakeoffAsl + securityTakeoffHeight
+          : snapshotTakeoffAsl))
+      : (finalReference === 'relative_to_takeoff' && typeof finalTarget.altitude === 'number' && snapshotTakeoffAsl != null
+        ? snapshotTakeoffAsl + finalTarget.altitude
         : snapshotTakeoffAsl);
 
     const commandPayload: Record<string, any> = {
@@ -3701,13 +3735,16 @@ ${wpmlWaypoints}
       target_location: {
         latitude: finalTarget.latitude,
         longitude: finalTarget.longitude,
-        altitude: targetAltitudeAsl ?? null,
+        ...(finalReference === 'absolute_wgs84' && typeof targetAltitudeAsl === 'number'
+          ? { altitude: targetAltitudeAsl, altitude_reference: 'absolute_wgs84' }
+          : finalReference === 'relative_to_takeoff'
+            ? {
+                altitude: typeof finalTarget.altitude === 'number' ? finalTarget.altitude : 0,
+                altitude_reference: 'relative_to_takeoff',
+              }
+            : {}),
       },
     };
-
-    if (finalTarget.altitude_reference) {
-      commandPayload.target_location.altitude_reference = finalTarget.altitude_reference;
-    }
 
     const sanitizedPoiForCommand = sanitizePoiTarget(poiTarget);
     if (sanitizedPoiForCommand) {

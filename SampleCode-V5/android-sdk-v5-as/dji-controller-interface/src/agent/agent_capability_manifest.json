@@ -1,0 +1,298 @@
+{
+  "version": "2025-10-05",
+  "generated_by": "bootstrap-manual",
+  "tools": [
+    {
+      "id": "snapshot",
+      "category": "vision",
+      "description": "Capture a still image from the primary gimbal camera.",
+      "args": {},
+      "returns": { "image": { "type": "string", "description": "Base64 image data URL" } },
+      "guardrails": []
+    },
+    {
+      "id": "detect",
+      "category": "vision",
+      "description": "Run vision detection against the latest snapshot.",
+      "args": {
+        "query": { "type": "string", "required": true },
+        "threshold": { "type": "number", "min": 0, "max": 1, "optional": true }
+      },
+      "returns": {
+        "detections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "fields": {
+              "x1": { "type": "number" },
+              "y1": { "type": "number" },
+              "x2": { "type": "number" },
+              "y2": { "type": "number" },
+              "score": { "type": "number" },
+              "label": { "type": "string", "optional": true }
+            }
+          }
+        }
+      },
+      "guardrails": [
+        { "type": "retries", "default": 2, "max": 3 }
+      ]
+    },
+    {
+      "id": "look_at",
+      "category": "gimbal",
+      "description": "Center the gimbal on normalized screen coordinates.",
+      "args": {
+        "x": { "type": "number", "min": 0, "max": 1, "optional": true },
+        "y": { "type": "number", "min": 0, "max": 1, "optional": true }
+      },
+      "returns": { "ok": { "type": "boolean" } },
+      "guardrails": [
+        { "type": "cooldown_ms", "min": 500 }
+      ]
+    },
+    {
+      "id": "laser_enable",
+      "category": "sensor",
+      "description": "Toggle the laser rangefinder.",
+      "args": { "enabled": { "type": "boolean", "required": true } },
+      "returns": { "ok": { "type": "boolean" } },
+      "guardrails": []
+    },
+    {
+      "id": "laser_measure",
+      "category": "sensor",
+      "description": "Trigger a laser measurement.",
+      "args": {
+        "x": { "type": "number", "min": 0, "max": 1, "optional": true },
+        "y": { "type": "number", "min": 0, "max": 1, "optional": true }
+      },
+      "returns": {
+        "distance_m": { "type": "number" },
+        "latitude": { "type": "number", "optional": true },
+        "longitude": { "type": "number", "optional": true },
+        "altitude": { "type": "number", "optional": true }
+      },
+      "guardrails": []
+    },
+    {
+      "id": "respond",
+      "category": "ui",
+      "description": "Send a textual response back to the operator UI.",
+      "args": { "text": { "type": "string", "optional": true } },
+      "returns": { "ok": { "type": "boolean" } },
+      "guardrails": []
+    },
+    {
+      "id": "mission_self_check",
+      "category": "flight",
+      "description": "Run pre-flight diagnostics and report blockers.",
+      "args": {},
+      "returns": {
+        "status": { "type": "enum", "values": ["ready", "blocked"] },
+        "issues": {
+          "type": "array",
+          "optional": true,
+          "items": { "type": "object", "fields": { "id": { "type": "string" }, "severity": { "type": "enum", "values": ["info", "warn", "error"] }, "message": { "type": "string" } } }
+        }
+      },
+      "guardrails": []
+    },
+    {
+      "id": "flight_takeoff",
+      "category": "flight",
+      "description": "Initiate automatic takeoff.",
+      "args": {
+        "altitude_target_m": { "type": "number", "min": 1, "max": 120, "optional": true }
+      },
+      "returns": { "ok": { "type": "boolean" } },
+      "guardrails": [
+        { "type": "confirmation", "required": true },
+        { "type": "altitude_floor", "max_m": 30 }
+      ]
+    },
+    {
+      "id": "flight_land",
+      "category": "flight",
+      "description": "Initiate landing sequence or force land.",
+      "args": { "mode": { "type": "enum", "values": ["auto", "force"], "default": "auto" } },
+      "returns": { "ok": { "type": "boolean" } },
+      "guardrails": [
+        { "type": "confirmation", "required": true }
+      ]
+    },
+    {
+      "id": "flight_rth",
+      "category": "flight",
+      "description": "Start or stop Return-To-Home.",
+      "args": { "action": { "type": "enum", "values": ["start", "stop"], "required": true } },
+      "returns": { "ok": { "type": "boolean" } },
+      "guardrails": [
+        { "type": "confirmation", "required_for": ["start"] }
+      ]
+    },
+    {
+      "id": "mission_fly_to",
+      "category": "mission",
+      "description": "Fly to a precise coordinate using Fly-To.",
+      "args": {
+        "target": {
+          "type": "object",
+          "required": true,
+          "fields": {
+            "latitude": { "type": "number", "min": -90, "max": 90 },
+            "longitude": { "type": "number", "min": -180, "max": 180 },
+            "altitude": { "type": "number|null" },
+            "altitude_reference": {
+              "type": "enum",
+              "values": ["relative_to_takeoff", "absolute_wgs84", "egm96"],
+              "default": "relative_to_takeoff"
+            }
+          }
+        },
+        "mode": { "type": "enum", "values": ["smart_height", "set_height"], "default": "smart_height" },
+        "fly_to_height": { "type": "number", "min": 1, "max": 120, "optional": true },
+        "max_speed": { "type": "number", "min": 1, "max": 15, "optional": true },
+        "security_takeoff_height": { "type": "number", "min": 10, "max": 120, "optional": true },
+        "reason": { "type": "string", "optional": true }
+      },
+      "returns": { "dispatched": { "type": "boolean" } },
+      "guardrails": [
+        { "type": "horizontal_separation", "min_m": 1.0 },
+        { "type": "vertical_separation", "min_m": 0.6 }
+      ]
+    },
+    {
+      "id": "mission_relative_move",
+      "category": "mission",
+      "description": "Move relative to current heading.",
+      "args": {
+        "axis": { "type": "enum", "values": ["forward", "backward", "left", "right"], "required": true },
+        "distance_m": { "type": "number", "min": 1, "max": 50, "required": true },
+        "altitude_delta_m": { "type": "number", "min": -30, "max": 30, "optional": true }
+      },
+      "returns": { "staged": { "type": "boolean" } },
+      "guardrails": [
+        { "type": "horizontal_separation", "min_m": 1.0 }
+      ]
+    },
+    {
+      "id": "mission_waypoint_plan",
+      "category": "mission",
+      "description": "Execute a waypoint mission plan.",
+      "args": {
+        "plan": {
+          "type": "array",
+          "required": true,
+          "max_items": 50,
+          "items": {
+            "type": "object",
+            "fields": {
+              "latitude": { "type": "number", "min": -90, "max": 90 },
+              "longitude": { "type": "number", "min": -180, "max": 180 },
+              "altitude": { "type": "number|null" },
+              "altitude_reference": {
+                "type": "enum",
+                "values": ["relative_to_takeoff", "absolute_wgs84", "egm96"],
+                "optional": true
+              }
+            }
+          }
+        },
+        "finish_action": { "type": "enum", "values": ["none", "land", "go_home"], "default": "none" },
+        "orbit_mode": { "type": "enum", "values": ["none", "drift", "gimbal", "gimbal_free"], "optional": true },
+        "poi": {
+          "type": "object",
+          "optional": true,
+          "fields": {
+            "latitude": { "type": "number", "min": -90, "max": 90 },
+            "longitude": { "type": "number", "min": -180, "max": 180 },
+            "altitude": { "type": "number|null" }
+          }
+        },
+        "execute": { "type": "boolean", "default": true }
+      },
+      "returns": { "dispatched": { "type": "boolean" } },
+      "guardrails": [
+        { "type": "payload_bytes", "max": 65536 },
+        { "type": "waypoint_limit", "max": 50 }
+      ]
+    },
+    {
+      "id": "mission_scan",
+      "category": "mission",
+      "description": "Generate a lawnmower scan pattern (macro).",
+      "args": {
+        "area": { "type": "polygon", "max_area_m2": 1000000, "required": true },
+        "altitude_profile": { "type": "array", "items": { "type": "object" }, "required": true },
+        "line_spacing_m": { "type": "number", "min": 5, "max": 200, "required": true },
+        "speed_mps": { "type": "number", "min": 1, "max": 15, "optional": true },
+        "camera_profile": { "type": "string", "optional": true }
+      },
+      "returns": { "macro": { "type": "string", "value": "mission_waypoint_plan" } },
+      "guardrails": [
+        { "type": "area_limit", "max_m2": 1000000 }
+      ]
+    },
+    {
+      "id": "mission_patrol",
+      "category": "mission",
+      "description": "Generate a perimeter patrol loop (macro).",
+      "args": {
+        "perimeter": { "type": "polygon|path", "required": true },
+        "loops": { "type": "number", "min": 1, "max": 10, "optional": true },
+        "dwell_s": { "type": "number", "min": 0, "max": 60, "optional": true },
+        "trigger": { "type": "object", "optional": true }
+      },
+      "returns": { "macro": { "type": "string", "value": "mission_waypoint_plan" } },
+      "guardrails": [
+        { "type": "waypoint_limit", "max": 50 }
+      ]
+    },
+    {
+      "id": "object_memory_store",
+      "category": "perception",
+      "description": "Persist an object observation into memory.",
+      "args": {
+        "image": { "type": "string", "optional": true },
+        "label": { "type": "string", "optional": true },
+        "telemetry": { "type": "object", "optional": true },
+        "force_new_cluster": { "type": "boolean", "optional": true }
+      },
+      "returns": { "cluster_id": { "type": "string" } },
+      "guardrails": []
+    },
+    {
+      "id": "object_memory_query",
+      "category": "perception",
+      "description": "Query object memory for matching clusters.",
+      "args": {
+        "label": { "type": "string", "optional": true },
+        "cluster_id": { "type": "string", "optional": true },
+        "nearest": { "type": "number", "min": 1, "max": 10, "optional": true },
+        "limit": { "type": "number", "min": 1, "max": 50, "optional": true }
+      },
+      "returns": {
+        "clusters": {
+          "type": "array",
+          "items": { "type": "object" }
+        }
+      },
+      "guardrails": []
+    },
+    {
+      "id": "perception_watch",
+      "category": "perception",
+      "description": "Watch for detections over time and emit events.",
+      "args": {
+        "label": { "type": "string", "required": true },
+        "duration_ms": { "type": "number", "min": 1000, "max": 300000, "required": true },
+        "interval_ms": { "type": "number", "min": 100, "max": 10000, "default": 500 },
+        "confidence": { "type": "number", "min": 0, "max": 1, "optional": true },
+        "on_detect": { "type": "object", "optional": true }
+      },
+      "returns": { "events": { "type": "array", "items": { "type": "object" } } },
+      "guardrails": []
+    }
+  ]
+}

@@ -3,6 +3,7 @@ import { runInstruction } from '../agent/orchestrator';
 import type { Detection } from '../agent/visionClient';
 import { getActiveThreshold, setActiveThreshold } from '../agent/visionClient';
 import { getNextZIndex, getBaseZIndex } from '../utils/zIndex';
+import { CollapsibleSection, SectionLabel } from './CollapsibleSection';
 
 export interface AgentPanelProps {
   getSnapshot: () => Promise<string>;
@@ -10,6 +11,60 @@ export interface AgentPanelProps {
   setDetections?: (boxes: Detection[]) => void;
   laserResult?: any;
 }
+
+type ExecutionEvent = {
+  key: string;
+  tool: string;
+  state: 'running' | 'done' | 'error';
+  ms?: number;
+  startedAt: number;
+};
+
+const TOOL_DISPLAY: Record<string, { label: string; category: 'flight' | 'mission' | 'vision' | 'gimbal' | 'sensor' | 'ui'; icon?: string }> = {
+  snapshot: { label: 'Snapshot', category: 'vision', icon: '📷' },
+  detect: { label: 'Detect', category: 'vision', icon: '🧠' },
+  look_at: { label: 'Look At', category: 'gimbal', icon: '🎯' },
+  laser_enable: { label: 'Laser Enable', category: 'sensor', icon: '🔦' },
+  laser_measure: { label: 'Laser Measure', category: 'sensor', icon: '📏' },
+  mission_self_check: { label: 'Self Check', category: 'flight', icon: '🩺' },
+  flight_takeoff: { label: 'Take Off', category: 'flight', icon: '⤴' },
+  flight_land: { label: 'Land', category: 'flight', icon: '⤵' },
+  flight_rth: { label: 'Return Home', category: 'flight', icon: '🏠' },
+  mission_fly_to: { label: 'Fly-To', category: 'mission', icon: '➡️' },
+  mission_relative_move: { label: 'Relative Move', category: 'mission', icon: '⇢' },
+  mission_waypoint_plan: { label: 'Waypoint Plan', category: 'mission', icon: '🗺' },
+  mission_scan: { label: 'Mission Scan', category: 'mission', icon: '📡' },
+  mission_patrol: { label: 'Mission Patrol', category: 'mission', icon: '🔁' },
+  respond: { label: 'Respond', category: 'ui', icon: '💬' },
+  sleep: { label: 'Sleep', category: 'ui', icon: '⏱' },
+};
+
+const FLIGHT_TOOLS = new Set([
+  'mission_self_check',
+  'flight_takeoff',
+  'flight_land',
+  'flight_rth',
+  'mission_fly_to',
+  'mission_relative_move',
+  'mission_waypoint_plan',
+  'mission_scan',
+  'mission_patrol',
+]);
+
+const EXAMPLE_PROMPTS: Array<{ title: string; prompt: string; note?: string }> = [
+  {
+    title: 'Pre-flight check',
+    prompt: 'Run a mission self check and report any blockers.',
+  },
+  {
+    title: 'Takeoff & hover',
+    prompt: 'Perform a self check, take off, and hold position at 25 meters.',
+  },
+  {
+    title: 'Return and land',
+    prompt: 'Return home and land safely.',
+  },
+];
 
 // Global visibility controls for Components menu
 export const agentPanelControls = {
@@ -36,7 +91,8 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
   const [logLines, setLogLines] = useState<string[]>([]);
   const [result, setResult] = useState<string>('');
   const [status, setStatus] = useState<{ detector?: string; planner?: string }>(() => ({}));
-  const [ribbon, setRibbon] = useState<Record<string, { state: 'running'|'done'|'error'; ms?: number }>>({});
+  const [timeline, setTimeline] = useState<ExecutionEvent[]>([]);
+  const pendingStepsRef = React.useRef<Record<string, string[]>>({});
   const [planSteps, setPlanSteps] = useState<any[] | null>(null);
   const [planProgram, setPlanProgram] = useState<any | null>(null);
   const [planProgramHigh, setPlanProgramHigh] = useState<any | null>(null);
@@ -93,7 +149,36 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
   }, []);
 
   const onStep = useCallback((info: { id: string; state: 'running' | 'done' | 'error'; ms?: number }) => {
-    setRibbon(prev => ({ ...prev, [info.id]: { state: info.state, ms: info.ms } }));
+    setTimeline((prev) => {
+      if (info.state === 'running') {
+        const key = `${info.id}-${performance.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        const stack = pendingStepsRef.current[info.id] ?? [];
+        pendingStepsRef.current[info.id] = [...stack, key];
+        return [
+          ...prev,
+          {
+            key,
+            tool: info.id,
+            state: 'running',
+            ms: info.ms,
+            startedAt: Date.now(),
+          },
+        ];
+      }
+
+      const stack = pendingStepsRef.current[info.id];
+      if (!stack || stack.length === 0) {
+        return prev;
+      }
+      const key = stack[stack.length - 1];
+      pendingStepsRef.current[info.id] = stack.slice(0, -1);
+
+      return prev.map((entry) =>
+        entry.key === key
+          ? { ...entry, state: info.state, ms: info.ms ?? entry.ms }
+          : entry
+      );
+    });
   }, []);
 
   const onRun = useCallback(async () => {
@@ -103,10 +188,12 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
     setLogLines([]);
     try {
       // Try planner first, fallback to built-in flow
-      setRibbon({});
       setPlanSteps(null);
       setPlanProgram(null);
       setPlanErrors([]);
+      setTrace([]);
+      setTimeline([]);
+      pendingStepsRef.current = {};
       cancelRef.current.cancelled = false;
       await runInstruction(prompt.trim(), {
         getSnapshot,
@@ -243,6 +330,64 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
     </div>
   ), [running, pos]);
 
+  const timelineChips = React.useMemo(() => {
+    return timeline.slice(-12).map((entry) => {
+      const display = getToolDisplay(entry.tool);
+      const stateClass = entry.state === 'done'
+        ? 'bg-status-good/20 border-status-good/60 text-status-good'
+        : entry.state === 'error'
+          ? 'bg-status-error/20 border-status-error/60 text-status-error'
+          : 'bg-amber-500/10 border-amber-400/50 text-amber-200';
+      const categoryClass = display.category === 'flight' || display.category === 'mission'
+        ? 'shadow-[0_0_6px_rgba(0,150,255,0.35)]'
+        : '';
+      return (
+        <span
+          key={entry.key}
+          className={`px-2 py-[3px] rounded border text-[10px] uppercase tracking-wide whitespace-nowrap ${stateClass} ${categoryClass}`}
+          title={`${display.label} · ${entry.state}${entry.ms != null ? ` · ${Math.round(entry.ms)} ms` : ''}`}
+        >
+          {display.icon ? `${display.icon} ` : ''}{display.label}
+        </span>
+      );
+    });
+  }, [timeline]);
+
+  const flightEvents = React.useMemo(() => timeline.filter((t) => FLIGHT_TOOLS.has(t.tool)).slice(-6), [timeline]);
+
+  const executionSummary = React.useMemo(() => {
+    if (!timeline.length) return 'Awaiting execution';
+    const completed = timeline.filter((e) => e.state === 'done').length;
+    const errors = timeline.filter((e) => e.state === 'error').length;
+    if (errors) return `${errors} error${errors === 1 ? '' : 's'}`;
+    if (completed === timeline.length) return `${completed} step${completed === 1 ? '' : 's'} complete`;
+    return `${completed}/${timeline.length} complete`;
+  }, [timeline]);
+
+  const plannerSummary = planErrors.length
+    ? `${planErrors.length} error${planErrors.length === 1 ? '' : 's'}`
+    : planProgram
+      ? `${planSteps?.length || 0} step${(planSteps?.length || 0) === 1 ? '' : 's'}`
+      : 'Waiting';
+
+  const logSummary = logLines.length
+    ? `${logLines.length} line${logLines.length === 1 ? '' : 's'}`
+    : 'Empty';
+
+  const statusChips = (
+    <div className="flex flex-wrap gap-1 text-[10px] text-gray-300">
+      {status.detector && (
+        <span className="px-2 py-[3px] rounded bg-gray-800/70 border border-gray-700/70 uppercase tracking-wide">Detector</span>
+      )}
+      {status.planner && (
+        <span className="px-2 py-[3px] rounded bg-gray-800/70 border border-gray-700/70 uppercase tracking-wide">Planner ready</span>
+      )}
+      {timeline.length === 0 && !running && (
+        <span className="px-2 py-[3px] rounded bg-gray-800/40 border border-gray-700/40 uppercase tracking-wide text-gray-400">No execution yet</span>
+      )}
+    </div>
+  );
+
   return (
     <div ref={panelRef} className="glass-panel p-2" style={{
       position: 'fixed',
@@ -258,118 +403,177 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
       display: visible ? 'block' : 'none' // Hide without unmounting
     }}>
       {header}
-      {/* Status chips */}
-      <div className="flex gap-1 mb-1 select-text">
-        {status.detector && (
-          <span className="px-1 py-[2px] bg-gray-800 rounded text-[10px] text-gray-300" title={status.detector}>detector</span>
-        )}
-        {status.planner && (
-          <span className="px-1 py-[2px] bg-gray-800 rounded text-[10px] text-gray-300" title={status.planner}>planner</span>
-        )}
-      </div>
-      {/* Tiny status ribbon */}
-      <div className="flex flex-wrap gap-1 mb-1 text-[10px]">
-        {['snapshot','detect','look_at','post_detect','laser_enable','laser_measure','respond'].map(id => {
-          const st = ribbon[id]?.state || 'running';
-          const ms = ribbon[id]?.ms;
-          const label = id.replace('_',' ').toUpperCase();
-          return (
-            <span key={id} className={`px-1 py-[1px] rounded ${st==='done'?'bg-green-700 text-green-100':st==='error'?'bg-red-800 text-red-100':'bg-gray-700 text-gray-200'}`}
-              title={ms? `${label} ${Math.round(ms)}ms` : label}>
-              {label} {st==='done'?'✓':st==='error'?'✗':'…'}{ms? ` ${Math.round(ms)}ms`:''}
-            </span>
-          );
-        })}
-      </div>
-      <div className="flex gap-1">
-        <input
-          className="flex-1 bg-gray-800 text-xs px-2 py-1 rounded outline-none select-text"
-          value={prompt}
-          onChange={e => setPrompt(e.target.value)}
-          placeholder="e.g., find car"
-        />
-        <button
-          className={`px-2 py-1 text-xs rounded ${running ? 'bg-gray-700 text-gray-400' : 'bg-dji-blue text-white'}`}
-          onClick={onRun}
-          disabled={running}
-        >Run</button>
-        <button
-          className="px-2 py-1 text-xs rounded bg-gray-700 text-gray-300"
-          onClick={onStop}
-        >Stop</button>
-      </div>
-
-      {/* Detector threshold quick presets */}
-      <div className="mt-1 flex items-center gap-2 text-[10px] text-gray-300 select-text">
-        <span>det thr:</span>
-        {[0.15, 0.20, 0.25, 0.30].map(v => (
-          <button
-            key={v}
-            className={`px-1.5 py-[2px] rounded ${Math.abs(thr - v) < 1e-6 ? 'bg-dji-blue text-white' : 'bg-gray-700 text-gray-200 hover:bg-gray-600'}`}
-            onClick={() => { setThr(v); setActiveThreshold(v); log(`threshold set to ${v.toFixed(2)}`); }}
-          >{v.toFixed(2)}</button>
-        ))}
-        <span className="text-gray-500">active {thr.toFixed(2)}</span>
-      </div>
-
-      {planErrors.length > 0 && (
-        <div className="mb-2 bg-red-950/70 rounded p-2 text-[10px] text-red-200 select-text" style={{ maxHeight: 120, overflowY: 'auto' }}>
-          <div className="text-red-300 mb-1">Plan errors</div>
-          {planErrors.map((e, i) => (
-            <div key={i}>• {e.message}{e.path ? ` (${e.path})` : ''}</div>
-          ))}
-        </div>
-      )}
-
-      {/* Pretty JSON program preview w/ toggle */}
-      {(planProgram || planProgramHigh) && (
-        <div ref={programRef} className="mb-2 bg-gray-900/60 rounded p-1 text-[10px] text-gray-200 select-text font-mono" style={{ height: 180, overflowY: 'auto', resize: 'vertical' as any }}>
-          <div className="flex items-center justify-between text-gray-400 mb-1">
-            <div>Program</div>
-            <div className="flex gap-1">
-              <button className={`px-1 py-[1px] rounded ${programView==='final'?'bg-dji-blue text-white':'bg-gray-700 text-gray-200'}`} onClick={()=>setProgramView('final')}>Final</button>
-              <button className={`px-1 py-[1px] rounded ${programView==='high'?'bg-dji-blue text-white':'bg-gray-700 text-gray-200'}`} onClick={()=>setProgramView('high')}>High-level</button>
+      <div className="flex flex-col h-[calc(100%-24px)] overflow-hidden select-text">
+        <div className="flex-1 overflow-y-auto pr-1 space-y-3">
+          <CollapsibleSection
+            title="Prompt & Controls"
+            storageKey="agent.section.prompt"
+            summary={running ? 'Running' : 'Idle'}
+          >
+            {statusChips}
+            <div className="flex gap-2">
+              <input
+                className="flex-1 bg-gray-900/70 border border-gray-700/70 text-xs px-2 py-1 rounded outline-none focus:ring-1 focus:ring-dji-blue"
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder="Describe the desired action…"
+              />
+              <button
+                className={`px-2 py-1 text-xs uppercase tracking-wide rounded ${running ? 'bg-gray-700 text-gray-400' : 'bg-dji-blue text-white hover:bg-dji-blue/80'}`}
+                onClick={onRun}
+                disabled={running}
+              >Run</button>
+              <button
+                className="px-2 py-1 text-xs uppercase tracking-wide rounded border border-gray-700/60 bg-gray-900/70 text-gray-300 hover:bg-gray-800"
+                onClick={onStop}
+              >Stop</button>
             </div>
-          </div>
-          <pre className="whitespace-pre-wrap leading-tight">{safeStringify(programView==='final'? planProgram : planProgramHigh)}</pre>
-        </div>
-      )}
-
-      {planSteps && planSteps.length > 0 && (
-        <div ref={planRef} className="mb-2 bg-gray-900/50 rounded p-1 text-[10px] text-gray-200 select-text" style={{ height: 120, overflowY: 'auto', resize: 'vertical' as any }}>
-          <div className="text-gray-400 mb-1">Plan Preview</div>
-          {planSteps.map((s, i) => (
-            <div key={i} className="whitespace-nowrap overflow-ellipsis overflow-hidden">
-              {i+1}. {String(s.tool)} {formatArgs(s.args)}
+            <div className="flex items-center gap-2 text-[10px] text-gray-300">
+              <SectionLabel label="Detector threshold" />
+              {[0.15, 0.20, 0.25, 0.30].map((v) => (
+                <button
+                  key={v}
+                  className={`px-1.5 py-[2px] rounded border ${Math.abs(thr - v) < 1e-6 ? 'bg-dji-blue text-white border-dji-blue' : 'bg-gray-800 text-gray-200 border-gray-700 hover:bg-gray-700'}`}
+                  onClick={() => { setThr(v); setActiveThreshold(v); log(`threshold set to ${v.toFixed(2)}`); }}
+                >{v.toFixed(2)}</button>
+              ))}
+              <span className="text-gray-500">active {thr.toFixed(2)}</span>
             </div>
-          ))}
-        </div>
-      )}
+          </CollapsibleSection>
 
-      {/* Execution trace */}
-      {trace.length > 0 && (
-        <div ref={execRef} className="mb-2 bg-gray-900/60 rounded p-1 text-[10px] select-text" style={{ height: 220, overflowY: 'auto', resize: 'vertical' as any }}>
-          <div className="text-gray-400 mb-1">Execution</div>
-          {trace.map((t, i) => (
-            <div key={i} className={t.kind==='tool'? 'text-blue-300' : t.kind==='var'? 'text-yellow-300' : t.kind==='error'? 'text-red-300' : t.kind==='warn'? 'text-orange-300' : 'text-gray-300'}>
-              {t.text}
+          <CollapsibleSection
+            title="Planner Output"
+            storageKey="agent.section.planner"
+            summary={plannerSummary}
+          >
+            {planErrors.length > 0 && (
+              <div className="bg-red-950/60 border border-red-800/60 rounded p-2 text-[11px] text-red-200 space-y-1" style={{ maxHeight: 140, overflowY: 'auto' }}>
+                {planErrors.map((e, i) => (
+                  <div key={i}>• {e.message}{e.path ? ` (${e.path})` : ''}</div>
+                ))}
+              </div>
+            )}
+            {(planProgram || planProgramHigh) && (
+              <div>
+                <div className="flex items-center justify-between text-[10px] text-gray-400 mb-1">
+                  <SectionLabel label="Program" hint={programView === 'final' ? 'Expanded DSL' : 'High-level plan'} />
+                  <div className="flex gap-1">
+                    <button className={`px-1 py-[1px] rounded ${programView==='final'?'bg-dji-blue text-white':'bg-gray-800 text-gray-300'}`} onClick={()=>setProgramView('final')}>Final</button>
+                    <button className={`px-1 py-[1px] rounded ${programView==='high'?'bg-dji-blue text-white':'bg-gray-800 text-gray-300'}`} onClick={()=>setProgramView('high')}>High-level</button>
+                  </div>
+                </div>
+                <div ref={programRef} className="bg-gray-900/60 border border-gray-800/80 rounded p-2 text-[10px] font-mono text-gray-200" style={{ height: 170, overflowY: 'auto', resize: 'vertical' as any }}>
+                  <pre className="whitespace-pre-wrap leading-tight">{safeStringify(programView==='final'? planProgram : planProgramHigh)}</pre>
+                </div>
+              </div>
+            )}
+            {planSteps && planSteps.length > 0 && (
+              <div>
+                <SectionLabel label="Plan preview" hint={`${planSteps.length} tool${planSteps.length===1?'':'s'}`} />
+                <div ref={planRef} className="mt-1 bg-gray-900/50 border border-gray-800/80 rounded p-2 text-[10px] text-gray-200" style={{ height: 120, overflowY: 'auto', resize: 'vertical' as any }}>
+                  {planSteps.map((s, i) => (
+                    <div key={i} className="whitespace-nowrap overflow-hidden text-ellipsis">
+                      {i+1}. {String(s.tool)} {formatArgs(s.args)}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </CollapsibleSection>
+
+          <CollapsibleSection
+            title="Execution"
+            storageKey="agent.section.execution"
+            summary={executionSummary}
+          >
+            <SectionLabel label="Command ribbon" hint="Most recent steps" />
+            <div className="flex flex-wrap gap-1 mb-2">
+              {timelineChips.length ? timelineChips : <span className="text-[10px] text-gray-500">No commands executed yet.</span>}
             </div>
-          ))}
+
+            <SectionLabel label="Flight timeline" hint="Last 6 flight primitives" />
+            <div className="space-y-2 mb-2">
+              {flightEvents.length === 0 && (
+                <div className="text-[11px] text-gray-500">No flight actions in this run.</div>
+              )}
+              {flightEvents.map((event) => {
+                const display = getToolDisplay(event.tool);
+                return (
+                  <div key={event.key} className="flex items-start gap-2 text-[11px]">
+                    <span className="w-6 h-6 flex items-center justify-center rounded-full bg-gray-800/70 border border-gray-700/60 text-sm">
+                      {display.icon ?? '✦'}
+                    </span>
+                    <div className="flex-1">
+                      <div className="text-gray-200">{display.label}</div>
+                      <div className="text-[10px] text-gray-500">{event.state === 'done' ? 'Completed' : event.state === 'error' ? 'Error' : 'Running'}{event.ms != null ? ` · ${Math.round(event.ms)} ms` : ''}</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {result && (
+              <div className="text-[11px] text-gray-200 bg-gray-900/40 border border-gray-800/70 rounded p-2">{result}</div>
+            )}
+
+            {trace.length > 0 && (
+              <div>
+                <SectionLabel label="Trace" hint="Live interpreter output" />
+                <div ref={execRef} className="mt-1 bg-gray-900/60 border border-gray-800/80 rounded p-2 text-[10px] font-mono" style={{ height: 200, overflowY: 'auto', resize: 'vertical' as any }}>
+                  {trace.map((t, i) => (
+                    <div key={i} className={t.kind==='tool'? 'text-blue-300' : t.kind==='var'? 'text-yellow-300' : t.kind==='error'? 'text-red-300' : t.kind==='warn'? 'text-orange-300' : 'text-gray-300'}>
+                      {t.text}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </CollapsibleSection>
+
+          <CollapsibleSection
+            title="Console Log"
+            storageKey="agent.section.logs"
+            summary={logSummary}
+          >
+            <div className="bg-gray-900/45 border border-gray-800/70 rounded p-2 text-[10px] font-mono text-gray-300" style={{ maxHeight: 220, overflowY: 'auto' }}>
+              {logLines.length === 0 ? <div className="text-gray-500">No log messages yet.</div> : null}
+              {logLines.map((line, index) => (
+                <div key={index}>{line}</div>
+              ))}
+            </div>
+          </CollapsibleSection>
+
+          <CollapsibleSection
+            title="Help & Examples"
+            storageKey="agent.section.help"
+            summary={`${EXAMPLE_PROMPTS.length} example${EXAMPLE_PROMPTS.length === 1 ? '' : 's'}`}
+            defaultOpen={false}
+          >
+            <div className="space-y-2 text-[11px] text-gray-300">
+              {EXAMPLE_PROMPTS.map((item, idx) => (
+                <div key={idx} className="bg-gray-900/40 border border-gray-800/70 rounded p-2">
+                  <div className="font-semibold text-gray-100 mb-1">{item.title}</div>
+                  <div className="font-mono text-[10px] text-dji-blue break-words">{item.prompt}</div>
+                  {item.note ? <div className="mt-1 text-[10px] text-gray-500">{item.note}</div> : null}
+                </div>
+              ))}
+              <div className="text-[10px] text-gray-500">Tip: update examples in `EXAMPLE_PROMPTS` when new primitives land.</div>
+            </div>
+          </CollapsibleSection>
         </div>
-      )}
-
-      {result && (
-        <div className="mt-2 text-xs text-gray-200 select-text">{result}</div>
-      )}
-
-      <div className="mt-2 h-[calc(100%-90px)] overflow-y-auto bg-gray-900/40 rounded p-1 text-[10px] font-mono text-gray-400 select-text">
-        {logLines.map((l, i) => (
-          <div key={i}>{l}</div>
-        ))}
       </div>
     </div>
   );
 };
+
+function getToolDisplay(tool: string) {
+  if (TOOL_DISPLAY[tool]) return TOOL_DISPLAY[tool];
+  return {
+    label: tool.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+    category: 'mission',
+    icon: '⚙️',
+  } as const;
+}
 
 function formatArgs(args: any): string {
   try {

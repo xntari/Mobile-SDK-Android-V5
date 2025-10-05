@@ -1,4 +1,294 @@
 import { analyzeDetect, Detection } from './visionClient';
+import { bridgeManager } from '../bridgeManager';
+import { missionPlannerStore } from '../state/missionPlanner';
+import { addMetersToLatLon, bearingOffsetToMeters, normalizeHeadingDegrees } from '../utils/geo';
+
+const MIN_HORIZONTAL_SEPARATION_M = 1.0;
+const MIN_VERTICAL_SEPARATION_M = 0.6;
+const TAKEOFF_LIFT_THRESHOLD_M = 1.0;
+const SAFE_MIN_COMMAND_AGL_M = 1.8;
+const ALTITUDE_SETTLE_MARGIN_M = 0.4;
+
+type RelativeMovePlan =
+  | { kind: 'heading'; axis: 'forward' | 'backward' | 'left' | 'right'; distance: number }
+  | { kind: 'vertical'; delta: number }
+  | { kind: 'absolute'; north: number; east: number };
+
+interface NavigationSnapshot {
+  latitude: number;
+  longitude: number;
+  aboveTakeoff: number;
+  takeoffAltitude: number | null;
+  heading: number | null;
+  altitude: number | null;
+}
+
+interface RelativeFlyToExtras {
+  max_speed?: any;
+  security_takeoff_height?: any;
+  reason?: any;
+}
+
+function requireNavSnapshot(telemetryOverride?: any): NavigationSnapshot {
+  const telemetry = telemetryOverride ?? getTelemetrySnapshot();
+  if (!telemetry) {
+    throw new Error('Navigation snapshot unavailable');
+  }
+  const latitude = Number(telemetry?.location?.latitude);
+  const longitude = Number(telemetry?.location?.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    throw new Error('Navigation snapshot missing GPS position');
+  }
+  const heading = typeof telemetry?.heading === 'number'
+    ? telemetry.heading
+    : (typeof telemetry?.compass_heading === 'number' ? telemetry.compass_heading : null);
+  const altitude = typeof telemetry?.altitude === 'number'
+    ? telemetry.altitude
+    : (typeof telemetry?.location?.altitude === 'number' ? telemetry.location.altitude : null);
+  const aboveTakeoff = getAltitudeAboveTakeoff(telemetry);
+  const takeoffAltitude = typeof telemetry?.takeoff_altitude === 'number'
+    ? telemetry.takeoff_altitude
+    : null;
+  return {
+    latitude,
+    longitude,
+    aboveTakeoff,
+    takeoffAltitude,
+    heading,
+    altitude,
+  };
+}
+
+function clampRelativeAltitude(height: number | null | undefined, fallback: number): number {
+  if (height == null || Number.isNaN(Number(height))) {
+    return Math.max(SAFE_MIN_COMMAND_AGL_M, fallback);
+  }
+  const value = Number(height);
+  if (value <= 0) return 0;
+  if (value < SAFE_MIN_COMMAND_AGL_M) return SAFE_MIN_COMMAND_AGL_M;
+  return value;
+}
+
+function applyRelativeFlyToExtras(payload: Record<string, any>, extras?: RelativeFlyToExtras) {
+  if (!extras) return;
+  if (extras.max_speed !== undefined) {
+    const maxSpeed = Number(extras.max_speed);
+    if (Number.isFinite(maxSpeed)) {
+      payload.max_speed = Math.max(1, Math.min(15, maxSpeed));
+    }
+  }
+  if (extras.security_takeoff_height !== undefined) {
+    const sec = Number(extras.security_takeoff_height);
+    if (Number.isFinite(sec)) {
+      payload.security_takeoff_height = Math.max(0, Math.min(120, sec));
+    }
+  }
+  if (typeof extras.reason === 'string' && extras.reason.trim()) {
+    payload.reason = extras.reason.trim();
+  }
+}
+
+async function ensureAirborne(minMeters: number, opts: OrchestratorOptions, log: (l: string) => void) {
+  const telemetry = getTelemetrySnapshot();
+  const current = getAltitudeAboveTakeoff(telemetry);
+  if (current >= minMeters) {
+    return telemetry;
+  }
+  await sendFlightCommand('takeoff', undefined, opts);
+  const reached = await waitForAltitude(minMeters, 20000, opts, log);
+  const updated = getTelemetrySnapshot();
+  if (!reached) {
+    throw new Error(`Takeoff did not reach ${minMeters.toFixed(1)} m`);
+  }
+  return updated ?? telemetry;
+}
+
+function stageRelativeTarget(nav: NavigationSnapshot, latitude: number, longitude: number, targetAGL: number) {
+  const absolute = nav.takeoffAltitude != null
+    ? nav.takeoffAltitude + targetAGL
+    : (nav.altitude != null ? nav.altitude - nav.aboveTakeoff + targetAGL : null);
+  stageAgentTarget(latitude, longitude, absolute ?? null);
+}
+
+async function dispatchRelativeFlyTo(
+  params: {
+    nav?: NavigationSnapshot;
+    latitude?: number;
+    longitude?: number;
+    targetAGL: number;
+    extras?: RelativeFlyToExtras;
+    opts: OrchestratorOptions;
+    log: (l: string) => void;
+    waitForAltitude?: boolean;
+    timeoutMs?: number;
+  }
+) {
+  const nav = params.nav ?? requireNavSnapshot();
+  const latitude = params.latitude ?? nav.latitude;
+  const longitude = params.longitude ?? nav.longitude;
+  const targetAGL = clampRelativeAltitude(params.targetAGL, nav.aboveTakeoff);
+  const payload: Record<string, any> = {
+    mode: 'set_height',
+    target_location: {
+      latitude,
+      longitude,
+      altitude_reference: 'relative_to_takeoff',
+      altitude: targetAGL,
+    },
+    fly_to_height: Math.max(1, Math.round(Math.max(targetAGL, 0))),
+  };
+  applyRelativeFlyToExtras(payload, params.extras);
+  stageRelativeTarget(nav, latitude, longitude, targetAGL);
+  await sendFlightCommand('fly_to_prepare', payload, params.opts);
+  if (params.waitForAltitude) {
+    const settleTarget = Math.max(0.5, targetAGL - ALTITUDE_SETTLE_MARGIN_M);
+    await waitForAltitude(settleTarget, params.timeoutMs ?? 30000, params.opts, params.log);
+  }
+  return { targetAGL };
+}
+function normalizeRelativeMoveAxis(axisInput: any, distanceInput: any): RelativeMovePlan | null {
+  const rawAxis = typeof axisInput === 'string' ? axisInput.trim().toLowerCase() : '';
+  const baseDistance = Number(distanceInput);
+  if (!rawAxis || !Number.isFinite(baseDistance)) return null;
+  const absDistance = Math.abs(baseDistance);
+  const signPrefix = rawAxis.startsWith('-') ? -1 : 1;
+  const axis = rawAxis.replace(/^[+\-]/, '');
+
+  const headingMap: Record<string, 'forward' | 'backward' | 'left' | 'right'> = {
+    forward: 'forward', forwards: 'forward', fwd: 'forward', front: 'forward', ahead: 'forward', '+x': 'forward', 'x': 'forward',
+    backward: 'backward', backwards: 'backward', back: 'backward', reverse: 'backward', '-x': 'backward',
+    left: 'left', port: 'left', '-y': 'left',
+    right: 'right', starboard: 'right', '+y': 'right', 'y': 'right',
+  };
+
+  if (headingMap[axis]) {
+    const canonical = headingMap[axis];
+    const signedDistance = canonical === 'forward' || canonical === 'right'
+      ? absDistance * signPrefix
+      : absDistance * (signPrefix === -1 ? 1 : (canonical === 'backward' ? 1 : 1));
+    const distance = Math.abs(signedDistance);
+    const finalAxis = (canonical === 'forward' && signPrefix === -1) ? 'backward'
+      : (canonical === 'backward' && signPrefix === -1) ? 'forward'
+      : (canonical === 'right' && signPrefix === -1) ? 'left'
+      : (canonical === 'left' && signPrefix === -1) ? 'right'
+      : canonical;
+    return { kind: 'heading', axis: finalAxis, distance };
+  }
+
+  const verticalSet = new Set(['vertical', 'up', 'upward', 'upwards', 'ascend', 'z']);
+  const verticalDownSet = new Set(['down', 'downward', 'descend', '-z']);
+  if (verticalSet.has(axis) || verticalDownSet.has(axis)) {
+    const direction = verticalDownSet.has(axis) || rawAxis.startsWith('-') ? -1 : 1;
+    return { kind: 'vertical', delta: absDistance * direction };
+  }
+
+  const absoluteMap: Record<string, { north: number; east: number }> = {
+    north: { north: absDistance, east: 0 }, n: { north: absDistance, east: 0 },
+    south: { north: -absDistance, east: 0 }, s: { north: -absDistance, east: 0 },
+    east: { north: 0, east: absDistance }, e: { north: 0, east: absDistance },
+    west: { north: 0, east: -absDistance }, w: { north: 0, east: -absDistance },
+  };
+  if (absoluteMap[axis]) {
+    const { north, east } = absoluteMap[axis];
+    return { kind: 'absolute', north, east };
+  }
+
+  return null;
+}
+
+function getTelemetrySnapshot() {
+  try {
+    return bridgeManager.getState().bridgeData.telemetry ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function getPreflightSnapshot() {
+  try {
+    return bridgeManager.getState().bridgeData.preflight ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function haversineMeters(a: { latitude: number; longitude: number }, b: { latitude: number; longitude: number }) {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const R = 6378137;
+  const dLat = toRad(b.latitude - a.latitude);
+  const dLon = toRad(b.longitude - a.longitude);
+  const lat1 = toRad(a.latitude);
+  const lat2 = toRad(b.latitude);
+  const sa = Math.sin(dLat / 2);
+  const sb = Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(
+    Math.sqrt(sa * sa + Math.cos(lat1) * Math.cos(lat2) * sb * sb),
+    Math.sqrt(1 - (sa * sa + Math.cos(lat1) * Math.cos(lat2) * sb * sb)),
+  );
+  return R * c;
+}
+
+async function sendFlightCommand(action: string, params: Record<string, any> | undefined, opts: OrchestratorOptions) {
+  const payload: any = { type: 'flight_command', data: { action } };
+  if (params && Object.keys(params).length) {
+    payload.data.params = params;
+  }
+  const response = await opts.sendBridge(payload);
+  if (response && response.success === false) {
+    throw new Error(response.error || response.error_message || `${action} rejected`);
+  }
+  return response ?? { success: true };
+}
+
+function getAltitudeAboveTakeoff(telemetry: any | null): number {
+  if (!telemetry) return 0;
+  if (typeof telemetry.altitude_above_takeoff === 'number') {
+    return telemetry.altitude_above_takeoff;
+  }
+  if (typeof telemetry.altitude === 'number' && typeof telemetry.takeoff_altitude === 'number') {
+    return telemetry.altitude - telemetry.takeoff_altitude;
+  }
+  return typeof telemetry.altitude === 'number' ? telemetry.altitude : 0;
+}
+
+async function waitForAltitude(minMeters: number, timeoutMs: number, opts: OrchestratorOptions, log: (l: string) => void) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const telemetry = getTelemetrySnapshot();
+    const current = getAltitudeAboveTakeoff(telemetry);
+    if (current >= minMeters) {
+      return true;
+    }
+    if (opts.isCancelled?.()) return false;
+    await sleep(400);
+  }
+  log(`waitForAltitude timeout (target ${minMeters} m)`);
+  return false;
+}
+
+async function waitForLanded(timeoutMs: number, opts: OrchestratorOptions, log: (l: string) => void) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const telemetry = getTelemetrySnapshot();
+    const alt = getAltitudeAboveTakeoff(telemetry);
+    const motorsOff = telemetry?.motors_on === false;
+    if (alt <= 0.6 || motorsOff) {
+      return true;
+    }
+    if (opts.isCancelled?.()) return false;
+    await sleep(500);
+  }
+  log('waitForLanded timeout');
+  return false;
+}
+
+function stageAgentTarget(latitude: number, longitude: number, altitude: number | null) {
+  try {
+    missionPlannerStore.setManualTarget({ latitude, longitude, altitude, source: 'manual' });
+  } catch {
+    // ignored
+  }
+}
 
 export interface OrchestratorOptions {
   getSnapshot: () => Promise<string>; // returns base64 (data URL ok)
@@ -325,6 +615,83 @@ async function callTool(tool: string, args: any, ctx: any, opts: OrchestratorOpt
     case 'respond': {
       opts.onResult?.({ text: String(args?.text||'') });
       return { ok: true };
+    }
+    case 'mission_self_check': {
+      const preflight = getPreflightSnapshot();
+      if (!preflight) {
+        const fallback = { status: 'blocked', issues: [{ id: 'preflight_unavailable', severity: 'warn', message: 'No preflight snapshot available.' }] };
+        opts.onTrace?.('self_check: no preflight snapshot', 'warn');
+        return fallback;
+      }
+      const diagnostics = Array.isArray(preflight.diagnostics) ? preflight.diagnostics : [];
+      const issues = diagnostics.map((diag, index) => ({
+        id: diag.code ?? diag.title ?? `diag_${index}`,
+        severity: (diag.level ?? 'warn').toLowerCase().includes('error') ? 'error' : (diag.level ?? 'info'),
+        message: diag.description ?? diag.title ?? 'Unknown diagnostic',
+      }));
+      const hasError = issues.some((entry) => (entry.severity ?? '').toLowerCase().includes('error'));
+      opts.onTrace?.(`self_check: ${hasError ? 'blocked' : 'ready'} (${issues.length} issue${issues.length === 1 ? '' : 's'})`, hasError ? 'warn' : 'info');
+      return { status: hasError ? 'blocked' : 'ready', issues };
+    }
+    case 'flight_takeoff': {
+      const telemetryBefore = getTelemetrySnapshot();
+      const altitudeAboveTakeoff = getAltitudeAboveTakeoff(telemetryBefore);
+      if (altitudeAboveTakeoff > TAKEOFF_LIFT_THRESHOLD_M) {
+        log(`Skipping takeoff: already airborne (~${altitudeAboveTakeoff.toFixed(1)} m AGL)`);
+      }
+
+      const telemetryAfterTakeoff = await ensureAirborne(TAKEOFF_LIFT_THRESHOLD_M, opts, log);
+      const nav = requireNavSnapshot(telemetryAfterTakeoff ?? getTelemetrySnapshot());
+
+      const requestedHeightRaw = args?.altitude_target_m;
+      const requestedHeight = Number.isFinite(Number(requestedHeightRaw)) ? Number(requestedHeightRaw) : null;
+      if (requestedHeight != null) {
+        const targetAGL = Math.max(0, requestedHeight);
+        if (targetAGL > nav.aboveTakeoff + ALTITUDE_SETTLE_MARGIN_M) {
+          await dispatchRelativeFlyTo({
+            nav,
+            targetAGL,
+            extras: { reason: 'agent_takeoff_climb' },
+            opts,
+            log,
+            waitForAltitude: true,
+            timeoutMs: 25000,
+          });
+        }
+      }
+
+      return { ok: true, altitude_target: requestedHeight ?? undefined };
+    }
+    case 'flight_land': {
+      const mode = String(args?.mode || 'auto').toLowerCase();
+      if (mode === 'force') {
+        await sendFlightCommand('force_land_start', undefined, opts);
+        await waitForLanded(15000, opts, log);
+        return { ok: true, mode: 'force' };
+      }
+      await sendFlightCommand('land', undefined, opts);
+      const landed = await waitForLanded(20000, opts, log);
+      if (!landed) {
+        log('Landing incomplete, escalating to force_land');
+        await sendFlightCommand('force_land_start', undefined, opts);
+        await waitForLanded(15000, opts, log);
+        return { ok: true, mode: 'force' };
+      }
+      return { ok: true, mode: 'auto' };
+    }
+    case 'flight_rth': {
+      const action = String(args?.action || '').toLowerCase();
+      if (action !== 'start' && action !== 'stop') {
+        throw new Error('flight_rth.action must be "start" or "stop"');
+      }
+      await sendFlightCommand(action === 'start' ? 'return_home_start' : 'return_home_stop', undefined, opts);
+      return { ok: true };
+    }
+    case 'mission_fly_to': {
+      throw new Error('mission_fly_to disabled during flight rework');
+    }
+    case 'mission_relative_move': {
+      throw new Error('mission_relative_move disabled during flight rework');
     }
     default:
       log(`unknown tool: ${tool}`);

@@ -1079,8 +1079,11 @@ class FlightCommandHandler(
                     Log.d(TAG, "Converting waypoint altitude from EGM96 to WGS84: $altitude -> $converted at $latitude,$longitude")
                     altitude = converted
                 }
+                altitudeReference.contains("relative") -> {
+                    // Keep relative altitude as-is; conversion happens in executor using takeoff ASL.
+                }
                 else -> {
-                    // Leave other reference modes (absolute_wgs84, relative_to_takeoff, inherit, etc.) untouched for now
+                    // Leave other reference modes untouched.
                 }
             }
         }
@@ -1121,6 +1124,7 @@ class FlightCommandHandler(
             latitude = latitude,
             longitude = longitude,
             altitude = altitude,
+            altitudeReference = altitudeReference,
             kind = kind,
             gimbalPitch = gimbalPitch,
             turnMode = turnMode,

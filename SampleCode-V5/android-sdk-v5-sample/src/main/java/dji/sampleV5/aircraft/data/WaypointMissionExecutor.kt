@@ -178,6 +178,7 @@ class WaypointMissionExecutor(
         val latitude: Double,
         val longitude: Double,
         val altitude: Double?,
+        val altitudeReference: String? = null,
         val kind: String? = null,
         val gimbalPitch: Double? = null,
         val turnMode: String? = null,
@@ -609,8 +610,15 @@ class WaypointMissionExecutor(
                     return@forEachIndexed
                 }
 
-                val altitudeAsl = point.altitude
+                val isRelative = point.altitudeReference?.contains("relative", ignoreCase = true) == true
+                val altitudeAsl = when {
+                    isRelative && point.altitude != null && takeoffAsl != null -> takeoffAsl + point.altitude
+                    isRelative -> point.altitude
+                    else -> point.altitude
+                }
+
                 val baseRelative = when {
+                    isRelative && point.altitude != null -> point.altitude
                     altitudeAsl != null && takeoffAsl != null -> altitudeAsl - takeoffAsl
                     altitudeAsl != null -> altitudeAsl
                     else -> currentHeight
@@ -644,6 +652,7 @@ class WaypointMissionExecutor(
                         gimbalStrategy = point.gimbalStrategy
                     )
                 )
+                Log.d(TAG, "Plan point $index -> executeHeight=$executeHeight, altitudeAsl=$altitudeAsl, takeoffAsl=$takeoffAsl, securityFloor=$securityFloor")
             }
         }
 
@@ -716,6 +725,7 @@ class WaypointMissionExecutor(
             currentHeight = currentHeight,
             manualHeightOverride = manualHeightOverride
         )
+        Log.d(TAG, "Target relative height computed: $targetRelativeHeight (manualOverride=$manualHeightOverride, flyToHeight=${request.flyToHeight}, targetAltitudeAsl=${request.targetAltitudeAsl}, takeoffAsl=$takeoffAsl, currentHeight=$currentHeight)")
 
         val finalTargetHeight = planResolved.lastOrNull()?.executeHeight ?: targetRelativeHeight
 
