@@ -17,9 +17,10 @@ Run:
   # http://127.0.0.1:9002/plan
 """
 import json
+import math
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,6 +43,7 @@ def health():
 class PlanRequest(BaseModel):
     instruction: str
     status: Dict[str, Any] | None = None
+    context: Dict[str, Any] | None = None
 
 
 # Formal DSL grammar and tools included in the LLM prompt
@@ -75,6 +77,7 @@ ALLOWED_REL_MOVE_AXES = {
     'left', 'right', 'port', 'starboard',
     'up', 'down', 'vertical', 'ascend', 'descend', 'upward', 'upwards', 'downward',
     'north', 'south', 'east', 'west', 'n', 's', 'e', 'w',
+    'horizontal', 'horiz',
     'x', '+x', '-x', 'y', '+y', '-y', 'z', '+z', '-z'
 }
 
@@ -108,7 +111,9 @@ Flight & mission primitives
 - flight_rth { action: 'start' | 'stop' }
 - mission_fly_to { target:{latitude,longitude,altitude?,altitude_reference?}, mode?, fly_to_height?, max_speed?, security_takeoff_height?, reason? } // altitude_reference must be 'relative_to_takeoff'; enforce ≥1 m horizontal separation
 - mission_relative_move { axis, distance_m, altitude_delta_m? }
-- mission_waypoint_plan { plan:Waypoint[] (≤50 entries), finish_action?, orbit_mode?, poi?, execute? }
+- mission_waypoint_plan { plan:Waypoint[] (≤50 entries), finish_action?, orbit_mode?, poi?, execute?, anchor? }
+  Waypoint fields: latitude/longitude (absolute) or offset:{north_m,east_m,forward_m,left_m,…} relative to anchor ('current' by default).
+  altitude_offset_m adjusts relative altitude when altitude is omitted. Planner may set execute:false to stage for operator review.
 - mission_scan { area, altitude_profile, line_spacing_m, speed_mps?, camera_profile? }
 - mission_patrol { perimeter, loops?, dwell_s?, trigger? }
 - object_memory_store { image?, label?, telemetry?, force_new_cluster? }
@@ -173,7 +178,248 @@ def _expand_macros(program: Dict[str, Any]) -> Dict[str, Any]:
     return program
 
 
-def _normalize_program(program: Dict[str, Any]) -> Dict[str, Any]:
+def _coerce_float(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        text = value.strip()
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    return None
+
+
+def _resolve_anchor_coordinate(
+    anchor_spec: Any,
+    context: Dict[str, Any] | None,
+) -> Tuple[float | None, float | None, float | None]:
+    """Resolve anchor specification into latitude/longitude (degrees) and altitude (relative to takeoff)."""
+
+    telemetry = (context or {}).get('telemetry') or {}
+    map_summary = (context or {}).get('map') or {}
+    mission_summary = (context or {}).get('mission') or {}
+
+    def from_dict(candidate: Dict[str, Any] | None) -> Tuple[float | None, float | None, float | None]:
+        if not isinstance(candidate, dict):
+            return (None, None, None)
+        lat = candidate.get('latitude')
+        lon = candidate.get('longitude')
+        alt = candidate.get('altitude')
+        return (
+            lat if isinstance(lat, (int, float)) else None,
+            lon if isinstance(lon, (int, float)) else None,
+            alt if isinstance(alt, (int, float)) else None,
+        )
+
+    if isinstance(anchor_spec, dict):
+        lat, lon, alt = from_dict(anchor_spec)
+        if lat is not None and lon is not None:
+            return lat, lon, alt
+
+    anchor_key = None
+    if isinstance(anchor_spec, str) and anchor_spec.strip():
+        anchor_key = anchor_spec.strip().lower()
+
+    if anchor_key in (None, '', 'current', 'aircraft', 'drone'):
+        lat = telemetry.get('latitude')
+        lon = telemetry.get('longitude')
+        alt = telemetry.get('altitude_above_takeoff_m')
+        return (
+            lat if isinstance(lat, (int, float)) else None,
+            lon if isinstance(lon, (int, float)) else None,
+            alt if isinstance(alt, (int, float)) else None,
+        )
+
+    if anchor_key in ('manual_target', 'staged_target'):
+        lat, lon, alt = from_dict(map_summary.get('manual_target'))
+        if lat is not None and lon is not None:
+            return lat, lon, alt
+
+    if anchor_key in ('poi', 'poi_target'):
+        lat, lon, alt = from_dict(mission_summary.get('poi_target'))
+        if lat is not None and lon is not None:
+            return lat, lon, alt
+
+    if anchor_key in ('home', 'home_point'):
+        home = telemetry.get('home') or {}
+        lat = home.get('latitude')
+        lon = home.get('longitude')
+        alt = home.get('altitude')
+        return (
+            lat if isinstance(lat, (int, float)) else None,
+            lon if isinstance(lon, (int, float)) else None,
+            alt if isinstance(alt, (int, float)) else None,
+        )
+
+    return (None, None, None)
+
+
+def _apply_mission_fly_to_defaults(
+    args: Dict[str, Any],
+    context: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    target = dict(args.get('target') or {})
+    if not target:
+        return args
+
+    # Allow shorthand strings
+    anchor_hint = target.pop('anchor', None)
+
+    def resolve_coord(value: Any) -> Tuple[float | None, bool]:
+        if isinstance(value, str):
+            key = value.strip().lower()
+            if key in ('current', 'here', 'aircraft', 'drone'):
+                return (None, True)
+            if key in ('manual_target', 'staged_target', 'poi', 'poi_target', 'home', 'home_point'):
+                return (None, True)
+        coerced = _coerce_float(value)
+        return (coerced, False)
+
+    lat_value, lat_requested_anchor = resolve_coord(target.get('latitude'))
+    lon_value, lon_requested_anchor = resolve_coord(target.get('longitude'))
+
+    anchor_spec = anchor_hint
+    if lat_requested_anchor or lon_requested_anchor:
+        anchor_spec = anchor_hint or target.get('latitude') or target.get('longitude')
+
+    if anchor_spec is None and lat_value is None and lon_value is None:
+        anchor_spec = 'current'
+
+    anchor_lat = anchor_lon = anchor_alt = None
+    if anchor_spec is not None:
+        anchor_lat, anchor_lon, anchor_alt = _resolve_anchor_coordinate(anchor_spec, context)
+
+    if lat_value is None and anchor_lat is not None:
+        lat_value = float(anchor_lat)
+    if lon_value is None and anchor_lon is not None:
+        lon_value = float(anchor_lon)
+
+    if lat_value is not None:
+        target['latitude'] = round(lat_value, 8)
+    if lon_value is not None:
+        target['longitude'] = round(lon_value, 8)
+
+    alt_value = target.get('altitude')
+    if isinstance(alt_value, str):
+        coerced_alt = _coerce_float(alt_value)
+        if coerced_alt is not None:
+            target['altitude'] = coerced_alt
+
+    if 'altitude_reference' not in target and target.get('altitude') is not None:
+        target['altitude_reference'] = 'relative_to_takeoff'
+
+    args['target'] = target
+    return args
+
+
+def _extract_offsets(
+    waypoint: Dict[str, Any],
+    heading_deg: float | None,
+) -> Tuple[float, float, Dict[str, Any]]:
+    """Return (north_m, east_m, cleaned_waypoint)."""
+
+    def pop_numeric(d: Dict[str, Any], key: str) -> float:
+        value = d.pop(key, None)
+        if isinstance(value, (int, float)):
+            return float(value)
+        return 0.0
+
+    cleaned = dict(waypoint)
+    offset = cleaned.pop('offset', None)
+    temp: Dict[str, Any] = {}
+    if isinstance(offset, dict):
+        temp = dict(offset)
+
+    north = 0.0
+    east = 0.0
+
+    # Absolute cardinal entries (top-level or inside offset)
+    for source in (cleaned, temp):
+        north += pop_numeric(source, 'north_m')
+        north -= pop_numeric(source, 'south_m')
+        east += pop_numeric(source, 'east_m')
+        east -= pop_numeric(source, 'west_m')
+
+    heading = math.radians(heading_deg or 0.0)
+
+    def apply_body_axes(source: Dict[str, Any]) -> None:
+        nonlocal north, east
+        forward = pop_numeric(source, 'forward_m')
+        backward = pop_numeric(source, 'backward_m')
+        right = pop_numeric(source, 'right_m')
+        left = pop_numeric(source, 'left_m')
+
+        if forward or backward:
+            delta = forward - backward
+            north += delta * math.cos(heading)
+            east += delta * math.sin(heading)
+        if right or left:
+            delta = right - left
+            # Right vector is heading + 90 degrees
+            north += delta * -math.sin(heading)
+            east += delta * math.cos(heading)
+
+    apply_body_axes(cleaned)
+    apply_body_axes(temp)
+
+    # Remove processed offset dict remnants
+    for key in list(cleaned.keys()):
+        if key.endswith('_m') and key not in ('altitude', 'altitude_reference'):  # ensure stray keys removed
+            if key not in ('altitude_offset_m',):
+                cleaned.pop(key, None)
+
+    return north, east, cleaned
+
+
+def _apply_offsets_to_plan(
+    args: Dict[str, Any],
+    context: Dict[str, Any] | None,
+) -> None:
+    plan = args.get('plan')
+    if not isinstance(plan, list) or not plan:
+        return
+
+    anchor_spec = args.pop('anchor', None)
+    anchor_lat, anchor_lon, anchor_alt = _resolve_anchor_coordinate(anchor_spec, context)
+    telemetry = (context or {}).get('telemetry') or {}
+    heading = telemetry.get('heading_deg')
+
+    if not isinstance(anchor_lat, (int, float)) or not isinstance(anchor_lon, (int, float)):
+        return  # validation will flag missing coordinates later
+
+    lat_rad = math.radians(anchor_lat)
+    meters_per_deg_lat = 111_320.0
+    meters_per_deg_lon = math.cos(lat_rad) * 111_320.0 if abs(math.cos(lat_rad)) > 1e-6 else 1e-6
+
+    for idx, entry in enumerate(plan):
+        if not isinstance(entry, dict):
+            continue
+        north_m, east_m, cleaned = _extract_offsets(entry, heading)
+        lat = cleaned.get('latitude')
+        lon = cleaned.get('longitude')
+
+        if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+            delta_lat_deg = north_m / meters_per_deg_lat if meters_per_deg_lat else 0.0
+            delta_lon_deg = east_m / meters_per_deg_lon if meters_per_deg_lon else 0.0
+            cleaned['latitude'] = round(anchor_lat + delta_lat_deg, 8)
+            cleaned['longitude'] = round(anchor_lon + delta_lon_deg, 8)
+
+        altitude = cleaned.get('altitude')
+        if not isinstance(altitude, (int, float)):
+            alt_offset = cleaned.pop('altitude_offset_m', None)
+            if isinstance(alt_offset, (int, float)) and isinstance(anchor_alt, (int, float)):
+                altitude = float(anchor_alt) + float(alt_offset)
+                cleaned['altitude'] = altitude
+        if cleaned.get('altitude') is not None and 'altitude_reference' not in cleaned:
+            cleaned['altitude_reference'] = 'relative_to_takeoff'
+
+        plan[idx] = cleaned
+
+    args['plan'] = plan
+
+
+def _normalize_program(program: Dict[str, Any], context: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """Canonically normalise tool arguments without altering intent."""
 
     def canonicalize_nodes(nodes: List[Any]) -> List[Any]:
@@ -199,16 +445,14 @@ def _normalize_program(program: Dict[str, Any]) -> Dict[str, Any]:
             args = dict(node.get('args') or {})
 
             if tool == 'mission_fly_to':
+                if isinstance(args, dict):
+                    args = _apply_mission_fly_to_defaults(args, context)
                 target = dict(args.get('target') or {})
                 if target:
                     # Default altitude reference to relative if altitude supplied but ref omitted
                     if 'altitude_reference' not in target and target.get('altitude') is not None:
                         target['altitude_reference'] = 'relative_to_takeoff'
                     # Allow shorthand by letting planner omit lat/lon (executor fills from telemetry)
-                    if target.get('latitude') == 'current':
-                        target['latitude'] = None
-                    if target.get('longitude') == 'current':
-                        target['longitude'] = None
                     args['target'] = target
                 mode_value = str(args.get('mode') or '').strip().lower()
                 if mode_value not in ('set_height', 'smart_height'):
@@ -231,6 +475,8 @@ def _normalize_program(program: Dict[str, Any]) -> Dict[str, Any]:
                     'down': 'vertical',
                     'downward': 'vertical',
                     'descend': 'vertical',
+                    'horizontal': 'forward',
+                    'horiz': 'forward',
                 }
                 if axis in axis_aliases:
                     args['axis'] = axis_aliases[axis]
@@ -247,15 +493,41 @@ def _normalize_program(program: Dict[str, Any]) -> Dict[str, Any]:
                 normalised.append({'type': 'call', 'tool': tool, 'args': args})
                 continue
 
+            if tool == 'mission_waypoint_plan':
+                if isinstance(args, dict):
+                    _apply_offsets_to_plan(args, context)
+                    execute_flag = args.get('execute')
+                    if execute_flag is None:
+                        args['execute'] = False
+                normalised.append({'type': 'call', 'tool': tool, 'args': args})
+                continue
+
             normalised.append({'type': 'call', 'tool': tool, 'args': args})
 
         return normalised
 
-    program['body'] = canonicalize_nodes(program.get('body', []))
+    body = canonicalize_nodes(program.get('body', []))
+
+    try:
+        fly_idx = next((idx for idx, node in enumerate(body)
+                        if isinstance(node, dict) and node.get('type') == 'call' and node.get('tool') == 'mission_fly_to'), None)
+        plan_idx = next((idx for idx, node in enumerate(body)
+                         if isinstance(node, dict) and node.get('type') == 'call' and node.get('tool') == 'mission_waypoint_plan'), None)
+        if fly_idx is not None and plan_idx is not None and plan_idx > fly_idx:
+            plan_node = body.pop(plan_idx)
+            body.insert(fly_idx, plan_node)
+    except Exception:
+        pass
+
+    program['body'] = body
     return program
 
 
-def openai_program(instruction: str) -> Dict[str, Any]:
+def openai_program(
+    instruction: str,
+    context: Dict[str, Any] | None = None,
+    status: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     try:
         from openai import OpenAI  # type: ignore
     except Exception as e:
@@ -331,23 +603,74 @@ Response:
   {"type":"call","tool":"mission_fly_to","args":{"target":{"latitude":null,"longitude":null,"altitude":35,"altitude_reference":"relative_to_takeoff"},"mode":"set_height"}},
   {"type":"call","tool":"respond","args":{"text":"Ready"}}
 ]}}
+
+Example 9 – square waypoint mission around current position
+Instruction: fly a mission 50 meter square pattern centered here at 50 meters altitude
+Response:
+{"program": {"type":"program","body":[
+  {"type":"call","tool":"mission_fly_to","args":{"target":{"latitude":null,"longitude":null,"altitude":50,"altitude_reference":"relative_to_takeoff"},"mode":"set_height"}},
+  {"type":"call","tool":"mission_waypoint_plan","args":{
+    "anchor":"current",
+    "plan":[
+      {"offset":{"north_m":25,"east_m":25},"altitude":50},
+      {"offset":{"north_m":25,"east_m":-25},"altitude":50},
+      {"offset":{"north_m":-25,"east_m":-25},"altitude":50},
+      {"offset":{"north_m":-25,"east_m":25},"altitude":50}
+    ],
+    "finish_action":"return_to_launch",
+    "execute":false
+  }}
+]}}
 """
 
     print(f"{instruction=}")
-    user = (
-        f"Instruction: {instruction}\n\n"
-        f"{GRAMMAR_SPEC}\n"
-        "Waypoint-first guidelines: prefer mission_fly_to with altitude_reference 'relative_to_takeoff' for altitude or position changes. Only emit flight_takeoff {} when the operator explicitly requests a simple takeoff check. Omit latitude/longitude in mission_fly_to to remain at the current horizontal position. mission_relative_move expresses offsets relative to the aircraft heading (forward/back/left/right) or absolute cardinal directions (north/south/east/west) and 'vertical' for pure altitude changes.\n"
-        "Relative vs absolute altitude hints:\n"
-        "- Phrases such as 'ascend to', 'reach', 'drop to', 'go to', 'take off to' describe absolute targets → emit mission_fly_to with the requested altitude.\n"
-        "- Phrases such as 'ascend by', 'increase altitude by', 'go up another', 'descend by', 'drop altitude by' describe deltas → emit mission_relative_move with axis:'vertical' and a signed distance (negative for descent).\n"
-        "- Combine altitude and horizontal moves as separate calls so each step can be monitored individually.\n"
-        "Use macros when appropriate. Expand nothing yourself; macros will be expanded server-side.\n"
-        "Do not include prose or comments.\n"
-        "Respond with JSON only in the form {\"program\":{…}}.\n\n"
-        f"{PROMPT_EXAMPLES}\n"
-        "Now respond for the given Instruction above." 
-    )
+    context_json = "{}"
+    if context:
+        try:
+            context_json = json.dumps(context, indent=2, sort_keys=True, ensure_ascii=False)
+        except Exception:
+            context_json = json.dumps({"error": "context_dump_failed"})
+        if len(context_json) > 6000:
+            context_json = context_json[:6000] + "\n…(truncated)"
+
+    status_json = None
+    if status:
+        try:
+            status_json = json.dumps(status, indent=2, sort_keys=True, ensure_ascii=False)
+        except Exception:
+            status_json = json.dumps({"error": "status_dump_failed"})
+
+    user_parts = [
+        f"Instruction: {instruction}\n\n",
+        f"PlannerContext (JSON):\n{context_json}\n\n",
+    ]
+    if status_json:
+        user_parts.append(f"Status snapshot (JSON):\n{status_json}\n\n")
+    user_parts.extend([
+        f"{GRAMMAR_SPEC}\n",
+        "Waypoint-first guidelines: prefer mission_fly_to with altitude_reference 'relative_to_takeoff' for altitude or position changes. Only emit flight_takeoff {} when the operator explicitly requests a simple takeoff check. Omit latitude/longitude in mission_fly_to to remain at the current horizontal position. mission_relative_move expresses offsets relative to the aircraft heading (forward/back/left/right) or absolute cardinal directions (north/south/east/west) and 'vertical' for pure altitude changes.\n",
+        "Relative vs absolute altitude hints: \n",
+        "- Phrases such as 'ascend to', 'reach', 'drop to', 'go to', 'take off to' describe absolute targets → emit mission_fly_to with the requested altitude.\n",
+        "- Phrases such as 'ascend by', 'increase altitude by', 'go up another', 'descend by', 'drop altitude by' describe deltas → emit mission_relative_move with axis:'vertical' and a signed distance (negative for descent).\n",
+        "- Combine altitude and horizontal moves as separate calls so each step can be monitored individually.\n",
+        "mission_waypoint_plan guidance:\n",
+        "- Use anchor:'current' (default) or manual targets/POIs provided in context when staging patterns.\n",
+        "- Provide relative offsets via offset{north_m,east_m,forward_m,left_m,…} so the service can convert to earth coordinates precisely.\n",
+        "- Set execute:false (or omit) so the mission is staged for operator approval before launch.\n",
+        "PlannerContext guidance:\n",
+        "- context.telemetry.* reports current aircraft state; avoid redundant takeoff/climb commands when targets already satisfied.\n",
+        "- context.queue lists active/pending commands maintained by the orchestrator—do not re-issue entries already pending or in-flight.\n",
+        "- context.mission/map describe staged waypoints and manual targets; reuse them instead of guessing coordinates.\n",
+        "- context.vs_state.enabled=true means virtual stick is held by another owner; request disable before manual overrides.\n",
+        "If the prompt or context is insufficient, emit a clarification via respond { text:\"QUESTION\" } instead of guessing.\n",
+        "Use macros when appropriate. Expand nothing yourself; macros will be expanded server-side.\n",
+        "Do not include prose or comments.\n",
+        "Respond with JSON only in the form {\"program\":{…}}.\n\n",
+        f"{PROMPT_EXAMPLES}\n",
+        "Now respond for the given Instruction above.",
+    ])
+    user = ''.join(user_parts)
+
     try:
         resp = client.chat.completions.create(
             model=model,
@@ -438,13 +761,11 @@ def validate_program(program: Dict[str, Any]) -> List[Dict[str, Any]]:
                         if lon is not None:
                             if not isinstance(lon, (int, float)) or lon < -180 or lon > 180:
                                 errors.append({"message":"mission_fly_to.target.longitude must be within [-180,180]","path":p+".args.target.longitude"})
-                        if (lat is None) != (lon is None):
-                            errors.append({"message":"mission_fly_to target requires both latitude and longitude when specifying coordinates","path":p+".args.target"})
+                        if lat is None or lon is None:
+                            errors.append({"message":"mission_fly_to target requires latitude and longitude","path":p+".args.target"})
                         altitude_val = target.get('altitude')
                         if altitude_val is not None and not isinstance(altitude_val, (int, float)):
                             errors.append({"message":"mission_fly_to.target.altitude must be numeric or null","path":p+".args.target.altitude"})
-                        if lat is None and lon is None and altitude_val is None:
-                            errors.append({"message":"mission_fly_to.target must include coordinates or altitude","path":p+".args.target"})
                         ref = target.get('altitude_reference')
                         if ref is not None and str(ref).lower() not in ('relative_to_takeoff', ''):
                             errors.append({"message":"mission_fly_to.target.altitude_reference must be 'relative_to_takeoff'","path":p+".args.target.altitude_reference"})
@@ -558,13 +879,34 @@ def plan(req: PlanRequest):
         return {"errors": [{"message": "Planner unavailable: OPENAI_API_KEY not set"}]}
 
     # Ask LLM for a high-level program (may contain macros)
-    high_level = openai_program(req.instruction)
+    if req.context:
+        try:
+            context_dump = json.dumps(req.context, indent=2)
+            print("----context-----------")
+            print(context_dump[:800])
+            if len(context_dump) > 800:
+                print("… (context truncated)")
+            print("-------------------------")
+        except Exception as exc:
+            print(f"context print failed: {exc}")
+    if req.status:
+        try:
+            status_dump = json.dumps(req.status, indent=2)
+            print("----status------------")
+            print(status_dump[:400])
+            if len(status_dump) > 400:
+                print("… (status truncated)")
+            print("-------------------------")
+        except Exception as exc:
+            print(f"status print failed: {exc}")
+
+    high_level = openai_program(req.instruction, req.context, req.status)
     print("----high_level-----------")
     print(f"{high_level=}")
     print("-------------------------")
     # Expand macros server-side
     program = _expand_macros(json.loads(json.dumps(high_level)))  # deep copy
-    program = _normalize_program(program)
+    program = _normalize_program(program, req.context)
     print("---expanded   -----------")
     print(f"{program=}")
     print("-------------------------")
@@ -572,10 +914,19 @@ def plan(req: PlanRequest):
     # Validate strictly; if errors exist, surface them to the UI
     errors = validate_program(program)
     print(f"{errors=}")
-    if errors:
-        return {"errors": errors, "program": program, "high_level_program": high_level}
+    response: Dict[str, Any] = {
+        "high_level_program": high_level,
+    }
+    if req.context:
+        response["context_echo"] = req.context
 
-    return {"program": program, "high_level_program": high_level}
+    if errors:
+        response["errors"] = errors
+        response["program"] = program
+        return response
+
+    response["program"] = program
+    return response
 
 
 if __name__ == "__main__":

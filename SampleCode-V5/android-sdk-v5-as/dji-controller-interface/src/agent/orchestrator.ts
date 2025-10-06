@@ -1,13 +1,14 @@
 import { analyzeDetect, Detection } from './visionClient';
 import { bridgeManager } from '../bridgeManager';
 import { missionPlannerStore } from '../state/missionPlanner';
-import { agentTelemetryStore } from '../state/agentTelemetry';
 import { addMetersToLatLon, bearingOffsetToMeters, normalizeHeadingDegrees, EARTH_RADIUS_METERS } from '../utils/geo';
+import { collectPlannerContext } from './plannerContext';
+import type { PlannedMissionEntry, MissionEntryKind, OrbitMode, PoiTarget } from '../types/missionPlanner';
 
 const MIN_HORIZONTAL_SEPARATION_M = 1.0;
 const MIN_VERTICAL_SEPARATION_M = 0.6;
 const TAKEOFF_LIFT_THRESHOLD_M = 1.0;
-const SAFE_MIN_COMMAND_AGL_M = 1.8;
+const SAFE_MIN_COMMAND_AGL_M = 1.2;
 const ALTITUDE_SETTLE_MARGIN_M = 0.4;
 
 type RelativeMovePlan =
@@ -89,6 +90,122 @@ function applyRelativeFlyToExtras(payload: Record<string, any>, extras?: Relativ
   }
 }
 
+function normalizeMissionEntryKind(raw: any): MissionEntryKind {
+  const value = typeof raw === 'string' ? raw.toLowerCase() : 'waypoint';
+  if (value === 'orbit' || value === 'return_home' || value === 'land') {
+    return value;
+  }
+  return 'waypoint';
+}
+
+function normalizeOrbitMode(raw: any): OrbitMode {
+  const value = typeof raw === 'string' ? raw.toLowerCase() : 'none';
+  if (value === 'drift' || value === 'gimbal' || value === 'gimbal_free') {
+    return value;
+  }
+  return 'none';
+}
+
+function sanitizePoiTarget(input: any): PoiTarget | null {
+  if (!input || typeof input !== 'object') return null;
+  const latitude = Number((input as any).latitude);
+  const longitude = Number((input as any).longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return null;
+  }
+  const altitudeValue = Number((input as any).altitude);
+  const altitude = Number.isFinite(altitudeValue) ? altitudeValue : null;
+  return { latitude, longitude, altitude };
+}
+
+const DEFAULT_PATTERN_WIDTH_M = 30;
+
+function parseWidthMeters(args: any, instruction?: string): number | null {
+  const candidateKeys = [
+    'width', 'width_m', 'pattern_width', 'pattern_width_m', 'square_width', 'square_width_m', 'size', 'size_m', 'span', 'span_m'
+  ];
+  for (const key of candidateKeys) {
+    if (args && key in args) {
+      const value = Number(args[key]);
+      if (Number.isFinite(value) && value > 0) {
+        return value;
+      }
+    }
+  }
+  if (instruction) {
+    const match = instruction.match(/(\d+(?:\.\d+)?)\s*(?:m|meter|meters)\b/i);
+    if (match) {
+      const width = Number(match[1]);
+      if (Number.isFinite(width) && width > 0) {
+        return width;
+      }
+    }
+  }
+  return null;
+}
+
+function latLonToLocalMeters(
+  latitude: number,
+  longitude: number,
+  referenceLat: number,
+  referenceLon: number,
+): { north: number; east: number } {
+  const degToRad = Math.PI / 180;
+  const dLat = (latitude - referenceLat) * degToRad;
+  const dLon = (longitude - referenceLon) * degToRad;
+  const meanLat = (referenceLat + latitude) / 2 * degToRad;
+  const north = dLat * EARTH_RADIUS_METERS;
+  const east = dLon * EARTH_RADIUS_METERS * Math.cos(meanLat);
+  return { north, east };
+}
+
+function computePlanEnvelope(entries: Array<{ latitude: number; longitude: number }>) {
+  if (entries.length === 0) {
+    return { widthMeters: 0, heightMeters: 0, diagonalMeters: 0 };
+  }
+  const ref = entries[0];
+  let minNorth = 0; let maxNorth = 0; let minEast = 0; let maxEast = 0;
+  entries.forEach((entry) => {
+    const { north, east } = latLonToLocalMeters(entry.latitude, entry.longitude, ref.latitude, ref.longitude);
+    minNorth = Math.min(minNorth, north);
+    maxNorth = Math.max(maxNorth, north);
+    minEast = Math.min(minEast, east);
+    maxEast = Math.max(maxEast, east);
+  });
+  const widthMeters = Math.abs(maxEast - minEast);
+  const heightMeters = Math.abs(maxNorth - minNorth);
+  const diagonalMeters = Math.hypot(widthMeters, heightMeters);
+  return { widthMeters, heightMeters, diagonalMeters };
+}
+
+function buildSquarePlan(
+  centerLat: number,
+  centerLon: number,
+  altitude: number,
+  altitudeReference: string | null,
+  widthMeters: number,
+): PlannedMissionEntry[] {
+  const half = widthMeters / 2;
+  const offsets = [
+    { north: half, east: half },
+    { north: half, east: -half },
+    { north: -half, east: -half },
+    { north: -half, east: half },
+  ];
+  const baseId = `auto-${Date.now()}`;
+  return offsets.map((offset, index) => {
+    const { latitude, longitude } = addMetersToLatLon(centerLat, centerLon, offset.north, offset.east);
+    return {
+      id: `${baseId}-${index}`,
+      kind: 'waypoint' as MissionEntryKind,
+      latitude,
+      longitude,
+      altitude,
+      altitudeReference,
+    };
+  });
+}
+
 async function ensureAirborne(minMeters: number, opts: OrchestratorOptions, log: (l: string) => void) {
   const telemetry = getTelemetrySnapshot();
   const current = getAltitudeAboveTakeoff(telemetry);
@@ -96,46 +213,20 @@ async function ensureAirborne(minMeters: number, opts: OrchestratorOptions, log:
     return telemetry;
   }
   await sendFlightCommand('takeoff', undefined, opts);
-  const targetForTakeoff = Math.max(
-    TAKEOFF_LIFT_THRESHOLD_M,
-    Math.min(minMeters, TAKEOFF_LIFT_THRESHOLD_M + 0.8),
-  );
-  const settleFloor = Math.max(0.5, targetForTakeoff - ALTITUDE_SETTLE_MARGIN_M);
-  const reached = await waitForAltitude(settleFloor, 20000, opts, log);
+  const reached = await waitForAltitude(minMeters, 20000, opts, log);
   const updated = getTelemetrySnapshot();
-  const finalTelemetry = updated ?? telemetry;
-  const finalAlt = getAltitudeAboveTakeoff(finalTelemetry);
-  if (!reached && finalAlt < TAKEOFF_LIFT_THRESHOLD_M - 0.15) {
-    throw new Error(`Takeoff did not reach lift threshold (${finalAlt.toFixed(2)} m)`);
-  }
   if (!reached) {
-    log(`Takeoff short of target (~${finalAlt.toFixed(2)} m vs ${targetForTakeoff.toFixed(2)} m); continuing with fallback`);
+    const statusLabel = updated?.system_status?.label || updated?.system_status?.description;
+    const statusCode = updated?.system_status?.code;
+    const statusDetail = statusLabel
+      ? `${statusLabel}${statusCode ? ` (${statusCode})` : ''}`
+      : undefined;
+    const message = statusDetail
+      ? `Takeoff did not reach ${minMeters.toFixed(1)} m — ${statusDetail}`
+      : `Takeoff did not reach ${minMeters.toFixed(1)} m`;
+    throw new Error(message);
   }
-  return finalTelemetry;
-}
-
-async function ensureVirtualStickIdle(opts: OrchestratorOptions, log: (l: string) => void) {
-  const telemetry = getTelemetrySnapshot();
-  const vsState = readVirtualStickState(telemetry);
-  if (vsState.enabled && !vsState.manualOverride) {
-    log('Virtual stick still enabled from previous command; disabling');
-    try {
-      await sendFlightCommand('virtual_stick_override', { ...VIRTUAL_STICK_ZERO_AXES }, opts);
-    } catch (error) {
-      log(`virtual_stick_override (zero) before disable failed: ${String(error)}`);
-    }
-    try {
-      await sendFlightCommand('virtual_stick_disable', undefined, opts);
-    } catch (error) {
-      log(`virtual_stick_disable failed during idle ensure: ${String(error)}`);
-    }
-  }
-  const updatedTelemetry = getTelemetrySnapshot();
-  const updatedState = readVirtualStickState(updatedTelemetry);
-  updateAgentTelemetry({
-    virtualStickEnabled: updatedState.enabled,
-    virtualStickOwner: updatedState.owner,
-  });
+  return updated ?? telemetry;
 }
 
 function stageRelativeTarget(nav: NavigationSnapshot, latitude: number, longitude: number, targetAGL: number) {
@@ -181,600 +272,6 @@ async function dispatchRelativeFlyTo(
   }
   return { targetAGL };
 }
-
-const VIRTUAL_STICK_ZERO_AXES = Object.freeze({ yaw: 0, throttle: 0, roll: 0, pitch: 0 });
-const VIRTUAL_STICK_THROTTLE_GAIN = 0.35;
-const VIRTUAL_STICK_MAX_THROTTLE = 0.65;
-const MANUAL_ALTITUDE_TOLERANCE_M = 0.35;
-const MANUAL_ALTITUDE_TIMEOUT_MS = 20000;
-const ALTITUDE_PROGRESS_EPS_M = 0.25;
-const HORIZONTAL_PROGRESS_EPS_M = 0.4;
-const ALTITUDE_STALE_ITERATION_LIMIT = 8;
-const HORIZONTAL_STALE_ITERATION_LIMIT = 20;
-const HORIZONTAL_TOLERANCE_M = 0.6;
-const VIRTUAL_STICK_HORIZONTAL_GAIN = 0.15;
-const VIRTUAL_STICK_MAX_HORIZONTAL = 0.35;
-
-interface VirtualStickSnapshot {
-  enabled: boolean;
-  manualOverride: boolean;
-  owner: string | null;
-}
-
-function readVirtualStickState(telemetry: any | null): VirtualStickSnapshot {
-  const vs = telemetry?.virtual_stick ?? {};
-  const enabled = Boolean(
-    (typeof vs.enabled === 'boolean' ? vs.enabled : undefined) ?? telemetry?.virtual_stick_enabled,
-  );
-  const manualOverride = Boolean(
-    (typeof vs.manual_override === 'boolean' ? vs.manual_override : undefined) ??
-    telemetry?.virtual_stick_manual_override,
-  );
-  const ownerRaw =
-    vs?.owner ??
-    telemetry?.virtual_stick_owner ??
-    null;
-  const owner = ownerRaw != null ? String(ownerRaw).toUpperCase() : null;
-  return { enabled, manualOverride, owner };
-}
-
-function updateAgentTelemetry(partial: Partial<Omit<ReturnType<typeof agentTelemetryStore.getSnapshot>, 'lastUpdateMs'>>, note?: string | null) {
-  agentTelemetryStore.update(partial, { appendNote: note ?? null });
-}
-
-function computeNorthEastDelta(fromLat: number, fromLon: number, toLat: number, toLon: number) {
-  const degToRad = Math.PI / 180;
-  const dLat = (toLat - fromLat) * degToRad;
-  const dLon = (toLon - fromLon) * degToRad;
-  const meanLat = ((fromLat + toLat) / 2) * degToRad;
-  const north = dLat * EARTH_RADIUS_METERS;
-  const east = dLon * EARTH_RADIUS_METERS * Math.cos(meanLat);
-  return { north, east };
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
-async function ensureVirtualStickControl(opts: OrchestratorOptions, log: (l: string) => void) {
-  const snapshot: any = getTelemetrySnapshot();
-  const virtualStick = snapshot?.virtual_stick ?? {};
-  const enabled = Boolean(
-    (virtualStick && typeof virtualStick.enabled === 'boolean' ? virtualStick.enabled : undefined) ??
-      snapshot?.virtual_stick_enabled,
-  );
-  const manualOverride = Boolean(
-    (virtualStick && typeof virtualStick.manual_override === 'boolean' ? virtualStick.manual_override : undefined) ??
-      snapshot?.virtual_stick_manual_override,
-  );
-  const ownerRaw = (virtualStick && virtualStick.owner !== undefined ? virtualStick.owner : undefined) ?? snapshot?.virtual_stick_owner ?? '';
-  const owner = String(ownerRaw ?? '').toUpperCase();
-
-  if (manualOverride && owner && owner !== 'APP' && owner !== 'UNKNOWN' && owner !== 'NONE') {
-    throw new Error(`Virtual stick currently controlled by ${owner}`);
-  }
-
-  if (!enabled) {
-    log('Virtual stick not enabled – requesting control');
-    const response = await sendFlightCommand('virtual_stick_enable', undefined, opts);
-    if (response && response.success === false) {
-      const message = response.error || response.error_message || response.message || 'virtual_stick_enable rejected';
-      throw new Error(message);
-    }
-  }
-
-  try {
-    await sendFlightCommand('virtual_stick_override', { ...VIRTUAL_STICK_ZERO_AXES }, opts);
-  } catch (error) {
-    log(`virtual_stick_override (zero) failed during enable handshake: ${String(error)}`);
-  }
-
-  updateAgentTelemetry({
-    virtualStickEnabled: true,
-    virtualStickOwner: 'APP',
-  });
-
-  return { wasEnabled: enabled };
-}
-
-async function releaseVirtualStickControl(opts: OrchestratorOptions, log: (l: string) => void, wasEnabled: boolean) {
-  try {
-    await sendFlightCommand('virtual_stick_override', { ...VIRTUAL_STICK_ZERO_AXES }, opts);
-  } catch (error) {
-    log(`virtual_stick_override (zero) cleanup failed: ${String(error)}`);
-  }
-
-  if (!wasEnabled) {
-    try {
-      await sendFlightCommand('virtual_stick_disable', undefined, opts);
-    } catch (error) {
-      log(`virtual_stick_disable failed: ${String(error)}`);
-    }
-  }
-
-  const telemetry = getTelemetrySnapshot();
-  const vsState = readVirtualStickState(telemetry);
-  updateAgentTelemetry({
-    virtualStickEnabled: vsState.enabled,
-    virtualStickOwner: vsState.owner,
-  });
-}
-
-async function manualVerticalAdjustment(targetAGL: number, opts: OrchestratorOptions, log: (l: string) => void) {
-  const { wasEnabled } = await ensureVirtualStickControl(opts, log);
-  updateAgentTelemetry({ missionState: 'fallback', fallbackActive: true });
-  const start = Date.now();
-  try {
-    while (Date.now() - start < MANUAL_ALTITUDE_TIMEOUT_MS) {
-      const telemetry = getTelemetrySnapshot();
-      const current = getAltitudeAboveTakeoff(telemetry);
-      const delta = targetAGL - current;
-      if (Math.abs(delta) <= MANUAL_ALTITUDE_TOLERANCE_M) {
-        log(`Manual altitude adjust reached ${current.toFixed(2)} m (target ${targetAGL.toFixed(2)} m)`);
-        updateAgentTelemetry({ altitudeCurrent: current });
-        return true;
-      }
-      const throttle = clamp(delta * VIRTUAL_STICK_THROTTLE_GAIN, -VIRTUAL_STICK_MAX_THROTTLE, VIRTUAL_STICK_MAX_THROTTLE);
-      await sendFlightCommand('virtual_stick_override', { ...VIRTUAL_STICK_ZERO_AXES, throttle }, opts);
-      if (opts.isCancelled?.()) {
-        return false;
-      }
-      await sleep(220);
-    }
-    log(`Manual altitude adjust timeout at target ${targetAGL.toFixed(2)} m`);
-    return false;
-  } finally {
-    try {
-      await sendFlightCommand('virtual_stick_override', { ...VIRTUAL_STICK_ZERO_AXES }, opts);
-    } catch (error) {
-      log(`virtual_stick_override zero during cleanup failed: ${String(error)}`);
-    }
-    await releaseVirtualStickControl(opts, log, wasEnabled);
-    updateAgentTelemetry({ fallbackActive: false });
-  }
-}
-
-async function manualHorizontalAdjustment(
-  navStart: NavigationSnapshot,
-  targetLat: number,
-  targetLon: number,
-  opts: OrchestratorOptions,
-  log: (l: string) => void,
-) {
-  const { wasEnabled } = await ensureVirtualStickControl(opts, log);
-  updateAgentTelemetry({ missionState: 'fallback', fallbackActive: true });
-  const start = Date.now();
-  const timeoutMs = 20000;
-  const headingRad = ((navStart.heading ?? 0) * Math.PI) / 180;
-  try {
-    while (Date.now() - start < timeoutMs) {
-      const telemetry = getTelemetrySnapshot();
-      if (!telemetry?.location) {
-        await sleep(220);
-        continue;
-      }
-      const currentLat = Number(telemetry.location.latitude);
-      const currentLon = Number(telemetry.location.longitude);
-      if (!Number.isFinite(currentLat) || !Number.isFinite(currentLon)) {
-        await sleep(220);
-        continue;
-      }
-      const { north, east } = computeNorthEastDelta(currentLat, currentLon, targetLat, targetLon);
-      const remaining = Math.hypot(north, east);
-      updateAgentTelemetry({ horizontalRemaining: remaining });
-      if (remaining <= HORIZONTAL_TOLERANCE_M) {
-        log(`Manual horizontal adjust reached target (remaining ${remaining.toFixed(2)} m)`);
-        return true;
-      }
-
-      const forward = Math.cos(headingRad) * north + Math.sin(headingRad) * east;
-      const right = -Math.sin(headingRad) * north + Math.cos(headingRad) * east;
-      const pitch = clamp(forward * VIRTUAL_STICK_HORIZONTAL_GAIN, -VIRTUAL_STICK_MAX_HORIZONTAL, VIRTUAL_STICK_MAX_HORIZONTAL);
-      const roll = clamp(right * VIRTUAL_STICK_HORIZONTAL_GAIN, -VIRTUAL_STICK_MAX_HORIZONTAL, VIRTUAL_STICK_MAX_HORIZONTAL);
-
-      await sendFlightCommand('virtual_stick_override', {
-        ...VIRTUAL_STICK_ZERO_AXES,
-        pitch,
-        roll,
-      }, opts);
-
-      if (opts.isCancelled?.()) {
-        return false;
-      }
-
-      await sleep(200);
-    }
-    log('Manual horizontal adjust timeout');
-    return false;
-  } finally {
-    try {
-      await sendFlightCommand('virtual_stick_override', { ...VIRTUAL_STICK_ZERO_AXES }, opts);
-    } catch (error) {
-      log(`virtual_stick_override zero during horizontal cleanup failed: ${String(error)}`);
-    }
-    await releaseVirtualStickControl(opts, log, wasEnabled);
-    updateAgentTelemetry({ fallbackActive: false });
-  }
-}
-
-async function monitorFlyToGoal(params: {
-  targetLat: number;
-  targetLon: number;
-  targetAGL: number | null;
-  requireAltitude: boolean;
-  requireHorizontal: boolean;
-  timeoutMs: number;
-  opts: OrchestratorOptions;
-}): Promise<{ altitudeAchieved: boolean; horizontalAchieved: boolean; finalAltitude: number; finalDistance: number; stalled: boolean }> {
-  const { targetLat, targetLon, targetAGL, requireAltitude, requireHorizontal, timeoutMs, opts } = params;
-  let altitudeAchieved = !requireAltitude;
-  let horizontalAchieved = !requireHorizontal;
-  const start = Date.now();
-  let finalAltitude = 0;
-  let finalDistance = Infinity;
-  let stalled = false;
-  let altitudeStaleCount = 0;
-  let horizontalStaleCount = 0;
-  let lastAltitude: number | null = null;
-  let lastDistance: number | null = null;
-  let altitudeProgress = !requireAltitude;
-  let horizontalProgress = !requireHorizontal;
-
-  while (Date.now() - start < timeoutMs) {
-    const telemetry = getTelemetrySnapshot();
-    if (!telemetry) {
-      await sleep(400);
-      continue;
-    }
-
-    const currentAltitude = getAltitudeAboveTakeoff(telemetry);
-    finalAltitude = currentAltitude;
-    if (!altitudeAchieved && targetAGL != null) {
-      if (currentAltitude >= targetAGL - ALTITUDE_SETTLE_MARGIN_M) {
-        altitudeAchieved = true;
-      } else {
-        if (lastAltitude != null && Math.abs(currentAltitude - lastAltitude) < ALTITUDE_PROGRESS_EPS_M) {
-          altitudeStaleCount += 1;
-        } else {
-          altitudeStaleCount = 0;
-          if (lastAltitude != null) altitudeProgress = true;
-        }
-        lastAltitude = currentAltitude;
-      }
-    }
-
-    const lat = typeof telemetry?.location?.latitude === 'number' ? telemetry.location.latitude : null;
-    const lon = typeof telemetry?.location?.longitude === 'number' ? telemetry.location.longitude : null;
-    if (lat != null && lon != null) {
-      finalDistance = haversineMeters({ latitude: lat, longitude: lon }, { latitude: targetLat, longitude: targetLon });
-      if (!horizontalAchieved && finalDistance <= Math.max(MIN_HORIZONTAL_SEPARATION_M, 1.2)) {
-        horizontalAchieved = true;
-      } else if (!horizontalAchieved) {
-        if (lastDistance != null && Math.abs(finalDistance - lastDistance) < HORIZONTAL_PROGRESS_EPS_M) {
-          horizontalStaleCount += 1;
-        } else {
-          horizontalStaleCount = 0;
-          if (lastDistance != null && finalDistance < lastDistance - HORIZONTAL_PROGRESS_EPS_M) {
-            horizontalProgress = true;
-          }
-        }
-        lastDistance = finalDistance;
-      }
-    }
-
-    if (altitudeAchieved && horizontalAchieved) {
-      break;
-    }
-
-    const altitudeStalled = requireAltitude && altitudeStaleCount >= ALTITUDE_STALE_ITERATION_LIMIT && !altitudeProgress;
-    const horizontalStalled = requireHorizontal && horizontalStaleCount >= HORIZONTAL_STALE_ITERATION_LIMIT && !horizontalProgress;
-    if (altitudeStalled || horizontalStalled) {
-      stalled = true;
-      break;
-    }
-
-    if (opts.isCancelled?.()) {
-      break;
-    }
-
-    await sleep(400);
-  }
-
-  return { altitudeAchieved, horizontalAchieved, finalAltitude, finalDistance, stalled };
-}
-
-function pickRelativeFlyToExtras(args: Record<string, any> | undefined): RelativeFlyToExtras | undefined {
-  if (!args) return undefined;
-  const extras: RelativeFlyToExtras = {};
-  if (args.max_speed !== undefined) extras.max_speed = args.max_speed;
-  if (args.security_takeoff_height !== undefined) extras.security_takeoff_height = args.security_takeoff_height;
-  if (args.reason !== undefined) extras.reason = args.reason;
-  return extras;
-}
-
-async function executeMissionFlyTo(args: Record<string, any> | undefined, opts: OrchestratorOptions, log: (l: string) => void) {
-  await ensureVirtualStickIdle(opts, log);
-  const navStart = requireNavSnapshot();
-  const target = (args?.target ?? {}) as Record<string, any>;
-  const latRaw = target?.latitude;
-  const lonRaw = target?.longitude;
-  const hasLat = typeof latRaw === 'number' && Number.isFinite(latRaw);
-  const hasLon = typeof lonRaw === 'number' && Number.isFinite(lonRaw);
-  const destLat = hasLat ? Number(latRaw) : navStart.latitude;
-  const destLon = hasLon ? Number(lonRaw) : navStart.longitude;
-  const usingCurrentPosition = !hasLat && !hasLon;
-
-  const altitudeReferenceRaw = typeof target?.altitude_reference === 'string' ? target.altitude_reference.toLowerCase() : 'relative_to_takeoff';
-  if (altitudeReferenceRaw && altitudeReferenceRaw !== 'relative_to_takeoff') {
-    throw new Error(`mission_fly_to currently supports altitude_reference="relative_to_takeoff" (received "${altitudeReferenceRaw}")`);
-  }
-
-  const altitudeRaw = target?.altitude;
-  const navAltitude = navStart.aboveTakeoff;
-  const hasAltitudeValue = altitudeRaw != null && Number.isFinite(Number(altitudeRaw));
-  const requestedAltitude = hasAltitudeValue ? Number(altitudeRaw) : 0;
-  const targetAGL = clampRelativeAltitude(
-    hasAltitudeValue ? requestedAltitude : navAltitude,
-    navAltitude,
-  );
-
-  const extras = pickRelativeFlyToExtras(args);
-
-  let nav = navStart;
-  if (nav.aboveTakeoff < TAKEOFF_LIFT_THRESHOLD_M && targetAGL > TAKEOFF_LIFT_THRESHOLD_M + 0.2) {
-    log(`Ensuring airborne before mission_fly_to (current ${nav.aboveTakeoff.toFixed(2)} m → target ${targetAGL.toFixed(2)} m)`);
-    const airborneTarget = Math.min(targetAGL, TAKEOFF_LIFT_THRESHOLD_M + 0.8);
-    await ensureAirborne(airborneTarget, opts, log);
-    nav = requireNavSnapshot();
-  }
-
-  const currentAltitude = nav.aboveTakeoff;
-  const horizontalDistance = haversineMeters(
-    { latitude: nav.latitude, longitude: nav.longitude },
-    { latitude: destLat, longitude: destLon },
-  );
-  const requiresHorizontalMove = !usingCurrentPosition && horizontalDistance >= MIN_HORIZONTAL_SEPARATION_M;
-  const requiresAltitudeChange = Math.abs(targetAGL - currentAltitude) > ALTITUDE_SETTLE_MARGIN_M;
-
-  if (usingCurrentPosition && hasAltitudeValue) {
-    opts.onTrace?.(
-      `mission_fly_to absolute target ${targetAGL.toFixed(2)} m (current ${currentAltitude.toFixed(2)} m)`,
-      'info',
-    );
-  }
-
-  updateAgentTelemetry({
-    missionState: 'executing',
-    lastCommand: usingCurrentPosition && hasAltitudeValue
-      ? `mission_fly_to set_height ${targetAGL.toFixed(1)}m`
-      : requiresHorizontalMove
-        ? `mission_fly_to horizontal ${horizontalDistance.toFixed(1)}m`
-        : 'mission_fly_to',
-    altitudeTarget: requiresAltitudeChange ? targetAGL : null,
-    altitudeCurrent: currentAltitude,
-    horizontalRemaining: requiresHorizontalMove ? horizontalDistance : null,
-    fallbackActive: false,
-  });
-
-  if (!requiresHorizontalMove && !requiresAltitudeChange) {
-    log('mission_fly_to: target matches current position/altitude; skipping');
-    opts.onTrace?.(`mission_fly_to skipped (no delta)`, 'info');
-    updateAgentTelemetry({
-      missionState: 'idle',
-      altitudeCurrent: currentAltitude,
-      horizontalRemaining: null,
-      fallbackActive: false,
-    }, 'No delta – command skipped');
-    return {
-      ok: true,
-      commandAccepted: false,
-      altitudeAchieved: true,
-      horizontalAchieved: true,
-      fallbackUsed: false,
-      finalAltitude: currentAltitude,
-      finalDistance: 0,
-    };
-  }
-
-  let commandAccepted = false;
-  try {
-    await dispatchRelativeFlyTo({
-      nav,
-      latitude: destLat,
-      longitude: destLon,
-      targetAGL,
-      extras,
-      opts,
-      log,
-      waitForAltitude: false,
-    });
-    commandAccepted = true;
-    nav = requireNavSnapshot();
-  } catch (error) {
-    log(`mission_fly_to → fly_to_prepare failed: ${String(error)}`);
-  }
-
-  let altitudeAchieved = false;
-  let horizontalAchieved = false;
-  let finalAltitude = currentAltitude;
-  let finalDistance = horizontalDistance;
-  let horizontalStalled = false;
-
-  if (commandAccepted) {
-    const monitor = await monitorFlyToGoal({
-      targetLat: destLat,
-      targetLon: destLon,
-      targetAGL,
-      requireAltitude: requiresAltitudeChange,
-      requireHorizontal: requiresHorizontalMove,
-      timeoutMs: Math.max(18000, Math.min(60000, 12000 + horizontalDistance * 4000)),
-      opts,
-    });
-    altitudeAchieved = monitor.altitudeAchieved;
-    horizontalAchieved = monitor.horizontalAchieved;
-    finalAltitude = monitor.finalAltitude;
-    finalDistance = monitor.finalDistance;
-    horizontalStalled = monitor.stalled && !horizontalAchieved && requiresHorizontalMove;
-    updateAgentTelemetry({
-      altitudeCurrent: finalAltitude,
-      horizontalRemaining: requiresHorizontalMove ? finalDistance : null,
-    });
-    if (monitor.stalled && requiresAltitudeChange && !altitudeAchieved) {
-      log('mission_fly_to detected stalled altitude progress');
-      updateAgentTelemetry({ missionState: 'stalled' }, 'Altitude progress stalled');
-    }
-    if (monitor.stalled && requiresHorizontalMove && !horizontalAchieved) {
-      log('mission_fly_to detected stalled horizontal progress');
-      updateAgentTelemetry({ missionState: 'stalled' }, 'Horizontal progress stalled');
-    }
-    if (monitor.stalled && requiresAltitudeChange && !altitudeAchieved) {
-      opts.onTrace?.('mission_fly_to stalled: altitude not progressing', 'warn');
-    }
-    if (monitor.stalled && requiresHorizontalMove && !horizontalAchieved) {
-      opts.onTrace?.('mission_fly_to stalled: horizontal move not progressing', 'warn');
-    }
-    if (!monitor.stalled && requiresAltitudeChange && !altitudeAchieved) {
-      opts.onTrace?.('mission_fly_to altitude timeout reached', 'warn');
-    }
-    if (!monitor.stalled && requiresHorizontalMove && !horizontalAchieved) {
-      opts.onTrace?.('mission_fly_to horizontal timeout reached', 'warn');
-    }
-  }
-
-  let fallbackUsed = false;
-  if (!commandAccepted && requiresAltitudeChange) {
-    fallbackUsed = true;
-    log(`mission_fly_to command rejected; engaging virtual-stick fallback for altitude change to ${targetAGL.toFixed(2)} m`);
-    const manualOk = await manualVerticalAdjustment(targetAGL, opts, log);
-    const telemetryAfter = getTelemetrySnapshot();
-    finalAltitude = getAltitudeAboveTakeoff(telemetryAfter);
-    altitudeAchieved = manualOk && Math.abs(finalAltitude - targetAGL) <= MANUAL_ALTITUDE_TOLERANCE_M + 0.2;
-    opts.onTrace?.('mission_fly_to fallback engaged (command rejected)', 'warn');
-    updateAgentTelemetry({
-      missionState: altitudeAchieved ? 'idle' : 'fallback',
-      altitudeCurrent: finalAltitude,
-      fallbackActive: !altitudeAchieved,
-    }, altitudeAchieved ? 'Fallback recovered (command rejected)' : 'Fallback executing (command rejected)');
-  } else if (requiresAltitudeChange && !altitudeAchieved) {
-    fallbackUsed = true;
-    log(`mission_fly_to altitude not reached via waypoint (${finalAltitude.toFixed(2)} m vs target ${targetAGL.toFixed(2)} m) – engaging virtual-stick fallback`);
-    const manualOk = await manualVerticalAdjustment(targetAGL, opts, log);
-    const telemetryAfter = getTelemetrySnapshot();
-    finalAltitude = getAltitudeAboveTakeoff(telemetryAfter);
-    altitudeAchieved = manualOk && Math.abs(finalAltitude - targetAGL) <= MANUAL_ALTITUDE_TOLERANCE_M + 0.2;
-    opts.onTrace?.('mission_fly_to fallback engaged (no altitude progress)', 'warn');
-    updateAgentTelemetry({
-      missionState: altitudeAchieved ? 'idle' : 'fallback',
-      altitudeCurrent: finalAltitude,
-      fallbackActive: !altitudeAchieved,
-    }, altitudeAchieved ? 'Fallback recovered (no altitude progress)' : 'Fallback executing (no altitude progress)');
-  }
-
-  if (!horizontalAchieved && requiresHorizontalMove && (horizontalStalled || !commandAccepted)) {
-    log(`mission_fly_to horizontal goal not met (remaining ≈${finalDistance.toFixed(1)} m)`);
-    updateAgentTelemetry({ missionState: 'stalled', horizontalRemaining: finalDistance }, 'Horizontal goal not met');
-
-    const navLatest = requireNavSnapshot();
-    const manualOk = await manualHorizontalAdjustment(navLatest, destLat, destLon, opts, log);
-    const telemetryAfter = getTelemetrySnapshot();
-    if (telemetryAfter?.location) {
-      const currentLatAfter = Number(telemetryAfter.location.latitude);
-      const currentLonAfter = Number(telemetryAfter.location.longitude);
-      if (Number.isFinite(currentLatAfter) && Number.isFinite(currentLonAfter)) {
-        const { north, east } = computeNorthEastDelta(currentLatAfter, currentLonAfter, destLat, destLon);
-        finalDistance = Math.hypot(north, east);
-        updateAgentTelemetry({ horizontalRemaining: finalDistance });
-      }
-    }
-    horizontalAchieved = manualOk || finalDistance <= HORIZONTAL_TOLERANCE_M;
-    updateAgentTelemetry({
-      missionState: horizontalAchieved ? 'idle' : 'fallback',
-    }, horizontalAchieved ? 'Horizontal fallback reached target' : 'Horizontal fallback incomplete');
-  }
-
-  if (altitudeAchieved && horizontalAchieved) {
-    updateAgentTelemetry({ missionState: 'idle', fallbackActive: false });
-  } else if (!fallbackUsed) {
-    updateAgentTelemetry({ missionState: 'executing', fallbackActive: false });
-  }
-
-  return {
-    ok: altitudeAchieved || horizontalAchieved,
-    commandAccepted,
-    altitudeAchieved,
-    horizontalAchieved,
-    fallbackUsed,
-    finalAltitude,
-    finalDistance,
-  };
-}
-
-async function executeMissionRelativeMove(args: Record<string, any> | undefined, opts: OrchestratorOptions, log: (l: string) => void) {
-  const axis = args?.axis;
-  const distance = args?.distance_m;
-  const plan = normalizeRelativeMoveAxis(axis, distance);
-  if (!plan) {
-    throw new Error('mission_relative_move axis invalid');
-  }
-
-  const nav = requireNavSnapshot();
-  const extras = pickRelativeFlyToExtras(args);
-  const altitudeDeltaRaw = Number.isFinite(Number(args?.altitude_delta_m)) ? Number(args?.altitude_delta_m) : 0;
-
-  if (plan.kind === 'vertical') {
-    const targetAGL = clampRelativeAltitude(nav.aboveTakeoff + plan.delta, nav.aboveTakeoff);
-    const { axis: _axis, distance_m: _distance, altitude_delta_m: _delta, ...rest } = args || {};
-    return executeMissionFlyTo({
-      ...rest,
-      target: {
-        latitude: null,
-        longitude: null,
-        altitude: targetAGL,
-        altitude_reference: 'relative_to_takeoff',
-      },
-      reason: rest?.reason ?? 'relative_vertical',
-    }, opts, log);
-  }
-
-  let offsetNorth = 0;
-  let offsetEast = 0;
-  if (plan.kind === 'heading') {
-    const baseHeading = normalizeHeadingDegrees(nav.heading ?? 0);
-    const bearing = (() => {
-      switch (plan.axis) {
-        case 'forward': return baseHeading;
-        case 'backward': return normalizeHeadingDegrees(baseHeading + 180);
-        case 'left': return normalizeHeadingDegrees(baseHeading - 90);
-        case 'right': return normalizeHeadingDegrees(baseHeading + 90);
-        default: return baseHeading;
-      }
-    })();
-    const offset = bearingOffsetToMeters(plan.distance, bearing);
-    offsetNorth = offset.north;
-    offsetEast = offset.east;
-  } else if (plan.kind === 'absolute') {
-    offsetNorth = plan.north;
-    offsetEast = plan.east;
-  }
-
-  const destination = addMetersToLatLon(nav.latitude, nav.longitude, offsetNorth, offsetEast);
-  const targetAGL = clampRelativeAltitude(nav.aboveTakeoff + altitudeDeltaRaw, nav.aboveTakeoff);
-
-  const { axis: _axis, distance_m: _distance, altitude_delta_m: _delta, ...rest } = args || {};
-  const nextArgs: Record<string, any> = {
-    ...rest,
-    target: {
-      latitude: destination.latitude,
-      longitude: destination.longitude,
-      altitude: targetAGL,
-      altitude_reference: 'relative_to_takeoff',
-    },
-    reason: rest?.reason ?? 'relative_move',
-  };
-  if (extras?.max_speed !== undefined) nextArgs.max_speed = extras.max_speed;
-  if (extras?.security_takeoff_height !== undefined) nextArgs.security_takeoff_height = extras.security_takeoff_height;
-  return executeMissionFlyTo(nextArgs, opts, log);
-}
 function normalizeRelativeMoveAxis(axisInput: any, distanceInput: any): RelativeMovePlan | null {
   const rawAxis = typeof axisInput === 'string' ? axisInput.trim().toLowerCase() : '';
   const baseDistance = Number(distanceInput);
@@ -792,37 +289,22 @@ function normalizeRelativeMoveAxis(axisInput: any, distanceInput: any): Relative
 
   if (headingMap[axis]) {
     const canonical = headingMap[axis];
-    let finalAxis = canonical;
-    if (baseDistance < 0) {
-      finalAxis = canonical === 'forward' ? 'backward'
-        : canonical === 'backward' ? 'forward'
-        : canonical === 'left' ? 'right'
-        : canonical === 'right' ? 'left'
-        : canonical;
-    } else if (signPrefix === -1) {
-      finalAxis = canonical === 'forward' ? 'backward'
-        : canonical === 'backward' ? 'forward'
-        : canonical === 'left' ? 'right'
-        : canonical === 'right' ? 'left'
-        : canonical;
-    }
-    const distance = absDistance;
+    const signedDistance = canonical === 'forward' || canonical === 'right'
+      ? absDistance * signPrefix
+      : absDistance * (signPrefix === -1 ? 1 : (canonical === 'backward' ? 1 : 1));
+    const distance = Math.abs(signedDistance);
+    const finalAxis = (canonical === 'forward' && signPrefix === -1) ? 'backward'
+      : (canonical === 'backward' && signPrefix === -1) ? 'forward'
+      : (canonical === 'right' && signPrefix === -1) ? 'left'
+      : (canonical === 'left' && signPrefix === -1) ? 'right'
+      : canonical;
     return { kind: 'heading', axis: finalAxis, distance };
   }
 
-  const verticalSet = new Set(['vertical', 'up', 'upward', 'upwards', 'ascend', 'rise', 'climb', 'z']);
-  const verticalDownSet = new Set(['down', 'downward', 'descend', 'drop', 'sink', '-z']);
+  const verticalSet = new Set(['vertical', 'up', 'upward', 'upwards', 'ascend', 'z']);
+  const verticalDownSet = new Set(['down', 'downward', 'descend', '-z']);
   if (verticalSet.has(axis) || verticalDownSet.has(axis)) {
-    if (baseDistance === 0) {
-      return { kind: 'vertical', delta: 0 };
-    }
-    if (verticalDownSet.has(axis) && baseDistance > 0) {
-      return { kind: 'vertical', delta: -absDistance };
-    }
-    if (verticalSet.has(axis) && baseDistance < 0) {
-      return { kind: 'vertical', delta: -absDistance };
-    }
-    const direction = verticalDownSet.has(axis) || rawAxis.startsWith('-') || baseDistance < 0 ? -1 : 1;
+    const direction = verticalDownSet.has(axis) || rawAxis.startsWith('-') ? -1 : 1;
     return { kind: 'vertical', delta: absDistance * direction };
   }
 
@@ -979,7 +461,13 @@ export async function runInstruction(
 ) {
   const { log } = opts;
   try {
-    const resp = await fetch(plannerUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction }) });
+    const plannerContext = collectPlannerContext();
+    const payload = { instruction, context: plannerContext };
+    const resp = await fetch(plannerUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const plan = await resp.json();
     if (plan?.high_level_program) { try { opts.onHighLevelProgram?.(plan.high_level_program); } catch {} }
@@ -1332,10 +820,144 @@ async function callTool(tool: string, args: any, ctx: any, opts: OrchestratorOpt
       return { ok: true };
     }
     case 'mission_fly_to': {
-      return executeMissionFlyTo(args, opts, log);
+      const target = args?.target ?? {};
+      let nav = requireNavSnapshot();
+
+      if (nav.aboveTakeoff < SAFE_MIN_COMMAND_AGL_M) {
+        const telemetryAfterTakeoff = await ensureAirborne(SAFE_MIN_COMMAND_AGL_M, opts, log);
+        if (telemetryAfterTakeoff) {
+          nav = requireNavSnapshot(telemetryAfterTakeoff);
+        } else {
+          nav = requireNavSnapshot();
+        }
+      }
+
+      const latitude = Number(target.latitude);
+      const longitude = Number(target.longitude);
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        throw new Error('mission_fly_to requires numeric latitude and longitude');
+      }
+
+      const altitudeRefRaw = typeof target.altitude_reference === 'string' ? target.altitude_reference : null;
+      const altitudeRef = altitudeRefRaw ? altitudeRefRaw.toLowerCase() : 'relative_to_takeoff';
+      const altitudeValue = Number(target.altitude);
+
+      let relativeAboveTakeoff = nav.aboveTakeoff;
+      if (Number.isFinite(altitudeValue)) {
+        if (altitudeRef === 'relative_to_takeoff' || altitudeRef === 'relative' || altitudeRef === '') {
+          relativeAboveTakeoff = Number(altitudeValue);
+        } else if (nav.takeoffAltitude != null) {
+          relativeAboveTakeoff = altitudeValue - nav.takeoffAltitude;
+        } else if (nav.altitude != null) {
+          // Fallback: derive takeoff altitude from current altitude
+          const estimatedTakeoff = nav.altitude - nav.aboveTakeoff;
+          relativeAboveTakeoff = altitudeValue - estimatedTakeoff;
+        }
+      }
+
+      const targetAGL = clampRelativeAltitude(relativeAboveTakeoff, nav.aboveTakeoff);
+
+      const extras: RelativeFlyToExtras = {
+        max_speed: args?.max_speed,
+        security_takeoff_height: args?.security_takeoff_height,
+        reason: args?.reason,
+      };
+
+      const waitForAltitude = String(args?.mode || '').toLowerCase() !== 'smart_height';
+      await dispatchRelativeFlyTo({
+        nav,
+        latitude,
+        longitude,
+        targetAGL,
+        extras,
+        opts,
+        log,
+        waitForAltitude,
+        timeoutMs: 30000,
+      });
+
+      log(`mission_fly_to → lat=${latitude.toFixed(6)}, lon=${longitude.toFixed(6)}, agl=${targetAGL.toFixed(2)}m`);
+      return { ok: true, latitude, longitude, altitude_agl: targetAGL };
     }
     case 'mission_relative_move': {
-      return executeMissionRelativeMove(args, opts, log);
+      throw new Error('mission_relative_move disabled during flight rework');
+    }
+    case 'mission_waypoint_plan': {
+      const plan = Array.isArray(args?.plan) ? args.plan : [];
+      if (!plan.length) {
+        throw new Error('mission_waypoint_plan requires a non-empty plan array');
+      }
+
+      const baseId = `planner-${Date.now()}`;
+      const missionEntries: PlannedMissionEntry[] = plan.map((entry: any, index: number) => {
+        const latitude = Number(entry?.latitude);
+        const longitude = Number(entry?.longitude);
+        if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+          throw new Error(`Waypoint ${index} missing latitude/longitude`);
+        }
+        const altitudeValue = Number(entry?.altitude);
+        const altitude = Number.isFinite(altitudeValue) ? altitudeValue : null;
+        const altitudeReference = typeof entry?.altitude_reference === 'string' ? entry.altitude_reference : null;
+        const missionEntry: PlannedMissionEntry = {
+          id: `${baseId}-${index}`,
+          kind: normalizeMissionEntryKind(entry?.kind),
+          latitude,
+          longitude,
+          altitude,
+          altitudeReference,
+        };
+
+        if (typeof entry?.radius === 'number' && Number.isFinite(entry.radius)) {
+          missionEntry.radius = entry.radius;
+        }
+        if (typeof entry?.turns === 'number' && Number.isFinite(entry.turns)) {
+          missionEntry.turns = entry.turns;
+        }
+        if (entry?.heading && typeof entry.heading === 'object') {
+          missionEntry.heading = {
+            mode: typeof entry.heading.mode === 'string' ? entry.heading.mode : undefined,
+            angle: typeof entry.heading.angle === 'number' ? entry.heading.angle : undefined,
+            angleEnable: typeof entry.heading.angle_enable === 'boolean' ? entry.heading.angle_enable : undefined,
+            poi: sanitizePoiTarget(entry.heading.poi),
+            poiIndex: typeof entry.heading.poi_index === 'number' ? entry.heading.poi_index : undefined,
+            yawPathMode: typeof entry.heading.yaw_path_mode === 'string' ? entry.heading.yaw_path_mode : undefined,
+            yawBase: typeof entry.heading.yaw_base === 'string' ? entry.heading.yaw_base : undefined,
+          };
+        }
+        if (entry?.gimbal_heading && typeof entry.gimbal_heading === 'object') {
+          missionEntry.gimbalHeading = {
+            mode: typeof entry.gimbal_heading.mode === 'string' ? entry.gimbal_heading.mode : undefined,
+            pitch: typeof entry.gimbal_heading.pitch === 'number' ? entry.gimbal_heading.pitch : undefined,
+            yaw: typeof entry.gimbal_heading.yaw === 'number' ? entry.gimbal_heading.yaw : undefined,
+          };
+        }
+        const poi = sanitizePoiTarget(entry?.poi);
+        if (poi) {
+          missionEntry.poi = poi;
+        }
+        if (typeof entry?.gimbal_strategy === 'string') {
+          missionEntry.gimbalStrategy = entry.gimbal_strategy;
+        }
+        if (Array.isArray(entry?.action_groups)) {
+          missionEntry.actionGroups = entry.action_groups;
+        }
+        return missionEntry;
+      });
+
+      missionPlannerStore.setPlan(missionEntries);
+
+      if (args?.poi) {
+        const poiTarget = sanitizePoiTarget(args.poi);
+        if (poiTarget) {
+          missionPlannerStore.setPoiTarget(poiTarget);
+        }
+      }
+
+      const orbitMode = normalizeOrbitMode(args?.orbit_mode);
+      missionPlannerStore.setOrbitMode(orbitMode);
+
+      log(`mission_waypoint_plan staged ${missionEntries.length} waypoint${missionEntries.length === 1 ? '' : 's'}`);
+      return { ok: true, staged: true, count: missionEntries.length };
     }
     default:
       log(`unknown tool: ${tool}`);

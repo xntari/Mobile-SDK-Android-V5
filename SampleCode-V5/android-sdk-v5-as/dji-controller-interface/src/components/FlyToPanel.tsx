@@ -544,7 +544,10 @@ export const FlyToPanel: React.FC = () => {
   const [manualTarget, setManualTarget] = React.useState<ManualTargetState>({ latitude: null, longitude: null, altitude: null });
   const [placingTarget, setPlacingTarget] = React.useState<boolean>(false);
   const [simPreview, setSimPreview] = React.useState<SimulationPreview | null>(null);
-  const [missionPlan, setMissionPlan] = React.useState<PlannedMissionEntry[]>([]);
+  const [missionPlan, setMissionPlan] = React.useState<PlannedMissionEntry[]>(
+    () => missionPlannerStore.getSnapshot().plan,
+  );
+  const missionPlanUpdateOriginRef = React.useRef<'remote' | 'local'>('remote');
   const [expandedEntries, setExpandedEntries] = React.useState<Record<string, boolean>>({});
   const [actionParamDrafts, setActionParamDrafts] = React.useState<Record<string, string>>({});
   const [actionParamErrors, setActionParamErrors] = React.useState<Record<string, string>>({});
@@ -628,6 +631,10 @@ export const FlyToPanel: React.FC = () => {
   }, [executeHeightMode]);
 
   React.useEffect(() => objectMemoryTargetStore.subscribe(setTargetSelection), []);
+  React.useEffect(() => missionPlannerStore.subscribePlan((plan) => {
+    missionPlanUpdateOriginRef.current = 'remote';
+    setMissionPlan(plan);
+  }), []);
   React.useEffect(() => missionPlannerStore.subscribePoiTarget(setPoiTarget), []);
   React.useEffect(() => missionPlannerStore.subscribeOrbitMode(setOrbitModeState), []);
 
@@ -1041,7 +1048,11 @@ export const FlyToPanel: React.FC = () => {
   }, [manualTarget.source]);
 
   React.useEffect(() => {
+    if (missionPlanUpdateOriginRef.current !== 'local') {
+      return;
+    }
     missionPlannerStore.setPlan(missionPlan);
+    missionPlanUpdateOriginRef.current = 'remote';
   }, [missionPlan]);
 
   React.useEffect(() => {
@@ -1617,14 +1628,17 @@ export const FlyToPanel: React.FC = () => {
   );
 
   const updateMissionPlan = React.useCallback((updater: (prev: PlannedMissionEntry[]) => PlannedMissionEntry[]) => {
+    missionPlanUpdateOriginRef.current = 'local';
     setMissionPlan((prev) => applyOrbitDefaultsToPlan(updater(prev), orbitModeRef.current, poiTargetRef.current));
   }, [applyOrbitDefaultsToPlan]);
 
   const replaceMissionPlan = React.useCallback((nextPlan: PlannedMissionEntry[]) => {
+    missionPlanUpdateOriginRef.current = 'local';
     setMissionPlan(applyOrbitDefaultsToPlan(nextPlan, orbitModeRef.current, poiTargetRef.current));
   }, [applyOrbitDefaultsToPlan]);
 
   React.useEffect(() => {
+    missionPlanUpdateOriginRef.current = 'local';
     setMissionPlan((prev) => applyOrbitDefaultsToPlan(prev, orbitMode, poiTarget));
   }, [applyOrbitDefaultsToPlan, orbitMode, poiTarget]);
 

@@ -5,6 +5,7 @@ import { getActiveThreshold, setActiveThreshold } from '../agent/visionClient';
 import { getNextZIndex, getBaseZIndex } from '../utils/zIndex';
 import { CollapsibleSection, SectionLabel } from './CollapsibleSection';
 import { agentTelemetryStore, AgentTelemetrySnapshot } from '../state/agentTelemetry';
+import { getQueueSummary, subscribe as subscribeCommandQueue } from '../agent/commandQueue';
 
 export interface AgentPanelProps {
   getSnapshot: () => Promise<string>;
@@ -101,6 +102,9 @@ const EXAMPLE_PROMPTS: Array<{ title: string; prompt: string; note?: string }> =
   },
 ];
 
+type QueueSummary = ReturnType<typeof getQueueSummary>;
+type QueueItem = QueueSummary['pending'][number];
+
 // Global visibility controls for Components menu
 export const agentPanelControls = {
   isVisible: (): boolean => {
@@ -177,6 +181,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
   usePersistElementHeight(execRef, 'agent.h.exec', 220);
   const planRef = React.useRef<HTMLDivElement | null>(null);
   usePersistElementHeight(planRef, 'agent.h.plan', 120);
+  const [queueSummary, setQueueSummary] = useState<QueueSummary>(() => getQueueSummary());
 
   React.useEffect(() => {
     return agentTelemetryStore.subscribe((snapshot) => {
@@ -184,11 +189,35 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
     });
   }, []);
 
+  React.useEffect(() => {
+    const unsubscribe = subscribeCommandQueue(() => {
+      setQueueSummary(getQueueSummary());
+    });
+    return unsubscribe;
+  }, []);
+
   const log = useCallback((line: string) => {
     setLogLines(prev => [...prev.slice(-40), line]);
     if (line.startsWith('Detector:')) setStatus(s => ({ ...s, detector: line.replace(/^Detector:\s*/, '') }));
     if (line.startsWith('Planner:')) setStatus(s => ({ ...s, planner: line }));
   }, []);
+
+  const queueSummaryLabel = useMemo(() => {
+    const parts: string[] = [];
+    if (queueSummary.active) {
+      parts.push(`Active ${queueSummary.active.tool}`);
+    }
+    if (queueSummary.pending.length) {
+      parts.push(`${queueSummary.pending.length} pending`);
+    }
+    if (queueSummary.paused) {
+      parts.push('paused');
+    }
+    if (parts.length === 0) {
+      return queueSummary.paused ? 'Paused' : 'Idle';
+    }
+    return parts.join(' · ');
+  }, [queueSummary]);
 
   const onStep = useCallback((info: { id: string; state: 'running' | 'done' | 'error'; ms?: number }) => {
     setTimeline((prev) => {
@@ -573,6 +602,50 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
           </CollapsibleSection>
 
           <CollapsibleSection
+            title="Command Queue"
+            storageKey="agent.section.queue"
+            summary={queueSummaryLabel}
+          >
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-gray-200">
+              <div className="text-gray-400">State</div>
+              <div>{queueSummary.paused ? 'Paused' : 'Active'}</div>
+
+              <div className="text-gray-400">Active command</div>
+              <div>{queueSummary.active ? formatQueueItem(queueSummary.active) : 'None'}</div>
+
+              <div className="text-gray-400">Pending</div>
+              <div className="space-y-1">
+                {queueSummary.pending.length === 0 ? (
+                  <div className="text-gray-500">None</div>
+                ) : (
+                  queueSummary.pending.slice(0, 4).map((item) => (
+                    <div key={item.id} className="bg-gray-900/45 border border-gray-800/70 rounded px-2 py-1">
+                      {formatQueueItem(item)}
+                    </div>
+                  ))
+                )}
+                {queueSummary.pending.length > 4 && (
+                  <div className="text-[10px] text-gray-500">+ {queueSummary.pending.length - 4} more</div>
+                )}
+              </div>
+
+              <div className="text-gray-400">Recent complete</div>
+              <div className="space-y-1">
+                {queueSummary.completed && queueSummary.completed.length > 0 ? (
+                  queueSummary.completed.slice(-3).reverse().map((item) => (
+                    <div key={item.id} className="text-gray-500">{formatQueueItem(item)}</div>
+                  ))
+                ) : (
+                  <div className="text-gray-500">None</div>
+                )}
+              </div>
+
+              <div className="text-gray-400">Last error</div>
+              <div>{queueSummary.last_error ? queueSummary.last_error : 'None'}</div>
+            </div>
+          </CollapsibleSection>
+
+          <CollapsibleSection
             title="Mission Telemetry"
             storageKey="agent.section.telemetry"
             summary={`${telemetry.missionState}${telemetry.fallbackActive ? ' · fallback' : ''}`}
@@ -670,6 +743,14 @@ function formatArgs(args: any): string {
   } catch {
     try { return JSON.stringify(args); } catch { return ''; }
   }
+}
+
+function formatQueueItem(item: QueueItem): string {
+  const label = item.label && item.label.trim().length ? item.label : item.tool;
+  if (item.note && item.note.trim().length) {
+    return `${label} — ${item.note}`;
+  }
+  return label;
 }
 
 function formatTimestamp(timestamp: number): string {

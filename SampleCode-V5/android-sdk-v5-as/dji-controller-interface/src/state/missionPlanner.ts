@@ -146,6 +146,9 @@ export const missionPlannerStore = {
   },
 
   setPlan(plan: PlannedMissionEntry[]): void {
+    try {
+      console.info('[MissionPlanner] setPlan()', plan.length, 'entries', plan);
+    } catch {}
     snapshot = {
       ...snapshot,
       plan: clonePlan(plan),
@@ -154,6 +157,19 @@ export const missionPlannerStore = {
   },
 
   updatePlan(updater: (prev: PlannedMissionEntry[]) => PlannedMissionEntry[]): void {
+    try {
+      const prev = clonePlan(snapshot.plan);
+      const next = updater(prev);
+      console.info('[MissionPlanner] updatePlan() from', prev.length, 'to', next.length, 'entries');
+      snapshot = {
+        ...snapshot,
+        plan: clonePlan(next),
+      };
+      notifyPlan();
+      return;
+    } catch (err) {
+      console.warn('[MissionPlanner] updatePlan() failed, propagating', err);
+    }
     const next = updater(clonePlan(snapshot.plan));
     snapshot = {
       ...snapshot,
@@ -164,6 +180,9 @@ export const missionPlannerStore = {
 
   subscribePlan(listener: PlanListener): () => void {
     planListeners.add(listener);
+    try {
+      console.info('[MissionPlanner] subscribePlan()', snapshot.plan.length, 'entries');
+    } catch {}
     listener(clonePlan(snapshot.plan));
     return () => planListeners.delete(listener);
   },

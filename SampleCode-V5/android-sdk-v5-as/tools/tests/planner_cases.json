@@ -1,0 +1,197 @@
+[
+  {
+    "name": "ascend_absolute_to",
+    "instruction": "Ascend to 30 meters.",
+    "match": {
+      "body": [
+        {
+          "tool": "mission_fly_to",
+          "args": {
+            "target": {
+              "latitude": null,
+              "longitude": null,
+              "altitude": 30,
+              "altitude_reference": "relative_to_takeoff"
+            },
+            "mode": "set_height"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "ascend_relative_by",
+    "instruction": "Ascend by 8 meters.",
+    "match": {
+      "body": [
+        {
+          "tool": "mission_relative_move",
+          "args": {
+            "axis": "vertical",
+            "distance_m": 8
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "increase_altitude_by",
+    "instruction": "Increase altitude by 5 meters.",
+    "match": {
+      "body": [
+        {
+          "tool": "mission_relative_move",
+          "args": {
+            "axis": "vertical",
+            "distance_m": 5
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "descend_relative_by",
+    "instruction": "Descend by 7 meters.",
+    "match": {
+      "body": [
+        {
+          "tool": "mission_relative_move",
+          "args": {
+            "axis": "vertical",
+            "distance_m": -7
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "fly_back_relative",
+    "instruction": "Fly back 10 meters.",
+    "match": {
+      "body": [
+        {
+          "tool": "mission_relative_move",
+          "args": {
+            "axis": "backward",
+            "distance_m": 10
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "descend_absolute_to",
+    "instruction": "Descend to 6 meters.",
+    "match": {
+      "body": [
+        {
+          "tool": "mission_fly_to",
+          "args": {
+            "target": {
+              "latitude": null,
+              "longitude": null,
+              "altitude": 6,
+              "altitude_reference": "relative_to_takeoff"
+            },
+            "mode": "set_height"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "reach_altitude_report",
+    "instruction": "Reach 35 meters altitude and report ready.",
+    "match": {
+      "body": [
+        {
+          "tool": "mission_fly_to",
+          "args": {
+            "target": {
+              "altitude": 35,
+              "altitude_reference": "relative_to_takeoff"
+            },
+            "mode": "set_height"
+          }
+        },
+        {
+          "tool": "respond"
+        }
+      ]
+    }
+  },
+  {
+    "name": "takeoff_and_hover",
+    "instruction": "Perform a self check, take off, and hold position at 25 meters.",
+    "match": {
+      "body": [
+        {
+          "tool": "mission_self_check"
+        },
+        {
+          "tool": "flight_takeoff"
+        },
+        {
+          "tool": "mission_fly_to",
+          "args": {
+            "target": {
+              "altitude": 25,
+              "altitude_reference": "relative_to_takeoff"
+            },
+            "mode": "set_height"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "square_waypoint_plan_stage",
+    "instruction": "Fly a mission 50 meter square pattern centered here at 50 meters altitude.",
+    "match": {
+      "body": [
+        {
+          "tool": "mission_fly_to",
+          "args": {
+            "target": {
+              "altitude": 50,
+              "altitude_reference": "relative_to_takeoff"
+            },
+            "mode": "set_height"
+          }
+        },
+        {
+          "tool": "mission_waypoint_plan",
+          "args": {
+            "execute": false,
+            "plan": [
+              {
+                "latitude": 37.00022458,
+                "longitude": -121.9997188,
+                "altitude": 50,
+                "altitude_reference": "relative_to_takeoff"
+              },
+              {
+                "latitude": 37.00022458,
+                "longitude": -122.0002812,
+                "altitude": 50,
+                "altitude_reference": "relative_to_takeoff"
+              },
+              {
+                "latitude": 36.99977542,
+                "longitude": -122.0002812,
+                "altitude": 50,
+                "altitude_reference": "relative_to_takeoff"
+              },
+              {
+                "latitude": 36.99977542,
+                "longitude": -121.9997188,
+                "altitude": 50,
+                "altitude_reference": "relative_to_takeoff"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+]
