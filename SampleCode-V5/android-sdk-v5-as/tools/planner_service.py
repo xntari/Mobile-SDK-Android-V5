@@ -16,9 +16,17 @@ Run:
   OPENAI_API_KEY=sk-... python tools/planner_service.py
   # http://127.0.0.1:9002/plan
 """
+import copy
 import json
 import math
 import os
+from functools import lru_cache
+from typing import cast
+
+try:
+    import requests
+except ImportError:  # pragma: no cover
+    requests = None  # type: ignore
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -84,16 +92,16 @@ ALLOWED_REL_MOVE_AXES = {
 
 GRAMMAR_SPEC = """
 DSL (JSON only)
-- Program: {"type":"program","body":[Stmt,…]}
+- Program: {"type":"program","body":[Stmt,...]}
 - Stmt:
-  - Call: {"type":"call","tool":<str>,"args":{…},"assign"?:<var>}
+  - Call: {"type":"call","tool":<str>,"args":{...},"assign"?:<var>}
   - Let:  {"type":"let","name":<var>,"value":Expr}
-  - If:   {"type":"if","cond":Expr,"then":[Stmt,…],"else"?:[Stmt,…]}
-  - While:{"type":"while","cond":Expr,"body":[Stmt,…],"max_iter"?:<int>,"interval_ms"?:<int>}
+  - If:   {"type":"if","cond":Expr,"then":[Stmt,...],"else"?:[Stmt,...]}
+  - While:{"type":"while","cond":Expr,"body":[Stmt,...],"max_iter"?:<int>,"interval_ms"?:<int>}
   - Wait: {"type":"wait","ms":<int>}
   - Respond:{"type":"respond","text"?:<str>}
-  - Repeat:{"type":"repeat","times":<int>,"body":[Stmt,…]}  // exact N iterations, no condition
-- Expr: literal | {"var":<name>} | {"get":<var>,"path":[…]} |
+  - Repeat:{"type":"repeat","times":<int>,"body":[Stmt,...]}  // exact N iterations, no condition
+- Expr: literal | {"var":<name>} | {"get":<var>,"path":[...] } |
         {"op":"<|<=|>|>=|==|!=|and|or|not","left"?:Expr,"right"?:Expr}
 
 Core tools (primitives)
@@ -103,6 +111,7 @@ Core tools (primitives)
 - laser_enable { enabled }
 - laser_measure { x, y }
 - respond { text }
+- map_lookup tool is available via function-calling during planning; do not emit map_lookup statements in the final program.
 
 Flight & mission primitives
 - mission_self_check {}
@@ -111,8 +120,8 @@ Flight & mission primitives
 - flight_rth { action: 'start' | 'stop' }
 - mission_fly_to { target:{latitude,longitude,altitude?,altitude_reference?}, mode?, fly_to_height?, max_speed?, security_takeoff_height?, reason? } // altitude_reference must be 'relative_to_takeoff'; enforce ≥1 m horizontal separation
 - mission_relative_move { axis, distance_m, altitude_delta_m? }
-- mission_waypoint_plan { plan:Waypoint[] (≤50 entries), finish_action?, orbit_mode?, poi?, execute?, anchor? }
-  Waypoint fields: latitude/longitude (absolute) or offset:{north_m,east_m,forward_m,left_m,…} relative to anchor ('current' by default).
+- mission_waypoint_plan { plan:Waypoint[] (<=50 entries), finish_action?, orbit_mode?, poi?, execute?, anchor? }
+  Waypoint fields: latitude/longitude (absolute) or offset:{north_m,east_m,forward_m,left_m,...} relative to anchor ('current' by default).
   altitude_offset_m adjusts relative altitude when altitude is omitted. Planner may set execute:false to stage for operator review.
 - mission_scan { area, altitude_profile, line_spacing_m, speed_mps?, camera_profile? }
 - mission_patrol { perimeter, loops?, dwell_s?, trigger? }
@@ -127,7 +136,7 @@ Macros (expanded server-side until no macros remain)
  - track_object { query, seconds, interval_ms=500 }
   => repeat ceil(seconds*1000/interval_ms) times { snapshot; detect{query}->det; if det.detections.length>0 { let p=det.detections[0]; look_at{p.cx,p.cy} } wait{interval_ms} }
 
-Output strictly: {"program": { … }} (JSON only)
+Output strictly: {"program": {...}} (JSON only)
 """
 
 
@@ -138,11 +147,14 @@ def _expand_macros(program: Dict[str, Any]) -> Dict[str, Any]:
     def expand_node(n: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not isinstance(n, dict):
             return [n]
-        if n.get('type') != 'macro':
-            for k in ('then','else','body'):
-                if isinstance(n.get(k), list):
-                    n[k] = [m for node in n[k] for m in expand_node(node)]
-            return [n]
+
+        node = copy.deepcopy(n)
+
+        if node.get('type') != 'macro':
+            for k in ('then', 'else', 'body'):
+                if isinstance(node.get(k), list):
+                    node[k] = [m for child in node[k] for m in expand_node(child)]
+            return [node]
         name = n.get('name'); args = n.get('args', {})
         if name == 'measure_object':
             q = args.get('query','')
@@ -156,7 +168,7 @@ def _expand_macros(program: Dict[str, Any]) -> Dict[str, Any]:
                 {"type":"call","tool":"laser_measure","args":{"x":0.5,"y":0.5},"assign":"m"},
                 {"type":"call","tool":"respond","args":{"text":"Done"}}
             ]
-            return [m for node in out for m in expand_node(node)]
+            return [m for child in out for m in expand_node(child)]
         if name == 'track_object':
             q = args.get('query',''); seconds = int(args.get('seconds',10)); interval = int(args.get('interval_ms',500))
             times = max(1, (seconds*1000 + max(1,interval)-1)//max(1,interval))
@@ -171,8 +183,9 @@ def _expand_macros(program: Dict[str, Any]) -> Dict[str, Any]:
                     {"type":"wait","ms": interval}
                 ]
             }]
-            return [m for node in out for m in expand_node(node)]
-        return [{"type":"call","tool":"respond","args":{"text":f"Unknown macro: {name}"}}]
+            return [m for child in out for m in expand_node(child)]
+        fallback = {"type":"call","tool":"respond","args":{"text":f"Unknown macro: {name}"}}
+        return [fallback]
     body = program.get('body', [])
     program['body'] = [m for node in body for m in expand_node(node)]
     return program
@@ -255,6 +268,155 @@ def _resolve_anchor_coordinate(
     return (None, None, None)
 
 
+def _get_google_maps_api_key() -> str:
+    key = os.environ.get('GOOGLE_MAPS_API_KEY') or os.environ.get('MAP_LOOKUP_API_KEY')
+    if not key:
+        raise MapLookupError('GOOGLE_MAPS_API_KEY (or MAP_LOOKUP_API_KEY) environment variable missing')
+    return key
+
+
+def _normalize_near_arg(arg: Any, context: Dict[str, Any] | None) -> Dict[str, float] | None:
+    if isinstance(arg, dict):
+        lat = arg.get('latitude')
+        lon = arg.get('longitude')
+        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+            return {'latitude': float(lat), 'longitude': float(lon)}
+    telemetry = (context or {}).get('telemetry') or {}
+    lat = telemetry.get('latitude')
+    lon = telemetry.get('longitude')
+    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+        return {'latitude': float(lat), 'longitude': float(lon)}
+    return None
+
+
+def _normalize_radius(arg: Any) -> float:
+    if arg is None:
+        return 1000.0
+    try:
+        radius = float(arg)
+    except Exception:
+        return 1000.0
+    if radius <= 0:
+        return 1000.0
+    return max(100.0, min(radius, 20000.0))
+
+
+def _normalize_types(arg: Any) -> List[str] | None:
+    if not isinstance(arg, list):
+        return None
+    values = [str(item).strip() for item in arg if isinstance(item, (str, bytes))]
+    return values[:3] if values else None
+
+
+def _is_strict_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_numeric_expr(value: Any) -> bool:
+    if _is_strict_number(value):
+        return True
+    if isinstance(value, dict):
+        if 'var' in value or 'get' in value:
+            return True
+        if 'op' in value:
+            return True
+    return False
+
+
+def _program_contains_map_lookup(node: Any) -> bool:
+    if isinstance(node, dict):
+        if node.get('type') == 'call' and node.get('tool') == 'map_lookup':
+            return True
+        for key in ('body', 'then', 'else'):  # common containers
+            if key in node and _program_contains_map_lookup(node[key]):
+                return True
+        for value in node.values():
+            if _program_contains_map_lookup(value):
+                return True
+    elif isinstance(node, list):
+        return any(_program_contains_map_lookup(item) for item in node)
+    return False
+
+
+@lru_cache(maxsize=128)
+def _google_places_text_search_cached(key: str, query: str, location: str | None, radius: int | None, place_type: str | None) -> Dict[str, Any]:
+    params = {'key': key, 'query': query}
+    if location:
+        params['location'] = location
+    if radius:
+        params['radius'] = str(radius)
+    if place_type:
+        params['type'] = place_type
+    response = requests.get('https://maps.googleapis.com/maps/api/place/textsearch/json', params=params, timeout=10)
+    response.raise_for_status()
+    return cast(Dict[str, Any], response.json())
+
+
+def _google_places_text_search(query: str, near: Dict[str, float] | None, radius_m: float | None, types: List[str] | None) -> List[Dict[str, Any]]:
+    if not query.strip():
+        raise MapLookupError('map lookup requires a non-empty query')
+    key = _get_google_maps_api_key()
+    if requests is None:
+        raise MapLookupError('requests library is required for Google Maps lookups')
+    location = None
+    if near:
+        location = f"{near['latitude']},{near['longitude']}"
+    radius = int(radius_m) if radius_m else None
+    place_type = types[0] if types else None
+    payload = _google_places_text_search_cached(key, query.strip(), location, radius, place_type)
+    status = payload.get('status', 'UNKNOWN')
+    if status not in ('OK', 'ZERO_RESULTS'):
+        message = payload.get('error_message') or status
+        raise MapLookupError(f'Google Places error: {message}')
+    results_payload = payload.get('results') or []
+
+    def prune_metadata(raw: Dict[str, Any]) -> Dict[str, Any]:
+        pruned: Dict[str, Any] = {}
+        if not isinstance(raw, dict):
+            return pruned
+        for key in ('formatted_address', 'name', 'business_status'):
+            value = raw.get(key)
+            if value is not None:
+                pruned[key] = value
+        if isinstance(raw.get('rating'), (int, float)):
+            pruned['rating'] = raw['rating']
+        if isinstance(raw.get('user_ratings_total'), (int, float)):
+            pruned['user_ratings_total'] = raw['user_ratings_total']
+        if raw.get('types'):
+            pruned['types'] = list(raw['types'])[:5]
+        viewport = raw.get('geometry', {}).get('viewport')
+        if viewport:
+            pruned['viewport'] = viewport
+        if raw.get('place_id'):
+            pruned['place_id'] = raw['place_id']
+        return pruned
+
+    results: List[Dict[str, Any]] = []
+    for item in results_payload:
+        if not isinstance(item, dict):
+            continue
+        geometry = item.get('geometry') or {}
+        location_info = geometry.get('location') or {}
+        lat = location_info.get('lat')
+        lng = location_info.get('lng')
+        if not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)):
+            continue
+        name = item.get('name') or item.get('formatted_address') or query
+        place_id = item.get('place_id') or item.get('id') or name
+        types_list = item.get('types') or []
+        category = types_list[0] if types_list else None
+        geometry = item.get('geometry') or {}
+        result_entry = {
+            'id': place_id,
+            'name': name,
+            'latitude': float(lat),
+            'longitude': float(lng),
+            'category': category,
+            'geometry': geometry,
+            'metadata': prune_metadata(item),
+        }
+        results.append(result_entry)
+    return results
 def _apply_mission_fly_to_defaults(
     args: Dict[str, Any],
     context: Dict[str, Any] | None,
@@ -399,11 +561,18 @@ def _apply_offsets_to_plan(
         lat = cleaned.get('latitude')
         lon = cleaned.get('longitude')
 
-        if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+        lat_is_expr = isinstance(lat, dict)
+        lon_is_expr = isinstance(lon, dict)
+
+        if (lat is None or (not isinstance(lat, (int, float)) and not lat_is_expr)) or \
+           (lon is None or (not isinstance(lon, (int, float)) and not lon_is_expr)):
             delta_lat_deg = north_m / meters_per_deg_lat if meters_per_deg_lat else 0.0
             delta_lon_deg = east_m / meters_per_deg_lon if meters_per_deg_lon else 0.0
-            cleaned['latitude'] = round(anchor_lat + delta_lat_deg, 8)
-            cleaned['longitude'] = round(anchor_lon + delta_lon_deg, 8)
+
+            if not lat_is_expr:
+                cleaned['latitude'] = round(anchor_lat + delta_lat_deg, 8)
+            if not lon_is_expr:
+                cleaned['longitude'] = round(anchor_lon + delta_lon_deg, 8)
 
         altitude = cleaned.get('altitude')
         if not isinstance(altitude, (int, float)):
@@ -443,6 +612,8 @@ def _normalize_program(program: Dict[str, Any], context: Dict[str, Any] | None =
 
             tool = node.get('tool')
             args = dict(node.get('args') or {})
+            baseline = copy.deepcopy(node)
+            baseline['args'] = args
 
             if tool == 'mission_fly_to':
                 if isinstance(args, dict):
@@ -462,7 +633,8 @@ def _normalize_program(program: Dict[str, Any], context: Dict[str, Any] | None =
                         args['mode'] = 'smart_height'
                 else:
                     args['mode'] = mode_value
-                normalised.append({'type': 'call', 'tool': tool, 'args': args})
+                baseline['args'] = args
+                normalised.append(baseline)
                 continue
 
             if tool == 'mission_relative_move':
@@ -482,7 +654,8 @@ def _normalize_program(program: Dict[str, Any], context: Dict[str, Any] | None =
                     args['axis'] = axis_aliases[axis]
                 if isinstance(args.get('distance_m'), (int, float)):
                     args['distance_m'] = float(args['distance_m'])
-                normalised.append({'type': 'call', 'tool': tool, 'args': args})
+                baseline['args'] = args
+                normalised.append(baseline)
                 continue
 
             if tool == 'flight_takeoff':
@@ -490,7 +663,8 @@ def _normalize_program(program: Dict[str, Any], context: Dict[str, Any] | None =
                 alt = args.get('altitude_target_m')
                 if alt is not None and not isinstance(alt, (int, float)):
                     args.pop('altitude_target_m', None)
-                normalised.append({'type': 'call', 'tool': tool, 'args': args})
+                baseline['args'] = args
+                normalised.append(baseline)
                 continue
 
             if tool == 'mission_waypoint_plan':
@@ -499,10 +673,24 @@ def _normalize_program(program: Dict[str, Any], context: Dict[str, Any] | None =
                     execute_flag = args.get('execute')
                     if execute_flag is None:
                         args['execute'] = False
-                normalised.append({'type': 'call', 'tool': tool, 'args': args})
+                    default_alt = _resolve_default_altitude(context)
+                    plan_entries = args.get('plan')
+                    if isinstance(plan_entries, list):
+                        for entry in plan_entries:
+                            if not isinstance(entry, dict):
+                                continue
+                            altitude = entry.get('altitude')
+                            if not _is_numeric_expr(altitude):
+                                entry['altitude'] = default_alt
+                            ref = entry.get('altitude_reference')
+                            if ref not in ('relative_to_takeoff', 'absolute_wgs84', 'egm96'):
+                                entry['altitude_reference'] = 'relative_to_takeoff'
+                baseline['args'] = args
+                normalised.append(baseline)
                 continue
 
-            normalised.append({'type': 'call', 'tool': tool, 'args': args})
+            baseline['args'] = args
+            normalised.append(baseline)
 
         return normalised
 
@@ -533,97 +721,132 @@ def openai_program(
     except Exception as e:
         raise RuntimeError(f"OpenAI SDK import failed: {e!r}")
     client = OpenAI()
-    model = os.environ.get("PLANNER_MODEL", "gpt-4o-mini")
+    #model = os.environ.get("PLANNER_MODEL", "gpt-4o-mini")
+    #model = os.environ.get("PLANNER_MODEL", "gpt-5-nano")
+    model = os.environ.get("PLANNER_MODEL", "gpt-5-mini")
     system = (
         "You are a planner that emits a single JSON object with a DSL program. "
-        "Only output JSON. No prose. Always return {\"program\":{…}} with valid JSON."
+        "Only output JSON. No prose. Always return {\"program\":{...}} with valid JSON."
     )
 
-    PROMPT_EXAMPLES = """
-Example 1 – find/measure distance to an object
-Instruction: measure the distance to OBJECT_A
-Response:
-{"program": {"type":"program","body":[
-  {"type":"macro","name":"measure_object","args":{"query":"OBJECT_A"}}
-]}}
+    tool_definitions = [
+        {
+            "type": "function",
+            "function": {
+                "name": "map_lookup",
+                "description": "Resolve a place using Google Maps Places Text Search. Returns results sorted by relevance, including metadata.raw geometry for mission planning.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search phrase or POI name."},
+                        "near": {
+                            "type": "object",
+                            "properties": {
+                                "latitude": {"type": "number"},
+                                "longitude": {"type": "number"}
+                            },
+                            "required": ["latitude", "longitude"],
+                            "description": "Center coordinate (degrees). Defaults to aircraft telemetry when omitted."
+                        },
+                        "radius_m": {"type": "number", "minimum": 10, "maximum": 20000, "description": "Search radius in meters."},
+                        "types": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional list of Google Places types (e.g. library, school, route)."
+                        }
+                    },
+                    "required": ["query"],
+                },
+            },
+        }
+    ]
 
-Example 2 – track an object for N seconds
-Instruction: track OBJECT_A for 5 seconds
-Response:
-{"program": {"type":"program","body":[
-  {"type":"macro","name":"track_object","args":{"query":"OBJECT_A","seconds":5}}
-]}}
+    PROMPT_GUIDE = """
+=== Mission-first planning ===
+- Always stage an autopilot mission (`mission_waypoint_plan`) that satisfies the instruction so the operator can review, edit, and launch. A single waypoint mission is acceptable for simple legs.
+- Use `mission_fly_to` only for quick one-off repositioning when a full mission would add no value. Keep `mission_relative_move` and other manual fallbacks for cases where context/status confirms a stalled leg.
+- Set `execute:false` (or omit `execute`) so every plan loads into Mission Control for approval. Configure `finish_action` (`hover`, `return_to_launch`, `land`, etc.) and `orbit_mode` to describe post-mission behaviour.
+- Reuse data instead of guessing: `context.telemetry` exposes the current pose, `context.mission.plan_preview` shows staged waypoints, `context.object_memory` and `context.map` provide named POIs, and `context.vs_state.enabled` reveals manual-stick ownership.
+- When required information is missing (region size, target identity, preferred altitude, etc.), emit only `respond { text:"QUESTION: ..." }` to ask for clarification.
+- After composing the program, add a final `respond` call summarising the plan and suggesting follow-up actions (launch, widen search, return home, etc.).
+- Whenever `context.telemetry.latitude` and `context.telemetry.longitude` are present, treat them as the aircraft’s current position. Do **not** ask the operator for coordinates in that case—use those values automatically (default search radius ≈15 000 m unless otherwise specified).
 
-Example 3 – compose multiple actions
-Instruction: find OBJECT_A, track it for 3 seconds, then find OBJECT_B
-Response:
-{"program": {"type":"program","body":[
-  {"type":"macro","name":"measure_object","args":{"query":"OBJECT_A"}},
-  {"type":"macro","name":"track_object","args":{"query":"OBJECT_A","seconds":3}},
-  {"type":"macro","name":"measure_object","args":{"query":"OBJECT_B"}}
-]}}
+=== Tool reference (placeholders show structure) ===
+- `mission_waypoint_plan` — stage waypoint arrays with absolute coordinates or offsets from `anchor:"current"`. Keep `altitude_reference:"relative_to_takeoff"` unless the operator explicitly requests another frame. Add `heading`, `gimbal_heading`, `poi`, or `gimbal_strategy` to manage orientation.
+  Example:
+  {"program":{"type":"program","body":[
+    {"type":"call","tool":"mission_waypoint_plan","args":{
+      "anchor":"current",
+      "plan":[
+        {"offset":{"north_m":"<DELTA_NORTH_M>","east_m":0},"altitude":"<TARGET_AGL_M>","altitude_reference":"relative_to_takeoff","heading":{"mode":"toward_poi","poi":{"latitude":"<CENTER_LAT>","longitude":"<CENTER_LON>"}}},
+        {"offset":{"north_m":0,"east_m":"<DELTA_EAST_M>"},"altitude":"<TARGET_AGL_M>"}
+      ],
+      "finish_action":"return_to_launch",
+      "execute":false
+    }},
+    {"type":"call","tool":"respond","args":{"text":"PLAN: staged perimeter sweep. SUGGESTION: start mission or extend radius?"}}
+  ]}}
 
-Example 4 – repeat a block of steps
-Instruction: find OBJECT_A and track it for 3 seconds, then find OBJECT_B. wait one second. Repeat these steps three times.
-Response:
-{"program": {"type":"program","body":[
-  {"type":"repeat","times":3,"body":[
-    {"type":"macro","name":"measure_object","args":{"query":"OBJECT_A"}},
-    {"type":"macro","name":"track_object","args":{"query":"OBJECT_A","seconds":3}},
-    {"type":"macro","name":"measure_object","args":{"query":"OBJECT_B"}},
-    {"type":"wait","ms":1000}
-  ]}
-]}}
+- `mission_fly_to` — absolute repositioning when a single leg suffices.
+  Example:
+  {"program":{"type":"program","body":[
+    {"type":"call","tool":"mission_fly_to","args":{
+      "target":{"latitude":"<TARGET_LAT>","longitude":"<TARGET_LON>","altitude":"<TARGET_AGL_M>","altitude_reference":"relative_to_takeoff"},
+      "mode":"set_height"
+    }},
+    {"type":"call","tool":"respond","args":{"text":"PLAN: direct reposition queued. NEXT: confirm launch or adjust altitude?"}}
+  ]}}
 
-Example 5 – absolute altitude target (hold over current location)
-Instruction: ascend to 42 meters
-Response:
-{"program": {"type":"program","body":[
-  {"type":"call","tool":"mission_fly_to","args":{"target":{"latitude":null,"longitude":null,"altitude":42,"altitude_reference":"relative_to_takeoff"},"mode":"set_height"}}
-]}}
+- `flight_takeoff`, `flight_land`, `flight_rth` — reserve for explicit takeoff/landing/home requests. Let the orchestrator escalate to force-land if necessary.
+  Example:
+  {"program":{"type":"program","body":[
+    {"type":"call","tool":"flight_takeoff","args":{}},
+    {"type":"call","tool":"respond","args":{"text":"PLAN: takeoff to default hover. FOLLOW-UP: deploy mission or hold position?"}}
+  ]}}
 
-Example 6 – relative altitude delta
-Instruction: increase altitude by 12 meters
-Response:
-{"program": {"type":"program","body":[
-  {"type":"call","tool":"mission_relative_move","args":{"axis":"vertical","distance_m":12}}
-]}}
+- `mission_relative_move` — only after a confirmed stall or when the operator explicitly asks for manual correction. Pair with context-aware messaging.
+  Example:
+  {"program":{"type":"program","body":[
+    {"type":"call","tool":"respond","args":{"text":"NOTICE: last leg stalled. Applying 2 m upward corrective move."}},
+    {"type":"call","tool":"mission_relative_move","args":{"axis":"vertical","distance_m":2}}
+  ]}}
 
-Example 7 – relative descent delta
-Instruction: descend by 8 meters
-Response:
-{"program": {"type":"program","body":[
-  {"type":"call","tool":"mission_relative_move","args":{"axis":"vertical","distance_m":-8}}
-]}}
+- `look_at`, `laser_enable`, `laser_measure` — camera/laser utilities to highlight POIs or collect measurements before/after missions.
+  Example:
+  {"program":{"type":"program","body":[
+    {"type":"call","tool":"look_at","args":{"x":0.5,"y":0.45}},
+    {"type":"call","tool":"respond","args":{"text":"CAMERA: aligned with target point. Ready to start mission?"}}
+  ]}}
 
-Example 8 – absolute altitude with acknowledgement
-Instruction: reach 35 meters altitude and report ready
-Response:
-{"program": {"type":"program","body":[
-  {"type":"call","tool":"mission_fly_to","args":{"target":{"latitude":null,"longitude":null,"altitude":35,"altitude_reference":"relative_to_takeoff"},"mode":"set_height"}},
-  {"type":"call","tool":"respond","args":{"text":"Ready"}}
-]}}
+- `respond` — general communication. Use `QUESTION:` for clarifications, otherwise summarise plans and propose next steps or related ideas.
+- `map_lookup` — resolve places through Google Maps Places Text Search. Provide `query` plus optional `near { latitude, longitude }`, `radius_m`, and Google Places `types` (e.g., `school`, `hospital`, `park`, `route`). Default to the aircraft telemetry as the anchor with a 1 km radius when the operator does not specify a center. Call the tool via function-calling during planning; once the lookup returns, save `{results, best, query, anchor, radius_m, types}` in variables and continue without emitting `map_lookup` statements in the final program. Legacy helpers like `hosp_lookup`/`roads_lookup` are retired.
 
-Example 9 – square waypoint mission around current position
-Instruction: fly a mission 50 meter square pattern centered here at 50 meters altitude
-Response:
-{"program": {"type":"program","body":[
-  {"type":"call","tool":"mission_fly_to","args":{"target":{"latitude":null,"longitude":null,"altitude":50,"altitude_reference":"relative_to_takeoff"},"mode":"set_height"}},
-  {"type":"call","tool":"mission_waypoint_plan","args":{
-    "anchor":"current",
-    "plan":[
-      {"offset":{"north_m":25,"east_m":25},"altitude":50},
-      {"offset":{"north_m":25,"east_m":-25},"altitude":50},
-      {"offset":{"north_m":-25,"east_m":-25},"altitude":50},
-      {"offset":{"north_m":-25,"east_m":25},"altitude":50}
-    ],
-    "finish_action":"return_to_launch",
-    "execute":false
-  }}
-]}}
+=== Additional guidance ===
+- Aircraft pose: `context.telemetry.latitude` / `context.telemetry.longitude` represent the current aircraft position. Use that as the launch anchor unless the operator supplies an alternate takeoff point.
+- Map context: only minimal markers (aircraft, home, mission targets) are supplied in `context.map.features`. Use tool responses to obtain road/perimeter geometry; if higher fidelity is required, ask the operator to supply coordinates. Unless the operator provides a different anchor, treat `context.telemetry` as the default `near` center with an initial radius of ~1 km and expand only when necessary.
+- Google Maps metadata: `map_lookup` results expose rich Google Places fields inside `metadata.raw` (viewport bounds, place_id, types, plus_codes). Use viewports to approximate the width/length of a feature, derive search radii, and compute bearings/distances from current telemetry. Query with specific `types` (e.g., `['route']`, `['park']`, `['school']`) or scoped text (“trail near Los Gatos Creek”) to obtain geometry that matches the requested mission. When higher-fidelity polygons are required, ask the operator to supply coordinates or draw the shape.
+- Bearing-aware missions: populate waypoint `heading` or `poi` (and `gimbal_heading`) so the aircraft/camera faces the area of interest throughout the leg.
+- Pattern generation: compute offsets from requested width/length/spacing. Alternate east/west passes for lawnmower patterns; approximate circles with evenly spaced points.
+- Repetition: set mission `finish_action` appropriately and suggest loops, or wrap planning inside a `repeat` block when repeated staging is desired.
+- Safety: honour guardrails from the manifest (waypoint limits, payload size) and stay within altitude constraints derived from regulations and context data.
+- Status feedback: if `status` or `context.agent_status` contains `last_error`, acknowledge it via `respond`, adjust the plan, or ask how to proceed.
 """
 
     print(f"{instruction=}")
+    telemetry_summary = "Telemetry unavailable"
+    telemetry_block = {}
+    if context and isinstance(context, dict):
+        telemetry_block = context.get('telemetry') or {}
+    if isinstance(telemetry_block, dict):
+        lat = telemetry_block.get('latitude')
+        lon = telemetry_block.get('longitude')
+        alt = telemetry_block.get('altitude_msl_m')
+        agl = telemetry_block.get('altitude_above_takeoff_m')
+        heading = telemetry_block.get('heading_deg')
+        telemetry_summary = (
+            f"lat={lat!r}, lon={lon!r}, alt_msl={alt!r}, agl={agl!r}, heading={heading!r}"
+        )
+
     context_json = "{}"
     if context:
         try:
@@ -631,7 +854,7 @@ Response:
         except Exception:
             context_json = json.dumps({"error": "context_dump_failed"})
         if len(context_json) > 6000:
-            context_json = context_json[:6000] + "\n…(truncated)"
+            context_json = context_json[:6000] + "\n...(truncated)"
 
     status_json = None
     if status:
@@ -642,55 +865,131 @@ Response:
 
     user_parts = [
         f"Instruction: {instruction}\n\n",
+        f"Aircraft telemetry snapshot: {telemetry_summary}\n\n",
         f"PlannerContext (JSON):\n{context_json}\n\n",
     ]
     if status_json:
         user_parts.append(f"Status snapshot (JSON):\n{status_json}\n\n")
     user_parts.extend([
         f"{GRAMMAR_SPEC}\n",
-        "Waypoint-first guidelines: prefer mission_fly_to with altitude_reference 'relative_to_takeoff' for altitude or position changes. Only emit flight_takeoff {} when the operator explicitly requests a simple takeoff check. Omit latitude/longitude in mission_fly_to to remain at the current horizontal position. mission_relative_move expresses offsets relative to the aircraft heading (forward/back/left/right) or absolute cardinal directions (north/south/east/west) and 'vertical' for pure altitude changes.\n",
-        "Relative vs absolute altitude hints: \n",
-        "- Phrases such as 'ascend to', 'reach', 'drop to', 'go to', 'take off to' describe absolute targets → emit mission_fly_to with the requested altitude.\n",
-        "- Phrases such as 'ascend by', 'increase altitude by', 'go up another', 'descend by', 'drop altitude by' describe deltas → emit mission_relative_move with axis:'vertical' and a signed distance (negative for descent).\n",
-        "- Combine altitude and horizontal moves as separate calls so each step can be monitored individually.\n",
-        "mission_waypoint_plan guidance:\n",
-        "- Use anchor:'current' (default) or manual targets/POIs provided in context when staging patterns.\n",
-        "- Provide relative offsets via offset{north_m,east_m,forward_m,left_m,…} so the service can convert to earth coordinates precisely.\n",
-        "- Set execute:false (or omit) so the mission is staged for operator approval before launch.\n",
-        "PlannerContext guidance:\n",
-        "- context.telemetry.* reports current aircraft state; avoid redundant takeoff/climb commands when targets already satisfied.\n",
-        "- context.queue lists active/pending commands maintained by the orchestrator—do not re-issue entries already pending or in-flight.\n",
-        "- context.mission/map describe staged waypoints and manual targets; reuse them instead of guessing coordinates.\n",
-        "- context.vs_state.enabled=true means virtual stick is held by another owner; request disable before manual overrides.\n",
-        "If the prompt or context is insufficient, emit a clarification via respond { text:\"QUESTION\" } instead of guessing.\n",
-        "Use macros when appropriate. Expand nothing yourself; macros will be expanded server-side.\n",
-        "Do not include prose or comments.\n",
-        "Respond with JSON only in the form {\"program\":{…}}.\n\n",
-        f"{PROMPT_EXAMPLES}\n",
+        "Mission-first principle: stage missions with mission_waypoint_plan. Use mission_fly_to only for single repositioning, and mission_relative_move solely when context/status indicates a stalled leg requiring manual assistance.\n",
+        "Altitude semantics: interpret phrases like 'to 50 m' as absolute targets (mission waypoint altitude with altitude_reference 'relative_to_takeoff'). Treat deltas ('up by 5 m') as potential recovery moves and prefer to restage the mission rather than chaining relative offsets unless context demands immediate correction.\n",
+        "Use provided context: reuse coordinates from context.telemetry, context.mission.plan_preview, context.object_memory, and context.map. Reference home coordinates for 'return home' instructions instead of invoking RTH unless explicitly requested.\n",
+        "Telemetry is the aircraft location: treat context.telemetry.latitude/longitude as the drone's current position. Unless the operator supplies a different anchor, automatically use that coordinate (starting with ~1 km radius) when performing map lookups or locating nearby POIs.\n",
+        "Use mission_defaults.altitude_agl_m (or 35 m if absent) when the instruction does not specify altitude. Always return numeric altitudes with altitude_reference 'relative_to_takeoff' unless explicitly told otherwise.\n",
+        "Map lookup tool calls happen during planning only; when you return the final {\\\"program\\\":{...}} JSON, capture the lookup results in variables (e.g., let lookup={...}) and do not include map_lookup statements.\n",
+        "Clarify when needed: if required parameters are missing, emit respond { text:\"QUESTION: ...\" } as the sole statement.\n",
+        "Summarise & suggest: include at least one final respond call describing the staged plan and offering follow-up actions or suggestions.\n",
+        "Keep output lean: no prose outside JSON, no comments, no macros left unexpanded. Respond with JSON only in the form {\"program\":{...}}.\n\n",
+        f"{PROMPT_GUIDE}\n",
         "Now respond for the given Instruction above.",
     ])
     user = ''.join(user_parts)
 
     try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[{"role":"system","content":system},{"role":"user","content":user}],
-            temperature=0.2,
-            response_format={"type":"json_object"},
-        )
-    except Exception as e:
-        raise RuntimeError(f"LLM call failed: {e}")
-    content = resp.choices[0].message.content or "{}"
-    try:
-        data = json.loads(content)
-    except Exception as e:
-        raise RuntimeError(f"Planner returned non-JSON. raw={content[:200]}… err={e}")
-    if not isinstance(data, dict) or "program" not in data:
-        raise RuntimeError(f"LLM did not return program key. raw={content[:200]}…")
-    program = data.get("program")
-    if not isinstance(program, dict):
-        raise RuntimeError("Planner response missing program")
-    return program
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+
+        max_passes = 6
+        passes_without_tool = 0
+        while True:
+            try:
+                completion = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    tools=tool_definitions,
+                )
+            except Exception as exc:
+                raise RuntimeError(f"LLM call failed: {exc}") from exc
+
+            message = completion.choices[0].message
+
+            assistant_entry: Dict[str, Any] = {
+                "role": "assistant",
+                "content": message.content or "",
+            }
+            if message.tool_calls:
+                assistant_entry["tool_calls"] = [
+                    {
+                        "id": call.id,
+                        "type": "function",
+                        "function": {
+                            "name": call.function.name,
+                            "arguments": call.function.arguments,
+                        },
+                    }
+                    for call in message.tool_calls
+                ]
+            messages.append(assistant_entry)
+
+            if not message.tool_calls:
+                content = message.content or "{}"
+                try:
+                    data = json.loads(content)
+                except Exception as exc:
+                    raise RuntimeError(f"Planner returned non-JSON. raw={content[:200]}... err={exc}")
+                if not isinstance(data, dict) or "program" not in data:
+                    raise RuntimeError(f"LLM did not return program key. raw={content[:200]}...")
+                program = data.get("program")
+                if not isinstance(program, dict):
+                    raise RuntimeError("Planner response missing program")
+                if _program_contains_map_lookup(program):
+                    passes_without_tool += 1
+                    if passes_without_tool >= max_passes:
+                        raise RuntimeError("Planner returned map_lookup call in final program repeatedly")
+                    messages.append({
+                        "role": "system",
+                        "content": "You have already executed map_lookup. Now return the final {\"program\":{...}} with the lookup results in variables (e.g., let lookup = {...}) and no map_lookup tool calls in the program body.",
+                    })
+                    continue
+                return program
+
+            passes_without_tool = 0
+            for call in message.tool_calls or []:
+                if call.function.name != 'map_lookup':
+                    tool_response = {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "name": call.function.name,
+                        "content": json.dumps({"error": f"Unsupported tool {call.function.name}"}),
+                    }
+                    messages.append(tool_response)
+                    continue
+
+                try:
+                    arguments = json.loads(call.function.arguments or '{}')
+                except json.JSONDecodeError:
+                    arguments = {}
+
+                query = str(arguments.get('query') or '').strip()
+                near = _normalize_near_arg(arguments.get('near'), context)
+                radius = _normalize_radius(arguments.get('radius_m'))
+                type_list = _normalize_types(arguments.get('types'))
+
+                try:
+                    results = _google_places_text_search(query, near, radius, type_list)
+                    payload: Dict[str, Any] = {
+                        'results': results[:10],
+                        'best': results[0] if results else None,
+                        'query': query,
+                        'anchor': near,
+                        'radius_m': radius,
+                        'types': type_list,
+                    }
+                except Exception as exc:
+                    payload = {'error': str(exc), 'query': query, 'anchor': near, 'radius_m': radius, 'types': type_list}
+
+                messages.append({
+                    'role': 'tool',
+                    'tool_call_id': call.id,
+                    'name': 'map_lookup',
+                    'content': json.dumps(payload),
+                })
+
+    except Exception as exc:
+        raise RuntimeError(f"LLM call failed: {exc}") from exc
 
 
 def validate_program(program: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -808,12 +1107,13 @@ def validate_program(program: Dict[str, Any]) -> List[Dict[str, Any]]:
                                 errors.append({"message":"Waypoint must be object","path":wp_path}); continue
                             lat = waypoint.get('latitude')
                             lon = waypoint.get('longitude')
-                            if not isinstance(lat, (int, float)) or lat < -90 or lat > 90:
+                            if not _is_numeric_expr(lat) or (_is_strict_number(lat) and (lat < -90 or lat > 90)):
                                 errors.append({"message":"Waypoint latitude must be within [-90,90]","path":wp_path + '.latitude'})
-                            if not isinstance(lon, (int, float)) or lon < -180 or lon > 180:
+                            if not _is_numeric_expr(lon) or (_is_strict_number(lon) and (lon < -180 or lon > 180)):
                                 errors.append({"message":"Waypoint longitude must be within [-180,180]","path":wp_path + '.longitude'})
-                            if waypoint.get('altitude') is not None and not isinstance(waypoint.get('altitude'), (int, float)):
-                                errors.append({"message":"Waypoint altitude must be numeric or null","path":wp_path + '.altitude'})
+                            altitude_value = waypoint.get('altitude')
+                            if altitude_value is not None and not _is_numeric_expr(altitude_value):
+                                errors.append({"message":"Waypoint altitude must be numeric or expression","path":wp_path + '.altitude'})
                             ref = waypoint.get('altitude_reference')
                             if ref is not None and ref not in ('relative_to_takeoff', 'absolute_wgs84', 'egm96'):
                                 errors.append({"message":"Waypoint altitude_reference invalid","path":wp_path + '.altitude_reference'})
@@ -870,6 +1170,96 @@ def validate_program(program: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     return errors
 
+def _prune_planner_context(context: Dict[str, Any] | None) -> Dict[str, Any] | None:
+    if not context or not isinstance(context, dict):
+        return None
+
+    pruned: Dict[str, Any] = {}
+
+    pruned['mission_defaults'] = {
+        'altitude_agl_m': 35.0,
+    }
+
+    telemetry = context.get('telemetry')
+    if isinstance(telemetry, dict):
+        pruned['telemetry'] = {
+            'latitude': telemetry.get('latitude'),
+            'longitude': telemetry.get('longitude'),
+            'altitude_msl_m': telemetry.get('altitude_msl_m'),
+            'altitude_above_takeoff_m': telemetry.get('altitude_above_takeoff_m'),
+            'heading_deg': telemetry.get('heading_deg'),
+            'flight_mode': telemetry.get('flight_mode'),
+            'motors_on': telemetry.get('motors_on'),
+            'gps_signal_level': telemetry.get('gps_signal_level'),
+            'satellite_count': telemetry.get('satellite_count'),
+        }
+
+    battery = context.get('battery')
+    if isinstance(battery, dict) and battery.get('percentage') is not None:
+        pruned['battery'] = {'percentage': battery.get('percentage')}
+
+    mission = context.get('mission')
+    if isinstance(mission, dict):
+        simplified: Dict[str, Any] = {
+            'plan_count': mission.get('plan_count'),
+        }
+        if isinstance(mission.get('manual_target'), dict):
+            mt = mission['manual_target']
+            simplified['manual_target'] = {
+                'latitude': mt.get('latitude'),
+                'longitude': mt.get('longitude'),
+                'altitude': mt.get('altitude'),
+                'source': mt.get('source'),
+            }
+        if isinstance(mission.get('poi_target'), dict):
+            pt = mission['poi_target']
+            simplified['poi_target'] = {
+                'latitude': pt.get('latitude'),
+                'longitude': pt.get('longitude'),
+                'altitude': pt.get('altitude'),
+            }
+        if isinstance(mission.get('active_waypoint'), dict):
+            aw = mission['active_waypoint']
+            simplified['active_waypoint'] = {
+                'latitude': aw.get('latitude'),
+                'longitude': aw.get('longitude'),
+                'altitude': aw.get('altitude'),
+                'index': aw.get('index'),
+            }
+        pruned['mission'] = simplified
+
+    map_block = context.get('map')
+    if isinstance(map_block, dict):
+        features = map_block.get('features')
+        if isinstance(features, list) and features:
+            trimmed_features: List[Dict[str, Any]] = []
+            for feature in features[:4]:
+                if not isinstance(feature, dict):
+                    continue
+                trimmed_features.append({
+                    'id': feature.get('id'),
+                    'type': feature.get('type'),
+                    'name': feature.get('name'),
+                    'category': feature.get('category'),
+                    'latitude': feature.get('latitude'),
+                    'longitude': feature.get('longitude'),
+                    'altitude': feature.get('altitude'),
+                })
+            if trimmed_features:
+                pruned['map'] = {'features': trimmed_features}
+
+    return pruned or None
+
+
+def _resolve_default_altitude(context: Dict[str, Any] | None) -> float:
+    if isinstance(context, dict):
+        defaults = context.get('mission_defaults')
+        if isinstance(defaults, dict):
+            value = defaults.get('altitude_agl_m')
+            if isinstance(value, (int, float)) and value > 0:
+                return float(value)
+    return 35.0
+
 
 @app.post("/plan")
 def plan(req: PlanRequest):
@@ -879,13 +1269,15 @@ def plan(req: PlanRequest):
         return {"errors": [{"message": "Planner unavailable: OPENAI_API_KEY not set"}]}
 
     # Ask LLM for a high-level program (may contain macros)
-    if req.context:
+    llm_context = _prune_planner_context(req.context)
+
+    if llm_context:
         try:
-            context_dump = json.dumps(req.context, indent=2)
+            context_dump = json.dumps(llm_context, indent=2)
             print("----context-----------")
-            print(context_dump[:800])
-            if len(context_dump) > 800:
-                print("… (context truncated)")
+            print(context_dump[:4000])
+            if len(context_dump) > 4000:
+                print("... (context truncated)")
             print("-------------------------")
         except Exception as exc:
             print(f"context print failed: {exc}")
@@ -893,14 +1285,18 @@ def plan(req: PlanRequest):
         try:
             status_dump = json.dumps(req.status, indent=2)
             print("----status------------")
-            print(status_dump[:400])
-            if len(status_dump) > 400:
-                print("… (status truncated)")
+            print(status_dump[:4000])
+            if len(status_dump) > 4000:
+                print("... (status truncated)")
             print("-------------------------")
         except Exception as exc:
             print(f"status print failed: {exc}")
 
-    high_level = openai_program(req.instruction, req.context, req.status)
+    try:
+        high_level = openai_program(req.instruction, llm_context, req.status)
+    except Exception as exc:
+        print(f"planner OpenAI call failed: {exc}")
+        return {"errors": [{"message": f"planner error: {exc}"}]}
     print("----high_level-----------")
     print(f"{high_level=}")
     print("-------------------------")
@@ -933,3 +1329,6 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PLANNER_PORT", "9002"))
     uvicorn.run(app, host="127.0.0.1", port=port)
+
+class MapLookupError(RuntimeError):
+    pass

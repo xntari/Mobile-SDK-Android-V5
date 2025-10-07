@@ -3,6 +3,8 @@ import { agentTelemetryStore } from '../state/agentTelemetry';
 import { missionPlannerStore } from '../state/missionPlanner';
 import { cameraControlStore } from '../state/cameraControls';
 import { objectMemoryTargetStore } from '../state/objectMemoryTargets';
+import { objectMemoryCatalogStore } from '../state/objectMemoryCatalog';
+import type { MapCoordinate } from '../config/mapGeometry';
 import { getQueueSummary } from './commandQueue';
 
 export interface PlannerContextQueueItemSummary {
@@ -80,6 +82,44 @@ export interface PlannerContextMissionSummary {
   orbit_mode?: string | null;
 }
 
+export interface PlannerContextMapPointFeature {
+  id: string;
+  type: 'point';
+  name?: string;
+  category?: string;
+  latitude: number;
+  longitude: number;
+  altitude?: number | null;
+  radius_m?: number | null;
+  metadata?: Record<string, any>;
+}
+
+export interface PlannerContextMapPolylineFeature {
+  id: string;
+  type: 'polyline';
+  name?: string;
+  category?: string;
+  path: Array<{ latitude: number; longitude: number; altitude?: number | null }>;
+  length_m?: number | null;
+  metadata?: Record<string, any>;
+}
+
+export interface PlannerContextMapPolygonFeature {
+  id: string;
+  type: 'polygon';
+  name?: string;
+  category?: string;
+  rings: Array<Array<{ latitude: number; longitude: number; altitude?: number | null }>>;
+  area_m2?: number | null;
+  centroid?: { latitude: number; longitude: number } | null;
+  metadata?: Record<string, any>;
+}
+
+export type PlannerContextMapFeature =
+  | PlannerContextMapPointFeature
+  | PlannerContextMapPolylineFeature
+  | PlannerContextMapPolygonFeature;
+
 export interface PlannerContextMapSummary {
   plan_preview?: PlannerContextMissionWaypoint[];
   manual_target?: {
@@ -93,6 +133,7 @@ export interface PlannerContextMapSummary {
     longitude?: number;
     altitude?: number | null;
   } | null;
+  features?: PlannerContextMapFeature[];
 }
 
 export interface PlannerContextCamera {
@@ -236,6 +277,75 @@ function prune<T>(value: T): T {
   return value === undefined ? (undefined as unknown as T) : value;
 }
 
+const EARTH_RADIUS_METERS = 6378137;
+
+function toRadians(value: number): number {
+  return (value * Math.PI) / 180;
+}
+
+function haversineMeters(a: MapCoordinate, b: MapCoordinate): number {
+  const lat1 = toRadians(a.latitude);
+  const lat2 = toRadians(b.latitude);
+  const dLat = lat2 - lat1;
+  const dLon = toRadians(b.longitude - a.longitude);
+  const sinLat = Math.sin(dLat / 2);
+  const sinLon = Math.sin(dLon / 2);
+  const h = sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLon * sinLon;
+  return 2 * EARTH_RADIUS_METERS * Math.atan2(Math.sqrt(h), Math.sqrt(Math.max(0, 1 - h)));
+}
+
+function computePolylineLength(points: MapCoordinate[]): number | null {
+  if (points.length < 2) return null;
+  let length = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    length += haversineMeters(points[i - 1], points[i]);
+  }
+  return length;
+}
+
+function projectToLocalXY(origin: MapCoordinate, point: MapCoordinate): { x: number; y: number } {
+  const originLatRad = toRadians(origin.latitude);
+  const dLat = toRadians(point.latitude - origin.latitude);
+  const dLon = toRadians(point.longitude - origin.longitude);
+  const x = dLon * Math.cos(originLatRad) * EARTH_RADIUS_METERS;
+  const y = dLat * EARTH_RADIUS_METERS;
+  return { x, y };
+}
+
+function computePolygonMetrics(ring: MapCoordinate[]): { area?: number; centroid?: { latitude: number; longitude: number } } {
+  if (ring.length < 3) {
+    return {};
+  }
+  const origin = ring[0];
+  const points = ring.map((p) => projectToLocalXY(origin, p));
+  let area = 0;
+  let cx = 0;
+  let cy = 0;
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const { x: x0, y: y0 } = points[i];
+    const { x: x1, y: y1 } = points[i + 1];
+    const cross = x0 * y1 - x1 * y0;
+    area += cross;
+    cx += (x0 + x1) * cross;
+    cy += (y0 + y1) * cross;
+  }
+  area /= 2;
+  if (Math.abs(area) < 1e-2) {
+    return {};
+  }
+  const centroidX = cx / (6 * area);
+  const centroidY = cy / (6 * area);
+  const centroidLat = origin.latitude + (centroidY / EARTH_RADIUS_METERS) * (180 / Math.PI);
+  const centroidLon = origin.longitude + (centroidX / (EARTH_RADIUS_METERS * Math.cos(toRadians(origin.latitude)))) * (180 / Math.PI);
+  return {
+    area: Math.abs(area),
+    centroid: {
+      latitude: centroidLat,
+      longitude: centroidLon,
+    },
+  };
+}
+
 export function collectPlannerContext(): PlannerContext {
   const now = Date.now();
   const { bridgeData, connectionStatus } = bridgeManager.getState();
@@ -366,13 +476,129 @@ export function collectPlannerContext(): PlannerContext {
     orbit_mode: missionSnapshot.orbitMode ?? null,
   };
 
-  const mapContext = missionSnapshot.plan.length || missionSnapshot.manualTarget || missionSnapshot.poiTarget
-    ? {
-        plan_preview: planPreview,
-        manual_target: missionContext.manual_target,
-        poi_target: missionContext.poi_target,
-      }
-    : undefined;
+  const mapFeatures: PlannerContextMapFeature[] = [];
+  const featureIds = new Set<string>();
+
+  const pushFeature = (feature: PlannerContextMapFeature | null | undefined) => {
+    if (!feature) return;
+    if (featureIds.has(feature.id)) return;
+    featureIds.add(feature.id);
+    mapFeatures.push(feature);
+  };
+
+  const memoryEntries = objectMemoryCatalogStore.getSnapshot().slice(0, 0);
+  const selectedObjectMemory = objectMemoryTargetStore.getCurrent();
+
+  // Mission planner derived features
+  if (missionSnapshot.manualTarget?.latitude != null && missionSnapshot.manualTarget?.longitude != null) {
+    pushFeature({
+      id: 'mission_manual_target',
+      type: 'point',
+      name: 'Manual target',
+      category: 'mission_target',
+      latitude: missionSnapshot.manualTarget.latitude,
+      longitude: missionSnapshot.manualTarget.longitude,
+      altitude: missionSnapshot.manualTarget.altitude ?? null,
+      metadata: {
+        source: missionSnapshot.manualTarget.source,
+      },
+    });
+  }
+
+  if (missionSnapshot.poiTarget?.latitude != null && missionSnapshot.poiTarget?.longitude != null) {
+    pushFeature({
+      id: 'mission_poi_target',
+      type: 'point',
+      name: 'POI target',
+      category: 'mission_poi',
+      latitude: missionSnapshot.poiTarget.latitude,
+      longitude: missionSnapshot.poiTarget.longitude,
+      altitude: missionSnapshot.poiTarget.altitude ?? null,
+    });
+  }
+
+  if (missionSnapshot.activeWaypoint?.latitude != null && missionSnapshot.activeWaypoint?.longitude != null) {
+    pushFeature({
+      id: `mission_active_waypoint_${missionSnapshot.activeWaypoint.index ?? 'current'}`,
+      type: 'point',
+      name: missionSnapshot.activeWaypoint.label ?? 'Active waypoint',
+      category: 'mission_waypoint',
+      latitude: missionSnapshot.activeWaypoint.latitude,
+      longitude: missionSnapshot.activeWaypoint.longitude,
+      altitude: missionSnapshot.activeWaypoint.altitude ?? null,
+      metadata: {
+        kind: missionSnapshot.activeWaypoint.kind,
+        index: missionSnapshot.activeWaypoint.index,
+      },
+    });
+  }
+
+  if (missionSnapshot.plan.length >= 2) {
+    const path = missionSnapshot.plan
+      .map((entry) => ({
+        latitude: entry.latitude,
+        longitude: entry.longitude,
+        altitude: entry.altitude ?? null,
+      }))
+      .filter((point) => Number.isFinite(point.latitude) && Number.isFinite(point.longitude));
+    if (path.length >= 2) {
+      pushFeature({
+        id: 'mission_plan_current',
+        type: 'polyline',
+        name: 'Mission plan',
+        category: 'mission_plan',
+        path,
+        length_m: computePolylineLength(path),
+        metadata: {
+          orbit_mode: missionSnapshot.orbitMode ?? undefined,
+        },
+      });
+    }
+  }
+
+  const telemetryHome = telemetry?.home_location;
+  if (telemetryHome && Number.isFinite(telemetryHome.latitude) && Number.isFinite(telemetryHome.longitude)) {
+    pushFeature({
+      id: 'home_location',
+      type: 'point',
+      name: 'Home position',
+      category: 'home',
+      latitude: telemetryHome.latitude,
+      longitude: telemetryHome.longitude,
+      altitude: telemetryHome.altitude ?? null,
+    });
+  }
+
+  if (telemetry?.location && Number.isFinite(telemetry.location.latitude) && Number.isFinite(telemetry.location.longitude)) {
+    pushFeature({
+      id: 'aircraft_position',
+      type: 'point',
+      name: 'Aircraft',
+      category: 'aircraft',
+      latitude: telemetry.location.latitude,
+      longitude: telemetry.location.longitude,
+      altitude: telemetry.location.altitude ?? null,
+      metadata: {
+        heading_deg: telemetry.heading,
+      },
+    });
+  }
+
+  const mapContext = (() => {
+    const hasPlan = planPreview.length > 0;
+    const manualTarget = missionContext.manual_target ?? null;
+    const poiTarget = missionContext.poi_target ?? null;
+    const features = mapFeatures.length ? mapFeatures : undefined;
+    if (!hasPlan && !manualTarget && !poiTarget && !features) {
+      return undefined;
+    }
+    return {
+      plan_preview: hasPlan ? planPreview : undefined,
+      manual_target: manualTarget,
+      poi_target: poiTarget,
+      features,
+    } as PlannerContextMapSummary;
+  })();
 
   const cameraSnapshot = cameraControlStore.getSnapshot();
   const cameraContext: PlannerContextCamera = {
@@ -390,7 +616,7 @@ export function collectPlannerContext(): PlannerContext {
     last_laser: summarizeLaserResult(cameraSnapshot.lastLaserResult),
   };
 
-  const selectedCluster = objectMemoryTargetStore.getCurrent();
+  const selectedCluster = selectedObjectMemory;
   const objectMemoryContext: PlannerContextObjectMemory = {
     selected_cluster: selectedCluster
       ? {
@@ -402,21 +628,6 @@ export function collectPlannerContext(): PlannerContext {
         }
       : null,
   };
-
-  const obstaclesContext: PlannerContextObstacles | undefined = telemetry?.obstacle_avoidance
-    ? {
-        enabled: booleanOrUndefined(telemetry.obstacle_avoidance.enabled),
-        sectors: Array.isArray(telemetry.obstacle_avoidance.sectors)
-          ? telemetry.obstacle_avoidance.sectors.slice(0, 12).map((sector: any) => ({
-              angle: numberOrUndefined(sector?.angle),
-              distance: numberOrUndefined(sector?.distance),
-              warning_level: stringOrUndefined(sector?.warning_level),
-            }))
-          : undefined,
-      }
-    : undefined;
-
-  const diagnostics = telemetry?.diagnostics ? [...telemetry.diagnostics] : undefined;
 
   const queueSummary = getQueueSummary();
 
@@ -432,8 +643,6 @@ export function collectPlannerContext(): PlannerContext {
     queue: queueSummary,
     camera: cameraContext,
     object_memory: objectMemoryContext,
-    obstacles: obstaclesContext,
-    diagnostics,
     simulator: telemetry?.simulator,
   } as PlannerContext);
 

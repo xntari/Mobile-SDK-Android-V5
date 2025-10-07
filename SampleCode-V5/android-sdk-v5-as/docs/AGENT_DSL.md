@@ -34,6 +34,7 @@ Tool catalog (subset)
 - laser_enable { enabled }
 - laser_measure { x, y } -> { distance_m, lat, lon, alt_m }
 - respond { text }
+- map_lookup { query, near?, radius_m?, types? } – Google Places Text Search tool. The planner calls this function as needed; runtime returns `{ results: [...], best: {...}, query, anchor, radius_m, types }`. Supply optional `near { latitude, longitude }`, `radius_m` (10–20 000 m), and Google Places `types` such as `school`, `hospital`, `park`, `route`. Each result preserves `metadata.raw` (viewport, place_id, formatted address) so subsequent steps can extract geometry without additional tool calls. Legacy helpers (`hosp_lookup`, `roads_lookup`, etc.) are no longer available.
 
 Flight & mission primitives (v1)
 - mission_self_check {}

@@ -4,6 +4,7 @@ import { missionPlannerStore } from '../state/missionPlanner';
 import { addMetersToLatLon, bearingOffsetToMeters, normalizeHeadingDegrees, EARTH_RADIUS_METERS } from '../utils/geo';
 import { collectPlannerContext } from './plannerContext';
 import type { PlannedMissionEntry, MissionEntryKind, OrbitMode, PoiTarget } from '../types/missionPlanner';
+import { mapLookup } from './mapLookup';
 
 const MIN_HORIZONTAL_SEPARATION_M = 1.0;
 const MIN_VERTICAL_SEPARATION_M = 0.6;
@@ -29,6 +30,62 @@ interface RelativeFlyToExtras {
   max_speed?: any;
   security_takeoff_height?: any;
   reason?: any;
+}
+
+interface PlannerStatusSnapshot {
+  timestamp_ms: number;
+  last_instruction: string;
+  last_result: 'success' | 'validation_error' | 'failure';
+  last_errors?: Array<{ message: string; path?: string }>;
+  last_tool_sequence?: string[];
+  staged_waypoints?: number;
+  notes?: string[];
+}
+
+let lastPlannerStatus: PlannerStatusSnapshot | null = null;
+
+function getPlannerStatusPayload(): PlannerStatusSnapshot | undefined {
+  if (!lastPlannerStatus) return undefined;
+  const snapshot: PlannerStatusSnapshot = {
+    timestamp_ms: lastPlannerStatus.timestamp_ms,
+    last_instruction: lastPlannerStatus.last_instruction,
+    last_result: lastPlannerStatus.last_result,
+  };
+  if (lastPlannerStatus.last_errors) {
+    snapshot.last_errors = lastPlannerStatus.last_errors.slice(0, 12);
+  }
+  if (lastPlannerStatus.last_tool_sequence) {
+    snapshot.last_tool_sequence = lastPlannerStatus.last_tool_sequence.slice(0, 32);
+  }
+  if (typeof lastPlannerStatus.staged_waypoints === 'number') {
+    snapshot.staged_waypoints = lastPlannerStatus.staged_waypoints;
+  }
+  if (lastPlannerStatus.notes) {
+    snapshot.notes = lastPlannerStatus.notes.slice(0, 8);
+  }
+  return snapshot;
+}
+
+function recordPlannerStatus(update: PlannerStatusSnapshot) {
+  lastPlannerStatus = update;
+}
+
+function summariseProgram(program: any): { toolSequence: string[]; waypointCount?: number } {
+  const body = Array.isArray(program?.body) ? program.body : [];
+  const toolSequence = body
+    .map((node: any) => (node?.tool || node?.type || ''))
+    .filter((id: string) => typeof id === 'string' && id.length > 0);
+  let waypointCount: number | undefined;
+  for (const node of body) {
+    if (node?.tool === 'mission_waypoint_plan') {
+      const plan = node?.args?.plan;
+      if (Array.isArray(plan)) {
+        waypointCount = plan.length;
+        break;
+      }
+    }
+  }
+  return { toolSequence, waypointCount };
 }
 
 function requireNavSnapshot(telemetryOverride?: any): NavigationSnapshot {
@@ -462,7 +519,11 @@ export async function runInstruction(
   const { log } = opts;
   try {
     const plannerContext = collectPlannerContext();
-    const payload = { instruction, context: plannerContext };
+    const statusPayload = getPlannerStatusPayload();
+    const payload: Record<string, any> = { instruction, context: plannerContext };
+    if (statusPayload) {
+      payload.status = statusPayload;
+    }
     const resp = await fetch(plannerUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -474,6 +535,20 @@ export async function runInstruction(
     // Validation errors from planner
     if (Array.isArray((plan as any)?.errors) && (plan as any).errors.length) {
       if (plan?.program) { try { opts.onProgram?.(plan.program); } catch {} }
+      const errorList = (plan as any).errors as Array<{ message: string; path?: string }>;
+      const { toolSequence, waypointCount } = summariseProgram(plan?.program);
+      recordPlannerStatus({
+        timestamp_ms: Date.now(),
+        last_instruction: instruction,
+        last_result: 'validation_error',
+        last_errors: errorList,
+        last_tool_sequence: toolSequence.length ? toolSequence : undefined,
+        staged_waypoints: waypointCount,
+        notes: errorList
+          .map((entry) => (entry?.message ? String(entry.message) : ''))
+          .filter((msg) => msg.length > 0)
+          .slice(0, 3),
+      });
       opts.onPlanErrors?.((plan as any).errors);
       return;
     }
@@ -490,15 +565,43 @@ export async function runInstruction(
       log(`Planner: program with ${countOps(body)} operations`);
       // Keep log concise; detailed pretty view handled by UI using onProgram
       try { log(`Plan tools: ${body.map((b:any)=>b?.tool||b?.type).filter(Boolean).join(', ')}`); } catch {}
+      const { toolSequence, waypointCount } = summariseProgram(plan.program);
+      const successNotes: string[] = [];
+      if (typeof waypointCount === 'number') {
+        successNotes.push(`staged ${waypointCount} waypoint(s)`);
+      }
+      if (toolSequence.length) {
+        successNotes.push(`tools: ${toolSequence.slice(0, 5).join(' -> ')}`);
+      }
+      recordPlannerStatus({
+        timestamp_ms: Date.now(),
+        last_instruction: instruction,
+        last_result: 'success',
+        last_tool_sequence: toolSequence.length ? toolSequence : undefined,
+        staged_waypoints: waypointCount,
+        notes: successNotes,
+      });
       await runProgram(plan.program, instruction, opts, log);
       return;
     } else {
       log('Planner error: no "program" in response');
+      recordPlannerStatus({
+        timestamp_ms: Date.now(),
+        last_instruction: instruction,
+        last_result: 'failure',
+        notes: ['planner returned no program'],
+      });
       opts.onResult?.({ text: 'Planner returned no program. Please update the planner to emit DSL program only.' });
       return;
     }
   } catch (e) {
     log(`Planner unavailable, using built-in flow (${String(e)})`);
+    recordPlannerStatus({
+      timestamp_ms: Date.now(),
+      last_instruction: instruction,
+      last_result: 'failure',
+      notes: [`planner error: ${String(e)}`],
+    });
     opts.onResult?.({ text: 'Planner unavailable' });
     return;
   }
@@ -958,6 +1061,39 @@ async function callTool(tool: string, args: any, ctx: any, opts: OrchestratorOpt
 
       log(`mission_waypoint_plan staged ${missionEntries.length} waypoint${missionEntries.length === 1 ? '' : 's'}`);
       return { ok: true, staged: true, count: missionEntries.length };
+    }
+    case 'map_lookup': {
+      const query = String(args?.query || '').trim();
+      if (!query) {
+        throw new Error('map_lookup requires a query string');
+      }
+      const near = args?.near && typeof args.near.latitude === 'number' && typeof args.near.longitude === 'number'
+        ? { latitude: args.near.latitude, longitude: args.near.longitude }
+        : undefined;
+      const radius = typeof args?.radius_m === 'number' ? args.radius_m : undefined;
+      const types = Array.isArray(args?.types) ? args.types.filter((value: any) => typeof value === 'string') : undefined;
+      const results = await mapLookup({ query, near, radiusMeters: radius, types });
+      log(`map_lookup → ${results.length} result${results.length === 1 ? '' : 's'} for "${query}"`);
+      opts.onTrace?.(`map_lookup(${query}) → ${results.length} result${results.length === 1 ? '' : 's'}`, 'info');
+      if (results.length === 0) {
+        return { ok: true, results: [] };
+      }
+      const top = results[0];
+      const serialize = (item: typeof results[number]) => ({
+        id: item.id,
+        name: item.name,
+        latitude: item.latitude,
+        longitude: item.longitude,
+        category: item.category,
+        geometry: (item.raw as any)?.geometry ?? undefined,
+        metadata: item.raw ? { raw: item.raw } : undefined,
+      });
+
+      return {
+        ok: true,
+        results: results.map(serialize),
+        best: serialize(top),
+      };
     }
     default:
       log(`unknown tool: ${tool}`);

@@ -24,6 +24,7 @@ import type {
 } from '../types/missionPlanner';
 import { objectMemoryTargetStore, type ObjectMemoryTargetSelection } from '../state/objectMemoryTargets';
 import { listClusters } from '../agent/objectMemoryClient';
+import { objectMemoryCatalogStore } from '../state/objectMemoryCatalog';
 import type { ObjectMemoryCluster, ObjectMemoryClusterAnchor } from '../agent/objectMemoryClient';
 import { missionPlannerStore } from '../state/missionPlanner';
 import { missionSettingsStore, altitudeReferenceForExecuteMode, type ExecuteHeightMode } from '../state/missionSettings';
@@ -644,10 +645,12 @@ export const FlyToPanel: React.FC = () => {
       const response = await listClusters({ limit: 200 });
       const clusters = (response?.clusters ?? []).filter((cluster) => cluster.object_map_anchor);
       setObjectMemoryClusters(clusters);
+      objectMemoryCatalogStore.setClusters(clusters);
       setObjectMemoryError(null);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load object memory clusters';
       setObjectMemoryError(message);
+      objectMemoryCatalogStore.setClusters([]);
     } finally {
       setObjectMemoryLoading(false);
     }

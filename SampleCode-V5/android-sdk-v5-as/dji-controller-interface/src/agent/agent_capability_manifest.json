@@ -84,6 +84,33 @@
       "guardrails": []
     },
     {
+      "id": "map_lookup",
+      "category": "map",
+      "description": "Resolve a named point of interest using the connected map service.",
+      "args": {
+        "query": { "type": "string", "required": true },
+        "near": {
+          "type": "object",
+          "optional": true,
+          "fields": {
+            "latitude": { "type": "number", "min": -90, "max": 90 },
+            "longitude": { "type": "number", "min": -180, "max": 180 }
+          }
+        },
+        "radius_m": { "type": "number", "min": 10, "max": 20000, "optional": true },
+        "types": {
+          "type": "array",
+          "items": { "type": "string" },
+          "optional": true
+        }
+      },
+      "returns": {
+        "results": { "type": "array", "items": { "type": "object" } },
+        "best": { "type": "object", "optional": true }
+      },
+      "guardrails": []
+    },
+    {
       "id": "mission_self_check",
       "category": "flight",
       "description": "Run pre-flight diagnostics and report blockers.",

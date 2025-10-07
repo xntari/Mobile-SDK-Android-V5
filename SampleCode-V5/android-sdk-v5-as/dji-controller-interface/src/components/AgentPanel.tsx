@@ -53,6 +53,8 @@ const FLIGHT_TOOLS = new Set([
   'mission_patrol',
 ]);
 
+const MAX_CONVERSATION_MESSAGES = 80;
+
 const EXAMPLE_PROMPTS: Array<{ title: string; prompt: string; note?: string }> = [
   {
     title: 'Pre-flight check',
@@ -104,6 +106,7 @@ const EXAMPLE_PROMPTS: Array<{ title: string; prompt: string; note?: string }> =
 
 type QueueSummary = ReturnType<typeof getQueueSummary>;
 type QueueItem = QueueSummary['pending'][number];
+type ConversationEntry = { id: string; role: 'user' | 'planner'; text: string; timestamp: number };
 
 // Global visibility controls for Components menu
 export const agentPanelControls = {
@@ -129,6 +132,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
   const [running, setRunning] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
   const [result, setResult] = useState<string>('');
+  const [conversation, setConversation] = useState<ConversationEntry[]>([]);
   const [status, setStatus] = useState<{ detector?: string; planner?: string }>(() => ({}));
   const [timeline, setTimeline] = useState<ExecutionEvent[]>([]);
   const pendingStepsRef = React.useRef<Record<string, string[]>>({});
@@ -182,6 +186,11 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
   const planRef = React.useRef<HTMLDivElement | null>(null);
   usePersistElementHeight(planRef, 'agent.h.plan', 120);
   const [queueSummary, setQueueSummary] = useState<QueueSummary>(() => getQueueSummary());
+  const conversationEndRef = React.useRef<HTMLDivElement | null>(null);
+
+  const handleClearConversation = useCallback(() => {
+    setConversation([]);
+  }, []);
 
   React.useEffect(() => {
     return agentTelemetryStore.subscribe((snapshot) => {
@@ -195,6 +204,10 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
     });
     return unsubscribe;
   }, []);
+
+  React.useEffect(() => {
+    conversationEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [conversation]);
 
   const log = useCallback((line: string) => {
     setLogLines(prev => [...prev.slice(-40), line]);
@@ -254,31 +267,49 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
 
   const onRun = useCallback(async () => {
     if (running) return;
+    const trimmed = prompt.trim();
+    if (!trimmed) return;
+    const timestamp = Date.now();
     setRunning(true);
     setResult('');
     setLogLines([]);
+    setPlanSteps(null);
+    setPlanProgram(null);
+    setPlanErrors([]);
+    setTrace([]);
+    setTimeline([]);
+    pendingStepsRef.current = {};
+    cancelRef.current.cancelled = false;
+    setConversation((prev) => {
+      const entry: ConversationEntry = { id: `user:${timestamp}`, role: 'user', text: trimmed, timestamp };
+      const next: ConversationEntry[] = [...prev, entry];
+      return next.slice(-MAX_CONVERSATION_MESSAGES);
+    });
     try {
-      // Try planner first, fallback to built-in flow
-      setPlanSteps(null);
-      setPlanProgram(null);
-      setPlanErrors([]);
-      setTrace([]);
-      setTimeline([]);
-      pendingStepsRef.current = {};
-      cancelRef.current.cancelled = false;
-      await runInstruction(prompt.trim(), {
+      await runInstruction(trimmed, {
         getSnapshot,
         sendBridge,
         log,
         showDetections: setDetections,
-        onResult: ({ text }) => setResult(text),
+        onResult: ({ text }) => {
+          setResult(text);
+          const response = text?.trim();
+          if (response) {
+            const ts = Date.now();
+            const entry: ConversationEntry = { id: `planner:${ts}`, role: 'planner', text: response, timestamp: ts };
+            setConversation((prev) => {
+              const next: ConversationEntry[] = [...prev, entry];
+              return next.slice(-MAX_CONVERSATION_MESSAGES);
+            });
+          }
+        },
         onStep,
         onPlan: (steps) => setPlanSteps(steps),
         onProgram: (program) => setPlanProgram(program),
         onHighLevelProgram: (hp) => setPlanProgramHigh(hp),
         isCancelled: () => cancelRef.current.cancelled,
         onTrace: (line, kind='info') => setTrace(prev => [...prev, { text: line, kind }]),
-        onPlanErrors: (errs) => setPlanErrors(errs)
+        onPlanErrors: (errs) => setPlanErrors(errs),
       });
     } finally {
       setRunning(false);
@@ -482,23 +513,35 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
             summary={running ? 'Running' : 'Idle'}
           >
             {statusChips}
-            <div className="flex gap-2">
-              <input
-                className="flex-1 bg-gray-900/70 border border-gray-700/70 text-xs px-2 py-1 rounded outline-none focus:ring-1 focus:ring-dji-blue"
+            <div className="flex gap-2 items-start">
+              <textarea
+                className="flex-1 bg-gray-900/70 border border-gray-700/70 text-xs px-2 py-1 rounded outline-none focus:ring-1 focus:ring-dji-blue resize-none"
+                rows={Math.min(8, Math.max(3, prompt.split('\n').length))}
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
+                onKeyDown={(event) => {
+                  if ((event.key === 'Enter') && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault();
+                    if (!running) {
+                      void onRun();
+                    }
+                  }
+                }}
                 placeholder="Describe the desired action…"
               />
-              <button
-                className={`px-2 py-1 text-xs uppercase tracking-wide rounded ${running ? 'bg-gray-700 text-gray-400' : 'bg-dji-blue text-white hover:bg-dji-blue/80'}`}
-                onClick={onRun}
-                disabled={running}
-              >Run</button>
-              <button
-                className="px-2 py-1 text-xs uppercase tracking-wide rounded border border-gray-700/60 bg-gray-900/70 text-gray-300 hover:bg-gray-800"
-                onClick={onStop}
-              >Stop</button>
+              <div className="flex flex-col gap-2 min-w-[96px]">
+                <button
+                  className={`px-2 py-1 text-xs uppercase tracking-wide rounded ${running ? 'bg-gray-700 text-gray-400' : 'bg-dji-blue text-white hover:bg-dji-blue/80'}`}
+                  onClick={onRun}
+                  disabled={running}
+                >Run</button>
+                <button
+                  className="px-2 py-1 text-xs uppercase tracking-wide rounded border border-gray-700/60 bg-gray-900/70 text-gray-300 hover:bg-gray-800"
+                  onClick={onStop}
+                >Stop</button>
+              </div>
             </div>
+            <div className="text-[10px] text-gray-500 mt-1">Ctrl/⌘ + Enter to run · Shift+Enter adds a newline.</div>
             <div className="flex items-center gap-2 text-[10px] text-gray-300">
               <SectionLabel label="Detector threshold" />
               {[0.15, 0.20, 0.25, 0.30].map((v) => (
@@ -509,6 +552,33 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
                 >{v.toFixed(2)}</button>
               ))}
               <span className="text-gray-500">active {thr.toFixed(2)}</span>
+            </div>
+            <div className="flex items-center justify-between mt-2">
+              <SectionLabel label="Conversation" hint={`${conversation.length} message${conversation.length === 1 ? '' : 's'}`} />
+              <button
+                type="button"
+                className="px-2 py-[3px] text-[10px] uppercase tracking-wide rounded border border-gray-700/60 bg-gray-900/60 text-gray-300 hover:bg-gray-800"
+                onClick={handleClearConversation}
+                disabled={conversation.length === 0}
+              >Clear</button>
+            </div>
+            <div className="mt-1 bg-gray-900/60 border border-gray-800/70 rounded p-2 text-[11px] text-gray-200" style={{ maxHeight: 180, overflowY: 'auto' }}>
+              {conversation.length === 0 && (
+                <div className="text-gray-500">No planner responses yet.</div>
+              )}
+              {conversation.map((entry) => (
+                <div key={entry.id} className={`mb-2 last:mb-0 ${entry.role === 'user' ? 'text-white' : 'text-gray-200'}`}>
+                  <div className="text-[10px] uppercase tracking-wide text-gray-500 flex items-center gap-2">
+                    <span>{entry.role === 'user' ? 'Operator' : 'Planner'}</span>
+                    <span>•</span>
+                    <span>{formatTimestamp(entry.timestamp)}</span>
+                  </div>
+                  <div className={`mt-1 whitespace-pre-wrap leading-snug ${entry.role === 'user' ? 'bg-dji-blue/10 border border-dji-blue/40 rounded px-2 py-1 text-dji-blue' : 'bg-gray-800/60 border border-gray-700/70 rounded px-2 py-1 text-gray-200'}`}>
+                    {entry.text}
+                  </div>
+                </div>
+              ))}
+              <div ref={conversationEndRef} />
             </div>
           </CollapsibleSection>
 

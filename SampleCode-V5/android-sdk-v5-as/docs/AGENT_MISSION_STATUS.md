@@ -39,7 +39,7 @@ Implementation phases:
 | Aircraft telemetry | Bridge (`telemetry` topic) | `{ latitude, longitude, altitude, altitude_above_takeoff, heading, velocities, battery, gps_health }` | Decide if takeoff needed; estimate remaining waypoint distance; plan return-home triggers. |
 | Virtual stick state | Bridge (`telemetry.virtual_stick`, manual control store) | `{ enabled, manual_override, owner }` | Avoid issuing commands while VS override active; request disable before waypoint execution. |
 | Mission queue status | Orchestrator queue | `{ pending:[], active:?, last_completed:? }` | Planner keeps track of pending legs, can insert/resume or cancel items. |
-| Map geometry | Mission planner store (`plan`, `manualTarget`, map annotations) | Polygons, polylines, manual staging targets | Clarify patrol perimeters (“Generate polygon from map selection”), stage new waypoints, compute entry/exit. |
+| Map geometry | Mission planner store (`plan`, `manualTarget`) + minimal context markers (`context.map.features`) | Manual target, POI target, aircraft/home markers | Clarify patrol perimeters (“Generate polygon from map selection”), stage new waypoints, compute entry/exit using mission data. |
 | Object memory | Vision/object-memory service | List of clusters with `{ label, lat, lon, altitude, last_seen, confidence }` | Use as POIs (“Fly to last known car”), maintain watchlist. |
 | Vision detections | Live perception API (`detect`, `perception_watch`) | Detection stream with bounding boxes + scores | Decide when to pause patrol, take photo, or switch to follow mode. |
 | Camera state | Camera control store | `{ lens, zoom, gimbal_mode, look_at_status }` | Planner can request zoom/gimbal changes before capturing imagery. |
@@ -158,6 +158,11 @@ These behaviours **must** work at all times. Update the planner prompt template 
   3. Add orchestrator unit/integration tests covering auto-takeoff, waypoint completion monitoring, and the virtual-stick altitude fallback (including abort-on-cancel behaviour).
   4. Instrument the orchestrator with structured logs for fallback usage and residual offsets so testers can attach evidence when a climb still fails (initial trace hooks now record absolute targets and fallback triggers).
   5. Sync capability manifest + `docs/AGENT_DSL.md` whenever primitive semantics change; include a changelog note in this status doc.
+
+-- **Status update (geometry feed)** – `context.map.features` now carries only the essentials (mission preview, manual/POI targets, aircraft/home markers). Static catalogs are dropped; the planner acquires additional geometry by calling `map_lookup` and using the returned payload.
+- **Tooling** – run `node tools/osm_build_catalog.js [input] [output]` to refresh the cached OpenStreetMap-derived catalog (`src/config/osmFeatures.json`) whenever coverage needs to grow.
+- **Coverage** – by default the catalog builder now queries the broader Bay Area (≈36.8–38.7°N, −123.1––121.2°W). Tweak `--bbox`/`--tile` if you only need a smaller slice or want even denser tiling. Each run rewrites both `dji-controller-interface/src/config/osmFeatures.json` and the mirrored `tools/data/object_memory/osm_catalog.json`.
+- **Live lookups** – the planner calls `map_lookup` (Google Places) directly via OpenAI function calling. The interpreter returns `{results, best, query, anchor, radius_m, types}` for immediate use in mission planning; no catalog injection required.
 
 - **Acceptance criteria for Milestone A**
   - All prompts listed in “IMPORTANT CHECKS” succeed end-to-end (planner → orchestrator → bridge) in simulator runs, including altitude climbs, horizontal offsets, and coordinate fly-to commands.
