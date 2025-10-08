@@ -11,6 +11,11 @@ Design goals
 - Safety: confirmations for flight, timeouts, and bounded loops.
 - Guardrails: every primitive publishes limits via the capability manifest so the planner can reject unsafe programs before they reach the orchestrator.
 
+Planner engines
+- The DSL is consumed by two planner implementations: the legacy Chat Completions service and the new Responses API service (streaming, reasoning effort controls, built-in web search).
+- Both engines validate against the same capability manifest and must return identical DSL structures; only the reasoning trace/metadata differs.
+- Responses now streams tokens, status updates, and tool call/results to the desktop conversation while also emitting the final program/summary payload for auditing.
+
 Core node types (JSON)
 - call: { type: 'call', tool: string, args: object, assign?: string }
 - let: { type: 'let', name: string, value: Expr }
@@ -34,7 +39,10 @@ Tool catalog (subset)
 - laser_enable { enabled }
 - laser_measure { x, y } -> { distance_m, lat, lon, alt_m }
 - respond { text }
-- map_lookup { query, near?, radius_m?, types? } – Google Places Text Search tool. The planner calls this function as needed; runtime returns `{ results: [...], best: {...}, query, anchor, radius_m, types }`. Supply optional `near { latitude, longitude }`, `radius_m` (10–20 000 m), and Google Places `types` such as `school`, `hospital`, `park`, `route`. Each result preserves `metadata.raw` (viewport, place_id, formatted address) so subsequent steps can extract geometry without additional tool calls. Legacy helpers (`hosp_lookup`, `roads_lookup`, etc.) are no longer available.
+- map_lookup { query, near?, radius_m?, types?, limit? } – Google Places Text Search tool. The planner invokes this directly (both planner engines support the tool). Runtime returns `{ results: [...], best: {...}, query, anchor, radius_m, types, limit }`; planners should stash the payload in a `let` binding and reference it when emitting flight primitives. Supply optional `near { latitude, longitude }`, `radius_m` (10–20 000 m, defaults to 1000 m when omitted), Google Places `types` such as `school`, `hospital`, `park`, `route`, and `limit` (1–20, defaults to 5) to cap the number of nearby results. Each result now includes trimmed metadata (`formatted_address`, `place_id`, `types`, `viewport`) and `distance_m` when an anchor is provided so subsequent steps can extract geometry without additional tool calls. Legacy helpers (`hosp_lookup`, `roads_lookup`, etc.) remain removed.
+- directions_lookup { origin, destination, mode?, samples? } *(planned)* – Will return snapped polylines + distance/time data sourced from Google Directions API for road-following missions.
+- roads_snap { polyline, interpolation_m? } *(planned)* – Will refine coarse mission paths using Google Roads API or equivalent.
+- place_perimeter { place_id } *(planned)* – Will return cached perimeter/viewport geometry for POIs when available (requires Places Details integration).
 
 Flight & mission primitives (v1)
 - mission_self_check {}

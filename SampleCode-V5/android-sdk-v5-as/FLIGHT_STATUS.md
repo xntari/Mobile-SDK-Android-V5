@@ -7,12 +7,16 @@ Use only standard ascii characters here - don't use ✅  or similar
 > **Transcript logging** - Append the user's instructions and your thought process (with ISO 8601 timestamps) to transcript.txt after every working session so we can reconstruct decision history later.
 ---
 
-## TL;DR (Oct 03 2025 14:45 - workspace, HEAD a9dac908f66c7a5533ebadd768efcb85aac58a97)
+## TL;DR (Oct 06 2025 16:05 - workspace, HEAD e82d68c90d5a530ec062eabcb8f12d10a97a8378)
 
 - **Document discipline** - Update this file after every bridge/desktop change. Status, safety checklists, operator notes, and backlog items must always reflect the running code. Never mark a feature complete without field verification.
 - **Transcript discipline** - Keep transcript.txt current: append the latest user instructions and your thought process with ISO 8601 timestamps whenever you touch the project.
-- **Field validation** - Mission Control and gimbal tracking passed bench and field checks; the next focus is Section 2.1 (faster manual tracking, camera dock, collapsible panels, top-bar reflow, latency widget, and 3D terrain groundwork) with fallbacks captured for each workstream.
+- **Planner modernisation** - Planner service now runs in dual-engine mode (legacy Chat Completions + Responses API). Operators can pick `gpt-4o-mini`, `gpt-5-mini`, or `gpt-5-nano`, tune reasoning effort/temperature/max tokens, enable built-in web search, and supply cache keys. Responses now streams live tokens, status updates, tool calls/results, and the final payload into the desktop so operators see plans evolve in real time while legacy remains the fallback.
+- **Agent panel controls** - Prompt/conversation now lives in its own collapsible section with newest planner responses pinned to the top (green highlight for planner/status entries and a larger scrolling area). Planner configuration moved into a dedicated panel, detector tuning lives in "Detector Config", and the planning stream/reasoning/raw payload blocks remain accessible in "Planner Output" alongside replay toggles.
+- **Map lookup hygiene** - Planner tool responses now return the closest `limit` (default 5) results only, sorted by proximity, with trimmed metadata (address, place_id, types, viewport, optional distance). Ratings/business status fields are removed before they enter planner context.
+- **Field validation** - Mission Control and gimbal tracking passed bench and field checks; the next focus is Section 2.1 (faster manual tracking, camera dock follow-ups, collapsible panels, top-bar reflow, latency widget, and 3D terrain groundwork) with fallbacks captured for each workstream.
 - **Mission planner** - The shared mission planner store feeds the main map, Fly-To panel, Orientation, and HSI; map clicks (stage/waypoint/orbit) auto-populate targets, default altitudes come from set-height or the safety floor, and multi-waypoint plans now execute through the waypoint fallback backend with logging.
+- **Map/intel tooling** - `map_lookup` tool calls now originate directly from the planner. Results enter the cache and DSL via `let` bindings (default radius 1 km). Directions/Roads/perimeter tools are staged next and will reuse the same backend.
 - **Mission plan semantics** - Land steps now keep their mission coordinates, the Mission Control panel exposes “Add Home Waypoint” and “Add Origin (W1)” helpers, and finish actions only trigger when explicit return-home/land entries exist.
 - **Mission control editor** - Each waypoint now exposes turn mode/damping, heading (angle/POI/path base), gimbal heading, POI targets, and action groups; exports patch the WPML _and_ embed `mission-metadata.json`, and the loader hydrates those fields when reopening DJI Pilot or desktop plans.
 - **Realtime map & video pacing** - Map telemetry now batches through a single requestAnimationFrame cycle (no more per-update `easeTo`), skips recentering while the operator drags, and keeps manual pan smooth; FPV/H20N decoders only throttle when the simulator is running or the panel is hidden so visible feeds stay at full speed.
@@ -158,47 +162,59 @@ Most recent verified features (2025-10-01):
 
 ### 2.1 UI/UX and Gimbal Enhancements (Oct 2025)
 
-1. **Accelerate manual gimbal tracking loop**
-   Status: Adjustable yaw/pitch gains, deadband, smoothing, and loop-rate presets now live in the camera control dock and persist per payload. Next step is to capture field feedback (real aircraft + sim) to tune preset defaults and confirm we stay clear of ±300° yaw saturation.
-   Risks: Over-aggressive presets may still oscillate on specific payload firmware; loop-rate increases can collide with bridge latency during poor links.
-   Alternatives: Provide a “stability” preset that clamps rates and widen documentation on how to revert to SDK LookAt if oscillations appear.
+1. **Planner dual-engine rollout (Responses API)**
+   Status: Planner service exposes both legacy Chat Completions and the Responses API path. Operators can pick the engine, tune Responses parameters (model, reasoning effort, temperature, max tokens, parallel tool calls, web-search, cache keys), replay the last instruction against either engine, and watch live tokens/status/tool events stream into the Agent panel conversation while the final payload lands in "Planner Output".
+   Next: Mirror regression cases across both engines, add duration/cost metadata to replay summaries, and document operator workflow (when to favour Responses vs legacy, how to interpret streaming statuses, and what to capture for flight logs).
+   Risks: Behaviour drift between engines if prompts diverge; Responses usage may spike cost or latency; streaming view must avoid overwhelming lower-powered laptops.
+   Alternatives: Keep Responses behind a feature flag until we accumulate more field telemetry; allow operators to pin favourite parameter presets for rapid swaps.
 
-2. **Unified camera control dock follow-ups**
-   Status: Dock now drives lens selection, thermal zoom (2×/4×/8×), laser enable, and FPV HUD presets, and the panel scrolls cleanly after resizing; H20N crosshair/aim cues are restored and FPV overlays were decluttered. Still pending: wiring remaining payload widgets (object memory staging, orientation debug), refining resize handles, and expanding telemetry readouts.
+2. **Accelerate manual gimbal tracking loop**
+   Status: Adjustable yaw/pitch gains, deadband, smoothing, and loop-rate presets now live in the camera control dock and persist per payload. Next step is to capture field feedback (real aircraft + sim) to tune preset defaults and confirm we stay clear of +/-300 deg yaw saturation.
+   Risks: Over-aggressive presets may still oscillate on specific payload firmware; loop-rate increases can collide with bridge latency during poor links.
+   Alternatives: Provide a "stability" preset that clamps rates and widen documentation on how to revert to SDK LookAt if oscillations appear.
+
+3. **Unified camera control dock follow-ups**
+   Status: Dock now drives lens selection, thermal zoom (2x/4x/8x), laser enable, and FPV HUD presets, and the panel scrolls cleanly after resizing; H20N crosshair/aim cues are restored and FPV overlays were decluttered. Still pending: wiring remaining payload widgets (object memory staging, orientation debug), refining resize handles, and expanding telemetry readouts.
    Risks: Additional modules may bloat the dock or reintroduce heavy render costs; dragging over video feeds still needs focus/keyboard QA.
    Next: Audit hover/focus behaviour, add keyboard shortcuts, and document layout import/export conventions before broader rollout.
 
-3. **Collapsible architecture across major panels**
+4. **Collapsible architecture across major panels**
    Status: ✅ Mission Control, Object Memory, Preflight, Orientation/HSI, and Flight Commands now share the collapsible section framework. Each panel stores open state in localStore, exposes section summaries (e.g., warning counts, RTH altitude), and keeps telemetry blocks accessible without scrolling. HSI visualisation still lives inside Orientation; merging obstacle cues + HSI overlays into that component remains outstanding.
    Next: Finish the HSI merge (obstacle sectors, altitude bands) and badge collapsed headings when alerts are active so operators cannot hide faults accidentally. Verify subscription teardown costs after long sessions and profile layout persistence against legacy saves.
    Risks: Legacy layouts depend on fixed heights; hiding warnings behind collapsed headings could mask critical alerts if badges regress.
    Alternatives: Keep legacy HSI as optional component until merged view proves reliable; badge collapsed headings with warning counts to avoid silent failures.
 
-4. **Style presets and tokenisation**
+5. **Style presets and tokenisation**
    Plan: Define theme tokens (default, minimal, jet-fighter, tight spacing) and expose a style preset picker in Settings. Persist preset + custom overrides via localStore/layouts while keeping accessibility contrast thresholds. Provide one-click resets for new operators.
    Risks: Token refactor may conflict with bespoke CSS in existing panels; older saved layouts might require migration shims.
    Alternatives: Ship presets gradually (default + experimental) and maintain a compatibility layer that maps legacy class names until users migrate.
 
-5. **Top bar density, simulator badge, and latency widget**
-   Plan: Reflow the top bar to remove macOS window dots, group status blocks on the left, push hotkeys mid-bar, and anchor GPS/battery/time/right. Add a simulator mode indicator with quick toggles and surface a latency badge (UI→bridge ping or health timestamp delta) with alert thresholds.
+6. **Top bar density, simulator badge, and latency widget**
+   Plan: Reflow the top bar to remove macOS window dots, group status blocks on the left, push hotkeys mid-bar, and anchor GPS/battery/time/right. Add a simulator mode indicator with quick toggles and surface a latency badge (UI->bridge ping or health timestamp delta) with alert thresholds.
    Risks: Narrow viewports and localisation may overflow; naive ping loops could contend with command traffic.
-   Alternatives: If active probing is too noisy, reuse telemetry timestamps and only display delta; offer a “classic bar” toggle until responsive layout stabilises.
+   Alternatives: If active probing is too noisy, reuse telemetry timestamps and only display delta; offer a "classic bar" toggle until responsive layout stabilises.
 
-6. **Latency + bandwidth diagnostics widget**
+7. **Latency + bandwidth diagnostics widget**
    Plan: Build a collapsible diagnostics strip (likely adjacent to the new dock) that shows UI↔bridge RTT, WebSocket backlog, and optional command retry counts. Persist sampling rate and history depth per user.
    Risks: Extra instrumentation may consume bandwidth on weak links; inaccurate RTT during heavy traffic could mislead operators.
    Alternatives: Allow operators to throttle/disable probes and rely on existing logbook entries if the widget proves noisy.
 
-7. **3D terrain-aware mission planning**
+8. **3D terrain-aware mission planning**
    Status: Phase 1 shipped (MapEngine abstraction + MapLibre engine). Phase 2 continues: provider/preset selectors now include street/satellite/hybrid modes, terrain toggle sits with the 2D/3D control, and the Advanced panel exposes exaggeration plus live terrain-cache stats. Map view state persists across terrain toggles and auto-center prioritises manual targets without waypoint staging jumps.
    Next: Finalise Phase 2 with layer-specific presets (satellite label overlays, opacity tuning), document DEM coverage gaps, and regression-test long sessions (north-up + terrain). Phase 3 pulls in higher-resolution terrain sources, persistent cache stores, and alternate engines (Cesium/Mapbox). See Section 7.8 for the roadmap.
    Risks: Terrain tiles may blow through cache budgets, GPUs with weak WebGL support could stutter, and inconsistent geoid models can skew altitude previews. We will keep a beta toggle and retain the current 2D plan editor until terrain validation finishes.
    Alternatives: If 3D performance lags, ship a hybrid 2D map with terrain cross-sections and postpone Cesium integration until cache strategies prove stable.
 
-8. **Mission planning UX groundwork for agent-driven flows**
+9. **Mission planning UX groundwork for agent-driven flows**
    Plan: Streamline object-memory/POI selection to a guided, two-click experience, unify layout export/import so agent services can choose presets, and align data structures with upcoming natural-language planner APIs.
    Risks: Simplifying the UI may hide expert features; designing around unfinalised agent APIs could cause rework.
-   Alternatives: Provide “basic” and “pro” modes while we iterate with the agent team; keep manual controls accessible via the Components menu until automation stabilises.
+   Alternatives: Provide "basic" and "pro" modes while we iterate with the agent team; keep manual controls accessible via the Components menu until automation stabilises.
+
+10. **Map lookup payload trim**
+   Status: `map_lookup` now honours an optional `limit` argument (default 5) and returns proximity-sorted results with trimmed metadata (address/place ID/types/viewport plus `distance_m` when an anchor is supplied). Ratings, business status, and other noisy fields are removed before responses reach the planner/UI.
+   Next: Update regression prompts to cover non-default limits, and verify cached responses behave identically across planner engines.
+   Risks: Legacy prompts that expect rating/business_status fields may need refreshing; ensure downstream tooling reads the new structure.
+   Alternatives: If additional metadata is required later, expose it via an opt-in flag instead of the default payload.
 
 ### 2.2 Waypoint Mission Backend (backlog)
 

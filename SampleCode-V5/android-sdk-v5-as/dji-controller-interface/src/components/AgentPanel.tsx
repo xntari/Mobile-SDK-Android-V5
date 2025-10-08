@@ -1,11 +1,12 @@
 import React, { useCallback, useMemo, useState } from 'react';
-import { runInstruction } from '../agent/orchestrator';
+import { runInstruction, type PlannerMetaSnapshot, type PlannerStreamEvent } from '../agent/orchestrator';
 import type { Detection } from '../agent/visionClient';
 import { getActiveThreshold, setActiveThreshold } from '../agent/visionClient';
 import { getNextZIndex, getBaseZIndex } from '../utils/zIndex';
 import { CollapsibleSection, SectionLabel } from './CollapsibleSection';
 import { agentTelemetryStore, AgentTelemetrySnapshot } from '../state/agentTelemetry';
 import { getQueueSummary, subscribe as subscribeCommandQueue } from '../agent/commandQueue';
+import { plannerSettingsStore, type PlannerSettingsSnapshot, type PlannerEngine, type ReasoningEffort } from '../state/plannerSettings';
 
 export interface AgentPanelProps {
   getSnapshot: () => Promise<string>;
@@ -104,9 +105,29 @@ const EXAMPLE_PROMPTS: Array<{ title: string; prompt: string; note?: string }> =
   },
 ];
 
+type PlannerMessageDisplay = { id: string; role: string; text: string };
+
+const describeOverrideValue = (value: any): string => {
+  if (value === null || value === undefined) return 'default';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value.toString() : 'NaN';
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+};
+
 type QueueSummary = ReturnType<typeof getQueueSummary>;
 type QueueItem = QueueSummary['pending'][number];
-type ConversationEntry = { id: string; role: 'user' | 'planner'; text: string; timestamp: number };
+type ConversationEntry = {
+  id: string;
+  role: 'user' | 'planner';
+  text: string;
+  timestamp: number;
+  streaming?: boolean;
+};
 
 // Global visibility controls for Components menu
 export const agentPanelControls = {
@@ -186,10 +207,23 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
   const planRef = React.useRef<HTMLDivElement | null>(null);
   usePersistElementHeight(planRef, 'agent.h.plan', 120);
   const [queueSummary, setQueueSummary] = useState<QueueSummary>(() => getQueueSummary());
-  const conversationEndRef = React.useRef<HTMLDivElement | null>(null);
+  const conversationContainerRef = React.useRef<HTMLDivElement | null>(null);
+  const [plannerSettings, setPlannerSettings] = React.useState<PlannerSettingsSnapshot>(() => plannerSettingsStore.getSnapshot());
+  const [plannerMeta, setPlannerMeta] = React.useState<PlannerMetaSnapshot | null>(null);
+  const [plannerStream, setPlannerStream] = React.useState<PlannerStreamEvent[]>([]);
+  const [lastInstruction, setLastInstruction] = React.useState<string | null>(null);
+  const streamingIdRef = React.useRef<string | null>(null);
 
   const handleClearConversation = useCallback(() => {
     setConversation([]);
+    streamingIdRef.current = null;
+  }, []);
+
+  const finalizeStreamingEntry = useCallback(() => {
+    const id = streamingIdRef.current;
+    if (!id) return;
+    streamingIdRef.current = null;
+    setConversation((prev) => prev.map((entry) => (entry.id === id ? { ...entry, streaming: false } : entry)));
   }, []);
 
   React.useEffect(() => {
@@ -206,8 +240,12 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
   }, []);
 
   React.useEffect(() => {
-    conversationEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (conversationContainerRef.current) {
+      conversationContainerRef.current.scrollTop = 0;
+    }
   }, [conversation]);
+
+  React.useEffect(() => plannerSettingsStore.subscribe(setPlannerSettings), []);
 
   const log = useCallback((line: string) => {
     setLogLines(prev => [...prev.slice(-40), line]);
@@ -265,9 +303,9 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
     });
   }, []);
 
-  const onRun = useCallback(async () => {
+  const executeInstruction = useCallback(async (text: string, options?: { engineOverride?: PlannerEngine; label?: string }) => {
     if (running) return;
-    const trimmed = prompt.trim();
+    const trimmed = text.trim();
     if (!trimmed) return;
     const timestamp = Date.now();
     setRunning(true);
@@ -275,13 +313,19 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
     setLogLines([]);
     setPlanSteps(null);
     setPlanProgram(null);
+    setPlanProgramHigh(null);
     setPlanErrors([]);
     setTrace([]);
     setTimeline([]);
+    setPlannerMeta(null);
+    setPlannerStream([]);
+    streamingIdRef.current = null;
+    setLastInstruction(trimmed);
     pendingStepsRef.current = {};
     cancelRef.current.cancelled = false;
     setConversation((prev) => {
-      const entry: ConversationEntry = { id: `user:${timestamp}`, role: 'user', text: trimmed, timestamp };
+      const prefix = options?.label ? `[${options.label}] ` : '';
+      const entry: ConversationEntry = { id: `user:${timestamp}`, role: 'user', text: `${prefix}${trimmed}`, timestamp };
       const next: ConversationEntry[] = [...prev, entry];
       return next.slice(-MAX_CONVERSATION_MESSAGES);
     });
@@ -310,11 +354,72 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
         isCancelled: () => cancelRef.current.cancelled,
         onTrace: (line, kind='info') => setTrace(prev => [...prev, { text: line, kind }]),
         onPlanErrors: (errs) => setPlanErrors(errs),
-      });
+        onPlannerMeta: (meta) => setPlannerMeta(meta),
+        onPlannerStream: (event) => {
+          setPlannerStream((prev) => [...prev.slice(-200), event]);
+
+          switch (event.type) {
+            case 'token':
+            case 'message_chunk': {
+              const addition = event.text ?? '';
+              if (!addition) break;
+              setConversation((prev) => {
+                const now = Date.now();
+                const id = streamingIdRef.current ?? `planner:stream:${now}`;
+                if (!streamingIdRef.current) {
+                  streamingIdRef.current = id;
+                }
+                const existingIndex = prev.findIndex((entry) => entry.id === id);
+                if (existingIndex >= 0) {
+                  const updated = {
+                    ...prev[existingIndex],
+                    text: prev[existingIndex].text + addition,
+                    timestamp: now,
+                    streaming: true,
+                  } as ConversationEntry;
+                  const next = [...prev];
+                  next[existingIndex] = updated;
+                  return next;
+                }
+                const entry: ConversationEntry = {
+                  id,
+                  role: 'planner',
+                  text: addition,
+                  timestamp: now,
+                  streaming: true,
+                };
+                const next = [...prev, entry];
+                if (next.length > MAX_CONVERSATION_MESSAGES) {
+                  return next.slice(-MAX_CONVERSATION_MESSAGES);
+                }
+                return next;
+              });
+              break;
+            }
+            case 'status': {
+              if (event.stage === 'program_ready' || event.stage === 'completed') {
+                finalizeStreamingEntry();
+              }
+              break;
+            }
+            case 'error':
+            case 'final': {
+              finalizeStreamingEntry();
+              break;
+            }
+            default:
+              break;
+          }
+        },
+      }, undefined, options?.engineOverride);
     } finally {
       setRunning(false);
     }
-  }, [prompt, running, getSnapshot, sendBridge, log, setDetections]);
+  }, [running, getSnapshot, sendBridge, log, setDetections, finalizeStreamingEntry]);
+
+  const onRun = useCallback(() => {
+    void executeInstruction(prompt);
+  }, [executeInstruction, prompt]);
 
   const onStop = useCallback(() => {
     cancelRef.current.cancelled = true;
@@ -466,11 +571,112 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
     return `${completed}/${timeline.length} complete`;
   }, [timeline]);
 
-  const plannerSummary = planErrors.length
-    ? `${planErrors.length} error${planErrors.length === 1 ? '' : 's'}`
-    : planProgram
-      ? `${planSteps?.length || 0} step${(planSteps?.length || 0) === 1 ? '' : 's'}`
-      : 'Waiting';
+  const currentEngine = plannerMeta?.engine ?? plannerSettings.engine;
+
+  const plannerSummary = useMemo(() => {
+    const base = planErrors.length
+      ? `${planErrors.length} error${planErrors.length === 1 ? '' : 's'}`
+      : planProgram
+        ? `${planSteps?.length || 0} step${(planSteps?.length || 0) === 1 ? '' : 's'}`
+        : 'Waiting';
+    return `${base} · ${currentEngine}`;
+  }, [planErrors, planProgram, planSteps, currentEngine]);
+
+  const conversationSummary = useMemo(() => {
+    if (!conversation.length) return 'No messages';
+    return `${conversation.length} message${conversation.length === 1 ? '' : 's'}`;
+  }, [conversation.length]);
+
+  const plannerConfigSummary = useMemo(() => {
+    if (plannerSettings.engine === 'responses') {
+      const model = plannerSettings.responses.model.trim() || 'model?';
+      return `responses · ${model}`;
+    }
+    return 'legacy';
+  }, [plannerSettings.engine, plannerSettings.responses.model]);
+
+  const detectorSummary = useMemo(() => `threshold ${thr.toFixed(2)}`, [thr]);
+
+  const reasoningSelectValue = plannerSettings.responses.reasoningEffort ?? 'default';
+  const parallelSelectValue = plannerSettings.responses.parallelToolCalls === null
+    ? 'default'
+    : (plannerSettings.responses.parallelToolCalls ? 'true' : 'false');
+
+  const plannerRequestOverrides = useMemo(() => {
+    const responses = plannerMeta?.request?.responses;
+    if (!responses) return [] as string[];
+    return Object.entries(responses).map(([key, value]) => `${key}: ${describeOverrideValue(value)}`);
+  }, [plannerMeta]);
+
+  const plannerMessages = useMemo<PlannerMessageDisplay[]>(() => {
+    if (!plannerMeta?.messages || !Array.isArray(plannerMeta.messages)) return [];
+    return plannerMeta.messages
+      .map((entry, index) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const role = typeof entry.role === 'string' ? entry.role : 'assistant';
+        const content = Array.isArray(entry.content) ? entry.content : [];
+        const parts: string[] = [];
+        content.forEach((part: any) => {
+          if (!part || typeof part !== 'object') return;
+          const type = part.type;
+          if ((type === 'text' || type === 'output_text') && typeof part.text === 'string') {
+            parts.push(part.text);
+          } else if (type === 'tool_use') {
+            const name = typeof part.name === 'string' ? part.name : 'tool';
+            parts.push(`[tool:${name}] ${describeOverrideValue(part.input)}`);
+          } else if (type === 'tool_result') {
+            const output = part.output ?? part.text ?? part.content;
+            parts.push(`[tool result] ${describeOverrideValue(output)}`);
+          }
+        });
+        const text = parts.map((p) => p.trim()).filter((p) => p.length > 0).join('\n');
+        if (!text) return null;
+        return { id: `${index}-${role}`, role, text } as PlannerMessageDisplay;
+      })
+      .filter((value): value is PlannerMessageDisplay => value !== null);
+  }, [plannerMeta]);
+
+  const plannerRawJson = useMemo(() => {
+    if (!plannerMeta?.rawResponse) return null;
+    try {
+      return JSON.stringify(plannerMeta.rawResponse, null, 2);
+    } catch {
+      return '[unserializable]';
+    }
+  }, [plannerMeta]);
+
+  const plannerStreamDisplay = useMemo(() => {
+    return plannerStream
+      .filter((event) => event.type !== 'token' && event.type !== 'message_chunk' && event.type !== 'tool_arguments_delta')
+      .map((event, idx) => {
+        switch (event.type) {
+          case 'tool_use':
+            return { key: idx, text: `▶ ${event.tool ?? 'tool'} ${describeOverrideValue(event.arguments)}`, variant: 'tool' as const };
+          case 'tool_result':
+            return { key: idx, text: `◀ result ${describeOverrideValue(event.result)}`, variant: 'tool' as const };
+          case 'tool_arguments_complete':
+            return { key: idx, text: `Args ready ${event.callId}: ${event.arguments}`, variant: 'status' as const };
+          case 'status':
+            return { key: idx, text: `ℹ ${event.stage}${event.responseId ? ` (${event.responseId})` : ''}`, variant: 'status' as const };
+          case 'error':
+            return { key: idx, text: `⚠ ${event.message}`, variant: 'error' as const };
+          case 'final':
+            return { key: idx, text: 'Planner completed', variant: 'status' as const };
+        }
+        const fallbackType = (event as any)?.type ?? 'unknown';
+        return { key: idx, text: `${fallbackType}: ${describeOverrideValue(event as any)}`, variant: 'status' as const };
+      });
+  }, [plannerStream]);
+
+  const handleReplayLegacy = useCallback(() => {
+    if (!lastInstruction || running) return;
+    void executeInstruction(lastInstruction, { engineOverride: 'legacy', label: 'Replay legacy' });
+  }, [executeInstruction, lastInstruction, running]);
+
+  const handleReplayResponses = useCallback(() => {
+    if (!lastInstruction || running) return;
+    void executeInstruction(lastInstruction, { engineOverride: 'responses', label: 'Replay responses' });
+  }, [executeInstruction, lastInstruction, running]);
 
   const logSummary = logLines.length
     ? `${logLines.length} line${logLines.length === 1 ? '' : 's'}`
@@ -478,6 +684,9 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
 
   const statusChips = (
     <div className="flex flex-wrap gap-1 text-[10px] text-gray-300">
+      <span className="px-2 py-[3px] rounded bg-gray-800/70 border border-gray-700/70 uppercase tracking-wide">
+        Engine: {currentEngine}
+      </span>
       {status.detector && (
         <span className="px-2 py-[3px] rounded bg-gray-800/70 border border-gray-700/70 uppercase tracking-wide">Detector</span>
       )}
@@ -508,9 +717,9 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
       <div className="flex flex-col h-[calc(100%-24px)] overflow-hidden select-text">
         <div className="flex-1 overflow-y-auto pr-1 space-y-3">
           <CollapsibleSection
-            title="Prompt & Controls"
+            title="Prompt & Conversation"
             storageKey="agent.section.prompt"
-            summary={running ? 'Running' : 'Idle'}
+            summary={conversationSummary}
           >
             {statusChips}
             <div className="flex gap-2 items-start">
@@ -542,19 +751,11 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
               </div>
             </div>
             <div className="text-[10px] text-gray-500 mt-1">Ctrl/⌘ + Enter to run · Shift+Enter adds a newline.</div>
-            <div className="flex items-center gap-2 text-[10px] text-gray-300">
-              <SectionLabel label="Detector threshold" />
-              {[0.15, 0.20, 0.25, 0.30].map((v) => (
-                <button
-                  key={v}
-                  className={`px-1.5 py-[2px] rounded border ${Math.abs(thr - v) < 1e-6 ? 'bg-dji-blue text-white border-dji-blue' : 'bg-gray-800 text-gray-200 border-gray-700 hover:bg-gray-700'}`}
-                  onClick={() => { setThr(v); setActiveThreshold(v); log(`threshold set to ${v.toFixed(2)}`); }}
-                >{v.toFixed(2)}</button>
-              ))}
-              <span className="text-gray-500">active {thr.toFixed(2)}</span>
-            </div>
+            {running && streamingIdRef.current ? (
+              <div className="mt-1 text-[10px] text-amber-300 uppercase tracking-wide">Streaming planner response…</div>
+            ) : null}
             <div className="flex items-center justify-between mt-2">
-              <SectionLabel label="Conversation" hint={`${conversation.length} message${conversation.length === 1 ? '' : 's'}`} />
+              <SectionLabel label="Conversation" hint={conversationSummary} />
               <button
                 type="button"
                 className="px-2 py-[3px] text-[10px] uppercase tracking-wide rounded border border-gray-700/60 bg-gray-900/60 text-gray-300 hover:bg-gray-800"
@@ -562,23 +763,179 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
                 disabled={conversation.length === 0}
               >Clear</button>
             </div>
-            <div className="mt-1 bg-gray-900/60 border border-gray-800/70 rounded p-2 text-[11px] text-gray-200" style={{ maxHeight: 180, overflowY: 'auto' }}>
+            <div
+              ref={conversationContainerRef}
+              className="mt-1 bg-gray-900/60 border border-gray-800/70 rounded p-2 text-[11px] text-gray-200"
+              style={{ maxHeight: 270, overflowY: 'auto' }}
+            >
               {conversation.length === 0 && (
                 <div className="text-gray-500">No planner responses yet.</div>
               )}
-              {conversation.map((entry) => (
-                <div key={entry.id} className={`mb-2 last:mb-0 ${entry.role === 'user' ? 'text-white' : 'text-gray-200'}`}>
-                  <div className="text-[10px] uppercase tracking-wide text-gray-500 flex items-center gap-2">
-                    <span>{entry.role === 'user' ? 'Operator' : 'Planner'}</span>
-                    <span>•</span>
-                    <span>{formatTimestamp(entry.timestamp)}</span>
-                  </div>
-                  <div className={`mt-1 whitespace-pre-wrap leading-snug ${entry.role === 'user' ? 'bg-dji-blue/10 border border-dji-blue/40 rounded px-2 py-1 text-dji-blue' : 'bg-gray-800/60 border border-gray-700/70 rounded px-2 py-1 text-gray-200'}`}>
-                    {entry.text}
-                  </div>
-                </div>
+              {[...conversation]
+                .sort((a, b) => b.timestamp - a.timestamp)
+                .map((entry) => {
+                  const isPlanner = entry.role === 'planner';
+                  const roleLabel = isPlanner ? 'Planner' : 'Operator';
+                  const messageClasses = isPlanner
+                    ? 'bg-emerald-900/40 border border-emerald-500/60 text-emerald-200'
+                    : 'bg-dji-blue/10 border border-dji-blue/40 text-dji-blue';
+                  const headerClass = isPlanner ? 'text-emerald-300' : 'text-gray-500';
+                  return (
+                    <div key={entry.id} className="mb-2 last:mb-0">
+                      <div className={`text-[10px] uppercase tracking-wide flex items-center gap-2 ${headerClass}`}>
+                        <span>{roleLabel}</span>
+                        <span>•</span>
+                        <span>{formatTimestamp(entry.timestamp)}</span>
+                        {entry.streaming ? <span className="text-emerald-200">streaming…</span> : null}
+                      </div>
+                      <div className={`mt-1 whitespace-pre-wrap leading-snug rounded px-2 py-1 ${messageClasses}`}>
+                        {entry.text || (entry.streaming ? '…' : '')}
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          </CollapsibleSection>
+
+          <CollapsibleSection
+            title="Planner Config"
+            storageKey="agent.section.plannerConfig"
+            summary={plannerConfigSummary}
+          >
+            <div className="flex flex-wrap items-center gap-2 text-[10px] text-gray-200">
+              <select
+                className="bg-gray-900/70 border border-gray-700/70 text-xs px-2 py-1 rounded outline-none focus:ring-1 focus:ring-dji-blue"
+                value={plannerSettings.engine}
+                onChange={(e) => plannerSettingsStore.setEngine(e.target.value as PlannerEngine)}
+              >
+                <option value="legacy">Legacy (Chat Completions)</option>
+                <option value="responses">Responses API (experimental)</option>
+              </select>
+              <span className="text-gray-500">switch to experiment with new planner models</span>
+            </div>
+            {plannerSettings.engine === 'responses' && (
+              <div className="mt-2 grid gap-2 text-[10px] text-gray-200 sm:grid-cols-2">
+                <label className="flex flex-col gap-1">
+                  <span className="uppercase tracking-wide text-gray-500">Model</span>
+                  <input
+                    className="bg-gray-900/70 border border-gray-700/70 text-xs px-2 py-1 rounded outline-none focus:ring-1 focus:ring-dji-blue"
+                    value={plannerSettings.responses.model}
+                    onChange={(e) => plannerSettingsStore.setResponses('model', e.target.value)}
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="uppercase tracking-wide text-gray-500">Reasoning effort</span>
+                  <select
+                    className="bg-gray-900/70 border border-gray-700/70 text-xs px-2 py-1 rounded outline-none focus:ring-1 focus:ring-dji-blue"
+                    value={reasoningSelectValue}
+                    onChange={(e) => plannerSettingsStore.setResponses('reasoningEffort', e.target.value === 'default' ? null : e.target.value as ReasoningEffort)}
+                  >
+                    <option value="default">Default</option>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="uppercase tracking-wide text-gray-500">Temperature</span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    className="bg-gray-900/70 border border-gray-700/70 text-xs px-2 py-1 rounded outline-none focus:ring-1 focus:ring-dji-blue"
+                    value={plannerSettings.responses.temperature ?? ''}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      if (!value) {
+                        plannerSettingsStore.setResponses('temperature', null);
+                        return;
+                      }
+                      const num = Number(value);
+                      plannerSettingsStore.setResponses('temperature', Number.isFinite(num) ? num : null);
+                    }}
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="uppercase tracking-wide text-gray-500">Max output tokens</span>
+                  <input
+                    type="number"
+                    step="1"
+                    min="1"
+                    className="bg-gray-900/70 border border-gray-700/70 text-xs px-2 py-1 rounded outline-none focus:ring-1 focus:ring-dji-blue"
+                    value={plannerSettings.responses.maxOutputTokens ?? ''}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      if (!value) {
+                        plannerSettingsStore.setResponses('maxOutputTokens', null);
+                        return;
+                      }
+                      const num = Number(value);
+                      plannerSettingsStore.setResponses('maxOutputTokens', Number.isFinite(num) ? num : null);
+                    }}
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="uppercase tracking-wide text-gray-500">Parallel tool calls</span>
+                  <select
+                    className="bg-gray-900/70 border border-gray-700/70 text-xs px-2 py-1 rounded outline-none focus:ring-1 focus:ring-dji-blue"
+                    value={parallelSelectValue}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === 'default') {
+                        plannerSettingsStore.setResponses('parallelToolCalls', null);
+                      } else {
+                        plannerSettingsStore.setResponses('parallelToolCalls', val === 'true');
+                      }
+                    }}
+                  >
+                    <option value="default">Default</option>
+                    <option value="true">Enable</option>
+                    <option value="false">Disable</option>
+                  </select>
+                </label>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    className="accent-dji-blue"
+                    checked={plannerSettings.responses.webSearch}
+                    onChange={(e) => plannerSettingsStore.setResponses('webSearch', e.target.checked)}
+                  />
+                  <span className="uppercase tracking-wide text-gray-500">Enable web search</span>
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="uppercase tracking-wide text-gray-500">Prompt cache key</span>
+                  <input
+                    className="bg-gray-900/70 border border-gray-700/70 text-xs px-2 py-1 rounded outline-none focus:ring-1 focus:ring-dji-blue"
+                    value={plannerSettings.responses.promptCacheKey}
+                    onChange={(e) => plannerSettingsStore.setResponses('promptCacheKey', e.target.value)}
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="uppercase tracking-wide text-gray-500">Previous response ID</span>
+                  <input
+                    className="bg-gray-900/70 border border-gray-700/70 text-xs px-2 py-1 rounded outline-none focus:ring-1 focus:ring-dji-blue"
+                    value={plannerSettings.responses.previousResponseId}
+                    onChange={(e) => plannerSettingsStore.setResponses('previousResponseId', e.target.value)}
+                  />
+                </label>
+              </div>
+            )}
+          </CollapsibleSection>
+
+          <CollapsibleSection
+            title="Detector Config"
+            storageKey="agent.section.detector"
+            summary={detectorSummary}
+          >
+            <SectionLabel label="Detector threshold" />
+            <div className="mt-1 flex items-center gap-2 text-[10px] text-gray-300 flex-wrap">
+              {[0.15, 0.2, 0.25, 0.3].map((v) => (
+                <button
+                  key={v}
+                  className={`px-1.5 py-[2px] rounded border ${Math.abs(thr - v) < 1e-6 ? 'bg-dji-blue text-white border-dji-blue' : 'bg-gray-800 text-gray-200 border-gray-700 hover:bg-gray-700'}`}
+                  onClick={() => { setThr(v); setActiveThreshold(v); log(`threshold set to ${v.toFixed(2)}`); }}
+                >{v.toFixed(2)}</button>
               ))}
-              <div ref={conversationEndRef} />
+              <span className="text-gray-500">active {thr.toFixed(2)}</span>
             </div>
           </CollapsibleSection>
 
@@ -592,6 +949,36 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
                 {planErrors.map((e, i) => (
                   <div key={i}>• {e.message}{e.path ? ` (${e.path})` : ''}</div>
                 ))}
+              </div>
+            )}
+            <div className="mt-2 bg-gray-900/40 border border-gray-800/60 rounded p-2 text-[10px] text-gray-300 space-y-1">
+              <div>Engine: {currentEngine}</div>
+              {plannerRequestOverrides.length > 0 && (
+                <div>
+                  Overrides:
+                  <ul className="list-disc list-inside mt-1 space-y-[2px] text-gray-400">
+                    {plannerRequestOverrides.map((entry) => (
+                      <li key={entry}>{entry}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {plannerMeta?.highLevelProgram && !planErrors.length && (
+                <div className="text-gray-500">High-level plan captured</div>
+              )}
+            </div>
+            {lastInstruction && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  className="px-2 py-1 text-[10px] uppercase tracking-wide rounded border border-gray-700/70 bg-gray-900/60 text-gray-200 hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed"
+                  onClick={handleReplayLegacy}
+                  disabled={running || currentEngine === 'legacy'}
+                >Replay legacy</button>
+                <button
+                  className="px-2 py-1 text-[10px] uppercase tracking-wide rounded border border-gray-700/70 bg-gray-900/60 text-gray-200 hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed"
+                  onClick={handleReplayResponses}
+                  disabled={running || currentEngine === 'responses'}
+                >Replay responses</button>
               </div>
             )}
             {(planProgram || planProgramHigh) && (
@@ -618,6 +1005,46 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ getSnapshot, sendBridge,
                     </div>
                   ))}
                 </div>
+              </div>
+            )}
+            {plannerMessages.length > 0 && (
+              <div className="mt-2">
+                <SectionLabel label="Planner reasoning" hint={`${plannerMessages.length} message${plannerMessages.length === 1 ? '' : 's'}`} />
+                <div className="mt-1 bg-gray-900/60 border border-gray-800/70 rounded p-2 text-[10px] text-gray-200" style={{ maxHeight: 160, overflowY: 'auto' }}>
+                  {plannerMessages.map((msg) => (
+                    <div key={msg.id} className="mb-2 last:mb-0">
+                      <div className="uppercase tracking-wide text-gray-500">{msg.role}</div>
+                      <div className="mt-1 whitespace-pre-wrap leading-snug">{msg.text}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {plannerStreamDisplay.length > 0 && (
+              <div className="mt-2">
+                <SectionLabel label="Planning stream" hint={`${plannerStreamDisplay.length} event${plannerStreamDisplay.length === 1 ? '' : 's'}`} />
+                <div className="mt-1 bg-gray-900/60 border border-gray-800/70 rounded p-2 text-[10px] text-gray-200" style={{ maxHeight: 160, overflowY: 'auto' }}>
+                  {plannerStreamDisplay.map((entry) => {
+                    const variantClass = entry.variant === 'error'
+                      ? 'text-red-300'
+                      : entry.variant === 'tool'
+                        ? 'text-sky-300'
+                        : 'text-emerald-300';
+                    return (
+                      <div key={entry.key} className={`mb-1 last:mb-0 whitespace-pre-wrap leading-snug ${variantClass}`}>
+                        {entry.text}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {plannerRawJson && (
+              <div className="mt-2">
+                <details className="text-[10px] text-gray-400">
+                  <summary className="cursor-pointer text-gray-300">Raw planner response</summary>
+                  <pre className="mt-1 bg-gray-900/60 border border-gray-800/70 rounded p-2 text-[10px] text-gray-200 whitespace-pre-wrap max-h-48 overflow-y-auto">{plannerRawJson}</pre>
+                </details>
               </div>
             )}
           </CollapsibleSection>

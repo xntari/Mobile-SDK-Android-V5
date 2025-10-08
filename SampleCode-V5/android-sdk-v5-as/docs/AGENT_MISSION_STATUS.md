@@ -4,13 +4,48 @@
 
 ---
 
-## 1. TL;DR (Oct 03 2025 – Pre-Mission Orchestrator MVP)
-- **Goal** – Deliver three autonomous demos (“Inspection Sweep”, “Security Patrol”, “Environmental Survey”) driven by natural language and executed via the Mission Orchestrator + AGENT DSL.
-- **LLM strategy** – Single planner service (OpenAI API) with multiple prompt modes: mission graph planner, primitive DSL synthesiser, and summariser/reporting. Capability manifest enumerates available primitives + constraints.
-- **Execution stack** – Mission Orchestrator (deterministic state machine) interprets mission graphs, mutates context, and calls existing DSL/bridge primitives. Graph nodes support mutation (insert/replace/remove), pausing, aborts, and retries.
-- **Current focus** – Extend DSL with flight/mission primitives, implement orchestrator skeleton, design mission graph schema, and prototype manual graphs for the three demos.
-- **Temporary state** – `mission_fly_to` and `mission_relative_move` are re-enabled with waypoint-first planning plus orchestrator fallback (virtual-stick climbs when SDK waypoints refuse the move). Higher-order flows (`mission_waypoint_plan`, `mission_scan`, `mission_patrol`) remain offline until the mission-graph work resumes.
-- **Documentation discipline** – Update this file and related specs after every iteration. Include test logs, simulation traces, and field validation evidence.
+## 1. TL;DR (Oct 06 2025 – Planner Modernisation & Multi-Model Experiments)
+- **Goal** – Ship the natural-language autonomous demos (“Inspection Sweep”, “Security Patrol”, “Environmental Survey”) while transitioning the planner stack to the OpenAI Responses API with multi-model support (`gpt-4o-mini`, `gpt-5-mini`, `gpt-5-nano`).
+- **LLM strategy** – Dual planner engines (legacy Chat Completions + Responses API) behind one `/plan` endpoint. Operators can pick the engine/model, reasoning effort, temperature, max output tokens, web-search toggle, and caching knobs. Both engines share the same DSL validator and capability manifest.
+- **Execution stack** – Mission Orchestrator remains the deterministic executor (queue + guardrails). Planner outputs the same validated DSL, and Responses mode now streams live tokens/status/tool events to the Agent panel while still delivering the final payload + reasoning summary.
+- **Current focus** – Capture regression/field telemetry for the streaming planner, tighten replay UX (duration/cost hints), and document operator workflow for choosing engines and interpreting streaming statuses.
+- **Map tooling** – `map_lookup` is now an authorised planner tool. Additional tools (`directions_lookup`, `roads_snap`, `place_perimeter`) are on the roadmap; caching is shared so both engines return identical geometry.
+- **Planner API** – `/plan` requests accept optional `engine` (`legacy`/`responses`) and `responses{ model, reasoning_effort, temperature, max_output_tokens, parallel_tool_calls, web_search, prompt_cache_key, previous_response_id }` overrides so operators/tests can experiment without changing global config. Responses from the Responses engine now echo the conversation history (`messages`) and raw API payload alongside the normalised program; legacy replies continue to include `high_level_program` + validated `program`.
+- **UI integration** – Agent panel exposes engine switching, Responses tuning knobs, replay buttons (“Replay legacy” / “Replay responses”), and the reasoning log/raw payload for each plan so operators can debug planner behaviour without leaving the app.
+
+### 1.2 Planner service quickstart
+
+```
+cd tools
+python3 -m venv .venv
+source .venv/bin/activate
+pip install fastapi uvicorn pydantic openai googlemaps
+export OPENAI_API_KEY=sk-...
+export GOOGLE_MAPS_API_KEY=...
+python planner_service.py
+
+# Sanity checks
+curl -sS -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"instruction":"take off and hover at 20 meters"}' \
+  http://127.0.0.1:9002/plan | jq
+
+curl -sS -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"instruction":"find nearest hospital","engine":"responses",
+       "responses":{"model":"gpt-4o-mini","reasoning_effort":"medium"}}' \
+  http://127.0.0.1:9002/plan | jq
+
+# Streaming reasoning (Responses only)
+curl -sS -N -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"instruction":"scan the nearest park","engine":"responses"}' \
+  http://127.0.0.1:9002/plan_stream
+```
+
+The service defaults to the legacy engine. Set `PLANNER_ENGINE=responses` to make the new path the default; the client UI can override per-request.
+- Streaming responses return a JSONL feed with `token`, `message_chunk`, `status`, `tool_use`, `tool_result`, and `final` events. The Agent panel maps these into the conversation/streaming log so operators can watch plan synthesis unfold in real time.
+- **Documentation discipline** – Update this file and related specs after every iteration. Capture experiment settings (model, reasoning effort, cache key) with each test log.
 
 ### 1.1 Strategic update – LLM centric orchestration
 - **Problem** – The current orchestrator carries too much heuristic logic (manual VS fallbacks, chained waypoint handling, timeout juggling). This does not scale to long autonomous flights and hides context from the planner.
@@ -24,6 +59,7 @@
      - *Autopilot missions* – planner generates `mission_waypoint_plan` (loops orbit/patrol). Orchestrator streams progress + alerts (battery, obstacle) back to planner; planner mutates graph as needed (e.g., “pause patrol, investigate blue car”).
   4. **Planner clarifications** – Planner is encouraged (prompt examples) to ask follow-up questions when polygon, altitude band, or timing is missing (“Which parking lot? Provide polygon or tap on map.”). Orchestrator relays the question to the operator UI.
   5. **Event bridge** – Orchestrator emits structured events (waypoint reached, stall detected, VS conflict, manual override engaged). Planner subscribes and can replan mid-flight.
+- 6. **Multi-model + streaming** – Planner service now advertises available engines/models, exposes reasoning effort/web-search toggles, and streams interim responses (tool calls + text) when the Responses API is selected. UI surfaces the live trace so operators see progress instead of waiting for a single 20 s blob.
 - **Outcome** – Drone missions become planner-driven programs with reliable execution primitives; orchestrator sticks to deterministic mechanics (queue, telemetry, safety checks). This unlocks the demo stories (patrol with live adjustments, inspection loops with photo tasks, environmental surveys with adaptive follow-ups).
 
 Implementation phases:
@@ -159,10 +195,11 @@ These behaviours **must** work at all times. Update the planner prompt template 
   4. Instrument the orchestrator with structured logs for fallback usage and residual offsets so testers can attach evidence when a climb still fails (initial trace hooks now record absolute targets and fallback triggers).
   5. Sync capability manifest + `docs/AGENT_DSL.md` whenever primitive semantics change; include a changelog note in this status doc.
 
--- **Status update (geometry feed)** – `context.map.features` now carries only the essentials (mission preview, manual/POI targets, aircraft/home markers). Static catalogs are dropped; the planner acquires additional geometry by calling `map_lookup` and using the returned payload.
+- **Status update (geometry feed)** – `context.map.features` now carries only the essentials (mission preview, manual/POI targets, aircraft/home markers). Static catalogs are dropped; the planner acquires additional geometry by calling `map_lookup` and using the trimmed payload (`formatted_address`, `place_id`, `types`, `viewport`, optional `distance_m`, and `limit`).
 - **Tooling** – run `node tools/osm_build_catalog.js [input] [output]` to refresh the cached OpenStreetMap-derived catalog (`src/config/osmFeatures.json`) whenever coverage needs to grow.
 - **Coverage** – by default the catalog builder now queries the broader Bay Area (≈36.8–38.7°N, −123.1––121.2°W). Tweak `--bbox`/`--tile` if you only need a smaller slice or want even denser tiling. Each run rewrites both `dji-controller-interface/src/config/osmFeatures.json` and the mirrored `tools/data/object_memory/osm_catalog.json`.
-- **Live lookups** – the planner calls `map_lookup` (Google Places) directly via OpenAI function calling. The interpreter returns `{results, best, query, anchor, radius_m, types}` for immediate use in mission planning; no catalog injection required.
+- **Live lookups** – the planner calls `map_lookup` (Google Places) directly via OpenAI function calling. The interpreter returns `{results, best, query, anchor, radius_m, types, limit}` with results sorted by proximity (default 5) and minimal metadata; no catalog injection required.
+- **Road/route tooling (planned)** – upcoming `directions_lookup`, `roads_snap`, and `place_perimeter` tools will reuse the same plumbing to deliver polylines/perimeters once the Responses planner stabilises.
 
 - **Acceptance criteria for Milestone A**
   - All prompts listed in “IMPORTANT CHECKS” succeed end-to-end (planner → orchestrator → bridge) in simulator runs, including altitude climbs, horizontal offsets, and coordinate fly-to commands.

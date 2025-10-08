@@ -2,22 +2,22 @@
 
 ## Goal
 Provide a reliable, low-latency way for the planner/orchestrator to resolve geography (POIs, roads, perimeters) without depending exclusively on bulk OSM bundles. The new path should:
-- Allow emitting a `map_lookup` tool from the planner DSL
+- Allow both planner engines (legacy Chat Completions + new Responses API) to issue `map_lookup` tool calls directly during reasoning
 - Call a pluggable backend (starting with Google Maps Places API)
 - Cache results locally (object memory + on-disk) for repeat usage and offline fallback
 - Feed resolved features back into `context.map.features` for follow-up planning commands
 - Prevent Electron/webpack from bundling large static JSON files that blow the Node heap
 
 ## Architecture Overview
-1. **Planner tool** – `map_lookup { query, near?, radius_m?, types? }`
-   - The planner uses OpenAI function calling to invoke `map_lookup` during program synthesis.
-   - When the model calls the tool, the planner service hits Google Places, returns `{ results: [...], best: {...}, query, anchor, radius_m, types }`, and the conversation continues. No server-side rewriting of the DSL output.
+1. **Planner tool** – `map_lookup { query, near?, radius_m?, types?, limit? }`
+   - The planner uses OpenAI function calling to invoke `map_lookup` during program synthesis. This is supported in both planner modes.
+   - When the model calls the tool, the planner service hits Google Places, returns `{ results: [...], best: {...}, query, anchor, radius_m, types, limit }`, and the conversation continues. Results are trimmed to the `limit` closest matches (default 5) with distance metadata when an anchor is supplied. The final DSL output references the captured variables; the tool call itself never needs to appear in the execution plan.
 
 2. **Backend handler** – Node/Electron main process or a helper module
    - Call Google Places Text Search (later extend with Details, Roads API, Mapbox tilequery, etc.)
    - Accept environment-configured API key (`GOOGLE_MAPS_API_KEY`)
    - Respect quotas (rate limit, exponential backoff)
-   - Normalize responses to `{ id, name, category, latitude, longitude, metadata }`
+- Normalize responses to `{ id, name, category, latitude, longitude, metadata }` where `metadata` is trimmed to `formatted_address`, `place_id`, `types`, and `viewport` plus `distance_m` when an anchor is provided.
 
 3. **Caching**
    - In-memory cache keyed by `(query, near, radius, types)` to avoid redundant external calls
@@ -42,10 +42,16 @@ Provide a reliable, low-latency way for the planner/orchestrator to resolve geog
 
 > **Note:** Google Places does not return building footprints. When precise perimeters are required, the planner should approximate from `geometry.viewport`, ask the operator for a drawn polygon, or fall back to cached OSM/mission data.
 
-- Encourage planners to call `map_lookup` with explicit `types` (e.g., `['school']`, `['hospital']`, `['route']`) and a `near` anchor derived from `context.telemetry` when available.
+- Encourage planners to call `map_lookup` with explicit `types` (e.g., `['school']`, `['hospital']`, `['route']`), a `near` anchor derived from `context.telemetry`, and an appropriate `limit` when only a handful of candidates are needed.
 - Tool responses arrive via the function-calling channel: `{results:[...], best:{...}, query, anchor, radius_m, types}`. Capture that data in a `let` binding and reference it directly when building missions.
 - Context passed to the LLM contains only the essentials (telemetry, mission preview, manual/POI targets, aircraft/home markers); static catalog entries are removed to avoid prompt pollution.
 - Default behaviour when an operator does not provide a reference location: planners should assume the aircraft’s telemetry latitude/longitude as the center and start with ≈1 km search radius, expanding only when necessary.
+
+## Planner engine alignment (Oct 2025)
+- **Dual-engine support** – The planner service now maintains a legacy (Chat Completions) implementation and a new Responses API variant. Both surface the same `map_lookup` contract, and callers can pick an engine/model at runtime.
+- **Streaming + reasoning summaries** – The Responses path emits streaming tokens, status updates, and tool call/results (e.g., `map_lookup`, `mission_waypoint_plan`). The Agent panel now visualises these events inline with the conversation so operators can monitor long-running plans in real time.
+- **Cache coordination** – Regardless of planner engine, tool invocations resolve through the shared cache/database. This keeps behaviour identical and enables A/B testing without duplicating geodata fetches.
+- **Future tools** – We plan to graduate additional map-aware tools (`directions_lookup`, `roads_snap`, `place_perimeter`) once the Responses planner is stable. These will reuse the same invocation/caching layer and expose narrow schemas so programs can consume polylines and polygons safely.
 
 ## Verifying Google Maps connectivity
 1. Ensure `GOOGLE_MAPS_API_KEY` (or `MAP_LOOKUP_API_KEY`) is exported in the shell before launching the Electron app: `export GOOGLE_MAPS_API_KEY=...`.
@@ -55,7 +61,14 @@ Provide a reliable, low-latency way for the planner/orchestrator to resolve geog
    ```
    (Alternatively, call the `mapLookup` helper directly via the renderer devtools console.)
 3. Check the Electron main-process logs for `map_lookup → N results` lines to verify the orchestrator received data and cached it in `externalMapFeatureStore`.
-4. Issue a planner request (e.g., “Fly to the nearest library”) and confirm the returned program includes a `map_lookup` call anchored near the telemetry coordinates. If the planner still asks for a location, inspect the prompt logs or planner trace for errors.
+4. With the planner service running, sanity check the HTTP API:
+   ```bash
+   curl -sS -X POST \
+     -H 'Content-Type: application/json' \
+     -d '{"instruction":"find the nearest library","engine":"responses"}' \
+     http://127.0.0.1:9002/plan | jq
+   ```
+   Confirm the response contains a `program` field and the reasoning payload lists the `map_lookup` tool call anchored near current telemetry. If the planner still asks for a location, inspect the prompt logs or planner trace for errors.
 
 ## Implementation Tasks
 1. **Backend service**
@@ -73,11 +86,14 @@ Provide a reliable, low-latency way for the planner/orchestrator to resolve geog
    - [x] Add `map_lookup` tool in DSL manifest (`tools/planner_service.py`, `agent_capability_manifest.json`) and orchestrator switch (done this iteration)
    - [ ] Update regression prompts to include `map_lookup` usage and ensure planner asks clarifying questions appropriately
    - [ ] Document new tool semantics in `docs/AGENT_DSL.md`
+   - [ ] Implement Responses-based planner module using `client.responses.create`, mirroring tool schemas and caching behaviour
+   - [ ] Provide engine/model selection (legacy vs responses) via planner service flags and UI controls
 
 4. **UI / Dev Experience**
    - [ ] Add diagnostics panel showing the last `map_lookup` queries, API usage, cache hits/misses
-   - [ ] Provide settings UI for API key management, provider selection, and cache clearing
+   - [ ] Provide settings UI for API key management, provider selection, cache clearing, and planner engine/model selection
    - [ ] Disable heavy OSM bundle imports permanently (replace with optional lazy loaders or command-line scripts)
+   - [ ] Surface streaming/step-by-step planner output in the UI when using the Responses API (intermediate tool call log, reasoning summary)
 
 5. **Testing**
    - [ ] Unit tests for `mapLookup` helper (mocked HTTP replies, caching behavior)

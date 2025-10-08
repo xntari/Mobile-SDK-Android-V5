@@ -1,6 +1,7 @@
 import { analyzeDetect, Detection } from './visionClient';
 import { bridgeManager } from '../bridgeManager';
 import { missionPlannerStore } from '../state/missionPlanner';
+import { plannerSettingsStore, type PlannerEngine } from '../state/plannerSettings';
 import { addMetersToLatLon, bearingOffsetToMeters, normalizeHeadingDegrees, EARTH_RADIUS_METERS } from '../utils/geo';
 import { collectPlannerContext } from './plannerContext';
 import type { PlannedMissionEntry, MissionEntryKind, OrbitMode, PoiTarget } from '../types/missionPlanner';
@@ -43,6 +44,17 @@ interface PlannerStatusSnapshot {
 }
 
 let lastPlannerStatus: PlannerStatusSnapshot | null = null;
+
+export interface PlannerMetaSnapshot {
+  engine: string;
+  request?: {
+    engine?: string;
+    responses?: Record<string, any>;
+  };
+  rawResponse?: any;
+  messages?: any[];
+  highLevelProgram?: any;
+}
 
 function getPlannerStatusPayload(): PlannerStatusSnapshot | undefined {
   if (!lastPlannerStatus) return undefined;
@@ -487,6 +499,84 @@ export interface OrchestratorOptions {
   isCancelled?: () => boolean;
   onTrace?: (line: string, kind?: 'tool'|'var'|'info'|'warn'|'error') => void;
   onPlanErrors?: (errors: Array<{ message: string; path?: string }>) => void;
+  onPlannerMeta?: (meta: PlannerMetaSnapshot) => void;
+  onPlannerStream?: (event: PlannerStreamEvent) => void;
+}
+
+export type PlannerStreamEvent =
+  | { type: 'token'; role?: string; text: string; sequence?: number }
+  | { type: 'message_chunk'; role?: string; text: string; sequence?: number }
+  | { type: 'tool_arguments_delta'; callId: string; delta: string; sequence?: number }
+  | { type: 'tool_arguments_complete'; callId: string; arguments: string }
+  | { type: 'tool_use'; tool?: string; callId?: string; arguments?: any }
+  | { type: 'tool_result'; tool?: string; callId?: string; result?: any }
+  | { type: 'status'; stage: string; responseId?: string }
+  | { type: 'final'; payload: any }
+  | { type: 'error'; message: string };
+
+function normalizePlannerStreamEvent(raw: any): PlannerStreamEvent {
+  if (!raw || typeof raw !== 'object') {
+    return { type: 'error', message: 'Malformed planner stream event' };
+  }
+
+  const baseType = typeof raw.type === 'string' ? raw.type : '';
+  const type = baseType.toLowerCase();
+
+  const role = typeof raw.role === 'string' ? raw.role : undefined;
+  const sequence = typeof raw.sequence === 'number' ? raw.sequence : (typeof raw.sequence_number === 'number' ? raw.sequence_number : undefined);
+
+  switch (type) {
+    case 'token':
+      return { type: 'token', role, text: String(raw.text ?? ''), sequence };
+    case 'message_chunk':
+    case 'message':
+      return { type: 'message_chunk', role, text: String(raw.text ?? ''), sequence };
+    case 'tool_arguments_delta': {
+      const callId = typeof raw.call_id === 'string' ? raw.call_id : (typeof raw.callId === 'string' ? raw.callId : '');
+      return { type: 'tool_arguments_delta', callId, delta: String(raw.delta ?? ''), sequence };
+    }
+    case 'tool_arguments_complete': {
+      const callId = typeof raw.call_id === 'string' ? raw.call_id : (typeof raw.callId === 'string' ? raw.callId : '');
+      return { type: 'tool_arguments_complete', callId, arguments: String(raw.arguments ?? '') };
+    }
+    case 'tool_use':
+      return {
+        type: 'tool_use',
+        tool: typeof raw.tool === 'string' ? raw.tool : undefined,
+        callId: typeof raw.call_id === 'string' ? raw.call_id : (typeof raw.callId === 'string' ? raw.callId : undefined),
+        arguments: raw.arguments ?? raw.input,
+      };
+    case 'tool_result':
+      return {
+        type: 'tool_result',
+        tool: typeof raw.tool === 'string' ? raw.tool : undefined,
+        callId: typeof raw.call_id === 'string' ? raw.call_id : (typeof raw.callId === 'string' ? raw.callId : undefined),
+        result: raw.result ?? raw.output,
+      };
+    case 'status':
+      return {
+        type: 'status',
+        stage: typeof raw.stage === 'string' ? raw.stage : baseType || 'status',
+        responseId: typeof raw.response_id === 'string' ? raw.response_id : (typeof raw.responseId === 'string' ? raw.responseId : undefined),
+      };
+    case 'final':
+      return { type: 'final', payload: raw.payload };
+    case 'error':
+      return { type: 'error', message: typeof raw.message === 'string' ? raw.message : 'Planner stream error' };
+    default: {
+      if (raw.payload !== undefined) {
+        return { type: 'final', payload: raw.payload };
+      }
+      if (raw.message) {
+        return { type: 'error', message: String(raw.message) };
+      }
+      return {
+        type: 'status',
+        stage: baseType || 'unknown',
+        responseId: typeof raw.response_id === 'string' ? raw.response_id : undefined,
+      };
+    }
+  }
 }
 
 function pickBest(dets: Detection[]): Detection {
@@ -514,23 +604,124 @@ async function flushUI() {
 export async function runInstruction(
   instruction: string,
   opts: OrchestratorOptions,
-  plannerUrl: string = (globalThis as any).__PLANNER_URL__ || 'http://127.0.0.1:9002/plan'
+  plannerUrl?: string,
+  engineOverride?: PlannerEngine,
 ) {
   const { log } = opts;
   try {
+    const resolvedPlannerUrl = plannerUrl ?? ((globalThis as any).__PLANNER_URL__ || 'http://127.0.0.1:9002/plan');
+    const streamUrl = resolvedPlannerUrl.replace(/\/plan$/, '/plan_stream');
     const plannerContext = collectPlannerContext();
     const statusPayload = getPlannerStatusPayload();
+    const plannerSettings = plannerSettingsStore.getSnapshot();
+    const engineToUse: PlannerEngine = engineOverride ?? plannerSettings.engine;
     const payload: Record<string, any> = { instruction, context: plannerContext };
     if (statusPayload) {
       payload.status = statusPayload;
     }
-    const resp = await fetch(plannerUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+    payload.engine = engineToUse;
+    if (engineToUse === 'responses') {
+      const responsesPayload: Record<string, any> = {};
+      const resp = plannerSettings.responses;
+      if (resp.model.trim()) {
+        responsesPayload.model = resp.model.trim();
+      }
+      if (resp.reasoningEffort) {
+        responsesPayload.reasoning_effort = resp.reasoningEffort;
+      }
+      if (typeof resp.temperature === 'number' && Number.isFinite(resp.temperature)) {
+        responsesPayload.temperature = resp.temperature;
+      }
+      if (typeof resp.maxOutputTokens === 'number' && Number.isFinite(resp.maxOutputTokens)) {
+        responsesPayload.max_output_tokens = resp.maxOutputTokens;
+      }
+      if (resp.parallelToolCalls !== null) {
+        responsesPayload.parallel_tool_calls = resp.parallelToolCalls;
+      }
+      if (resp.webSearch) {
+        responsesPayload.web_search = true;
+      }
+      if (resp.promptCacheKey.trim()) {
+        responsesPayload.prompt_cache_key = resp.promptCacheKey.trim();
+      }
+      if (resp.previousResponseId.trim()) {
+        responsesPayload.previous_response_id = resp.previousResponseId.trim();
+      }
+      if (Object.keys(responsesPayload).length) {
+        payload.responses = responsesPayload;
+      }
+    }
+    let plan: any | null = null;
+    let streamSucceeded = false;
+
+    try {
+      const streamResp = await fetch(streamUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (streamResp.ok && streamResp.body) {
+        const reader = streamResp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newlineIndex;
+          while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
+            const line = buffer.slice(0, newlineIndex).trim();
+            buffer = buffer.slice(newlineIndex + 1);
+            if (!line) continue;
+            try {
+              const raw = JSON.parse(line);
+              const event = normalizePlannerStreamEvent(raw);
+              opts.onPlannerStream?.(event);
+              if (event.type === 'final') {
+                plan = event.payload;
+              }
+            } catch (error) {
+              opts.onPlannerStream?.({ type: 'error', message: `Failed to parse planner stream: ${String(error)}` });
+            }
+          }
+        }
+        if (buffer.trim()) {
+          try {
+            const raw = JSON.parse(buffer.trim());
+            const event = normalizePlannerStreamEvent(raw);
+            opts.onPlannerStream?.(event);
+            if (event.type === 'final') {
+              plan = event.payload;
+            }
+          } catch (error) {
+            opts.onPlannerStream?.({ type: 'error', message: `Failed to parse planner stream: ${String(error)}` });
+          }
+        }
+        streamSucceeded = plan != null;
+      }
+    } catch (error) {
+      log(`Planner stream unavailable (${String(error)})`);
+      opts.onPlannerStream?.({ type: 'error', message: `Planner stream unavailable (${String(error)})` });
+    }
+
+    if (!streamSucceeded) {
+      const resp = await fetch(resolvedPlannerUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      plan = await resp.json();
+    }
+
+    const engineReported = plan?.engine ?? engineToUse;
+    opts.onPlannerMeta?.({
+      engine: engineReported,
+      request: { engine: payload.engine, responses: payload.responses },
+      rawResponse: plan?.raw_response,
+      messages: Array.isArray(plan?.messages) ? plan.messages : undefined,
+      highLevelProgram: plan?.high_level_program,
     });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const plan = await resp.json();
     if (plan?.high_level_program) { try { opts.onHighLevelProgram?.(plan.high_level_program); } catch {} }
     // Validation errors from planner
     if (Array.isArray((plan as any)?.errors) && (plan as any).errors.length) {

@@ -86,7 +86,7 @@
     {
       "id": "map_lookup",
       "category": "map",
-      "description": "Resolve a named point of interest using the connected map service.",
+      "description": "Resolve a named point of interest using the connected map service (results sorted by proximity).",
       "args": {
         "query": { "type": "string", "required": true },
         "near": {
@@ -102,7 +102,8 @@
           "type": "array",
           "items": { "type": "string" },
           "optional": true
-        }
+        },
+        "limit": { "type": "integer", "min": 1, "max": 20, "optional": true }
       },
       "returns": {
         "results": { "type": "array", "items": { "type": "object" } },
